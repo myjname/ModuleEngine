@@ -1177,7 +1177,7 @@ mod tests {
             "physical file replay/restored path is accepted"
         );
         document.asset_manifest = serde_json::Value::Null;
-        document.game = Some(module_engine_core::GameProject::demo());
+        document.game = Some(module_engine_two_arenas::demo_project());
         document.game.as_mut().unwrap().audio_cues.clear();
         document
             .game
@@ -1206,7 +1206,7 @@ mod tests {
             .register("known-image", "assets/known.png", &fixture.root)
             .unwrap();
         initial.asset_manifest = serde_json::to_value(existing).unwrap();
-        initial.game = Some(module_engine_core::GameProject::demo());
+        initial.game = Some(module_engine_two_arenas::demo_project());
         initial.game.as_mut().unwrap().audio_cues.clear();
         let scene = initial.game.as_ref().unwrap().entry_scene.clone();
         let original = initial.game.as_ref().unwrap().scenes[&scene].objects[0]

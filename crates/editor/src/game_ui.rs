@@ -8,8 +8,12 @@ use crate::{
     player,
 };
 use eframe::egui::{self, Color32, Vec2};
+#[cfg(test)]
+use module_engine_arpg::{ArpgInput, ExecutionGraphExt, GameInputExt};
 use module_engine_core::*;
 use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind};
+#[cfg(test)]
+use module_engine_two_arenas::ProjectExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1292,10 +1296,10 @@ impl GameWorkbench {
         self.game_document = Some(candidate);
         Ok(())
     }
-    /// Game follows its authored starting player while retaining its own orbit.
+    /// Follow the installed presentation target while retaining Game's orbit.
     fn frame_game_start(host: &mut GameHost) {
-        if let Some(player) = host.session.state().player() {
-            host.camera.target = player.object.transform.translation;
+        if let Some(target) = host.frame_target() {
+            host.camera.target = target;
         }
     }
     /// Compile edited source in the background; current instances keep running.
@@ -1464,7 +1468,7 @@ impl GameWorkbench {
             // Retain every pressed edge until the actor accepts its packet;
             // held movement is coalesced by the worker independently.
             if active_playing {
-                let pressed = input.attack || input.interact || input.restart;
+                let pressed = !input.actions.is_empty() || input.restart;
                 if input.restart {
                     self.worker_inputs.clear();
                     self.worker_inputs.push_front(input);
@@ -1472,7 +1476,7 @@ impl GameWorkbench {
                     && self
                         .worker_inputs
                         .back()
-                        .is_some_and(|queued| !queued.attack && !queued.interact && !queued.restart)
+                        .is_some_and(|queued| queued.actions.is_empty() && !queued.restart)
                 {
                     *self.worker_inputs.back_mut().unwrap() = input;
                 } else if self.worker_inputs.len() < 128 {
@@ -1695,15 +1699,27 @@ impl GameWorkbench {
             let size = ui.available_size().max(Vec2::splat(1.));
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
             let input = if *playing {
-                player::read_input(ui, &response, rect, host.camera)
+                player::read_input_for(
+                    host.presentation_id(),
+                    ui,
+                    &response,
+                    rect,
+                    host.camera,
+                    true,
+                )
             } else {
                 GameInput::default()
             };
-            let aim = (*playing
-                && response.hovered()
-                && ui.input(|i| i.focused)
-                && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()))
-            .then_some(input.aim_world);
+            let aim = player::preview_aim_for(
+                host.presentation_id(),
+                host.session.state(),
+                &input,
+                *playing
+                    && response.hovered()
+                    && ui.input(|i| i.focused)
+                    && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
+                false,
+            );
             merge_view_input(
                 &mut self.input,
                 input,
@@ -1760,7 +1776,14 @@ impl GameWorkbench {
                         Color32::WHITE,
                     );
                 }
-                if player::draw_hud(ui, rect, host.session.state(), host.camera, aim) {
+                if player::draw_hud_for(
+                    host.presentation_id(),
+                    ui,
+                    rect,
+                    host.session.state(),
+                    host.camera,
+                    aim,
+                ) {
                     let _ = self.restart_game();
                 }
             }
@@ -1781,15 +1804,27 @@ impl GameWorkbench {
         let size = ui.available_size().max(Vec2::splat(1.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let input = if playing {
-            player::read_input(ui, &response, rect, snapshot.camera)
+            player::read_input_for(
+                snapshot.presentation_ids.first().map(String::as_str),
+                ui,
+                &response,
+                rect,
+                snapshot.camera,
+                true,
+            )
         } else {
             GameInput::default()
         };
-        let aim = (playing
-            && response.hovered()
-            && ui.input(|input| input.focused)
-            && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()))
-        .then_some(input.aim_world);
+        let aim = player::preview_aim_for(
+            snapshot.presentation_ids.first().map(String::as_str),
+            &snapshot.state,
+            &input,
+            playing
+                && response.hovered()
+                && ui.input(|input| input.focused)
+                && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
+            false,
+        );
         merge_view_input(
             &mut self.input,
             input,
@@ -1840,7 +1875,14 @@ impl GameWorkbench {
                 Color32::LIGHT_GRAY,
             );
         }
-        if player::draw_hud(ui, rect, &snapshot.state, snapshot.camera, aim) {
+        if player::draw_hud_for(
+            snapshot.presentation_ids.first().map(String::as_str),
+            ui,
+            rect,
+            &snapshot.state,
+            snapshot.camera,
+            aim,
+        ) {
             let _ = self.restart_game();
         }
         ui.ctx().request_repaint_after(if playing {
@@ -2982,12 +3024,27 @@ fn merge_view_input(current: &mut GameInput, next: GameInput, active: bool) {
     if !active {
         return;
     }
-    let attack = current.attack || next.attack;
-    let interact = current.interact || next.interact;
+    let mut actions = current.actions.clone();
+    actions.extend(next.actions.iter().cloned());
+    // A second visible pane may update held values after the pane that saw a
+    // press. Retain that occurrence's captured context until a new press
+    // explicitly supplies replacement context for the same keys.
+    let mut action_values = if current.actions.is_empty() {
+        BTreeMap::new()
+    } else {
+        current.action_values.clone()
+    };
+    if !next.actions.is_empty() {
+        action_values.extend(
+            next.action_values
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
     let restart = current.restart || next.restart;
     *current = next;
-    current.attack = attack;
-    current.interact = interact;
+    current.actions = actions;
+    current.action_values = action_values;
     current.restart = restart;
 }
 fn unique_name<'a>(base: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
@@ -3854,9 +3911,12 @@ mod tests {
                 .execution_eq(&document)
         );
         workbench.worker_inputs = (0..128)
-            .map(|_| GameInput {
-                attack: true,
-                ..Default::default()
+            .map(|_| {
+                ArpgInput {
+                    attack: true,
+                    ..Default::default()
+                }
+                .into_input()
             })
             .collect();
         workbench.tick(0., false).unwrap();
@@ -3866,9 +3926,12 @@ mod tests {
         );
         let epoch = workbench.game_snapshot().unwrap().epoch;
         workbench.worker_inputs = (0..128)
-            .map(|_| GameInput {
-                attack: true,
-                ..Default::default()
+            .map(|_| {
+                ArpgInput {
+                    attack: true,
+                    ..Default::default()
+                }
+                .into_input()
             })
             .collect();
         workbench.input.restart = true;
@@ -4392,20 +4455,73 @@ mod tests {
         let mut workbench = GameWorkbench::default();
         merge_view_input(
             &mut workbench.input,
-            GameInput {
+            ArpgInput {
                 movement: [1., 0.],
                 attack: true,
                 aim_world: [4., 0., 2.],
                 ..Default::default()
-            },
+            }
+            .into_input(),
             true,
         );
         merge_view_input(&mut workbench.input, GameInput::default(), false);
-        assert!(workbench.input.attack);
-        assert_eq!(workbench.input.aim_world, [4., 0., 2.]);
-        assert_eq!(workbench.input.movement, [1., 0.]);
+        assert!(workbench.input.attack());
+        assert_eq!(workbench.input.aim_world(), [4., 0., 2.]);
+        assert_eq!(workbench.input.movement(), [1., 0.]);
         workbench.tick(1. / 60., true).unwrap();
         assert_eq!(workbench.input, GameInput::default());
+    }
+    #[test]
+    fn active_pane_held_updates_preserve_pressed_context_until_frame_consumption() {
+        let mut workbench = GameWorkbench::default();
+        merge_view_input(
+            &mut workbench.input,
+            ArpgInput {
+                attack: true,
+                aim_world: [4., 0., 2.],
+                ..Default::default()
+            }
+            .into_input(),
+            true,
+        );
+        merge_view_input(
+            &mut workbench.input,
+            ArpgInput {
+                movement: [1., 0.],
+                aim_world: [8., 0., 9.],
+                ..Default::default()
+            }
+            .into_input(),
+            true,
+        );
+        assert!(workbench.input.attack());
+        assert_eq!(workbench.input.aim_world(), [4., 0., 2.]);
+        assert_eq!(workbench.input.values["aim_world"], json!([8., 0., 9.]));
+        assert_eq!(workbench.input.movement(), [1., 0.]);
+        // Another module's edge adds its own captured data without erasing
+        // the earlier action's context or copying held values into it.
+        merge_view_input(
+            &mut workbench.input,
+            GameInput {
+                actions: BTreeSet::from(["puzzle.use".into()]),
+                action_values: BTreeMap::from([("puzzle.target".into(), json!(17))]),
+                values: BTreeMap::from([("movement".into(), json!([-1., 0.]))]),
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(workbench.input.attack());
+        assert!(workbench.input.pressed("puzzle.use"));
+        assert_eq!(
+            workbench.input.action_values["aim_world"],
+            json!([4., 0., 2.])
+        );
+        assert_eq!(workbench.input.action_values["puzzle.target"], json!(17));
+        assert_eq!(workbench.input.movement(), [-1., 0.]);
+        workbench.tick(1. / 60., true).unwrap();
+        assert_eq!(workbench.input, GameInput::default());
+        workbench.tick(1. / 60., true).unwrap();
+        assert!(workbench.input.actions.is_empty());
     }
     #[test]
     fn source_component_defaults_create_real_runtime_fields_in_an_empty_scene() {
@@ -5130,7 +5246,9 @@ mod tests {
                 .components["health"]["maximum"],
             60.
         );
-        restored.validate().unwrap();
+        restored
+            .validate_with_registry(&module_engine_arpg::registry())
+            .unwrap();
     }
     #[test]
     fn texture_attachment_and_unlink_preserve_individual_fields_and_inactive_data() {

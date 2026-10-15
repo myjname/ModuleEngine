@@ -1,57 +1,27 @@
 //! Shared world-projected combat feedback for editor Play and standalone Player.
-//! Damage and candidate targets come from core's melee rules, not painted shapes.
-use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
-use module_engine_core::{Camera, GameState, GameStatus, MeleeArea};
+//! Damage and candidate targets come from the package's melee rules, not painted shapes.
+use super::screen_point;
+use crate::{GameStateExt, GameStatus, MeleeArea};
+use egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+use module_engine_core::{Camera, GameState};
 
 /// Feedback affects only the extracted render snapshot. Actor/material data and
 /// authored colors remain unchanged; the next snapshot naturally restores them.
-pub fn apply_hit_flashes(snapshot: &mut module_engine_core::SceneSnapshot, state: &GameState) {
-    if state.status != GameStatus::Playing || state.hit_visuals.is_empty() {
-        return;
-    }
-    for item in &mut snapshot.items {
-        let intensity = state
-            .hit_visuals
-            .iter()
-            .filter(|hit| {
-                hit.target == item.id
-                    && hit
-                        .target_lifetime
-                        .is_none_or(|lifetime| state.world.lifetime(item.id) == Some(lifetime))
-            })
-            .map(|hit| {
-                let age = state.time - hit.started_at;
-                if age < 0. || state.time >= hit.expires_at {
-                    0.
-                } else {
-                    (1. - age / 0.16).clamp(0., 1.) as f32 * 0.95
-                }
-            })
-            .fold(0_f32, f32::max);
-        if intensity <= 0. {
-            continue;
-        }
-        for (channel, white) in [255., 248., 205.].into_iter().enumerate() {
-            item.color[channel] =
-                (item.color[channel] as f32 * (1. - intensity) + white * intensity).round() as u8;
-            item.material.base_color[channel] +=
-                (1. - item.material.base_color[channel]) * intensity;
-        }
-    }
-}
+pub use crate::apply_hit_flashes;
 
 pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: Option<[f32; 3]>) {
-    if state.status != GameStatus::Playing {
+    let frame = state.arpg();
+    if frame.status != GameStatus::Playing {
         return;
     }
     let painter = ui.painter_at(rect);
     let player = state.player();
     if let Some(player) = player
-        && !state.attack_visuals.iter().any(|a| {
+        && !frame.attack_visuals.iter().any(|a| {
             a.attacker == player.object.id
                 && current_incarnation(state, a.attacker, a.attacker_lifetime)
         })
-        && !state.telegraphs.iter().any(|a| {
+        && !frame.telegraphs.iter().any(|a| {
             a.attacker == player.object.id
                 && current_incarnation(state, a.attacker, a.attacker_lifetime)
         })
@@ -69,7 +39,7 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
         direction_arrow(&painter, camera, rect, &area);
         paint_targets(&painter, camera, rect, state, player.object.id, &area);
     }
-    for attack in &state.attack_visuals {
+    for attack in &frame.attack_visuals {
         let friendly = attack
             .attacker_player
             .unwrap_or_else(|| state.world.component(attack.attacker, "player").is_some());
@@ -93,7 +63,7 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
         }
         slash(&painter, camera, rect, &attack.area, progress, friendly);
     }
-    for hit in &state.hit_visuals {
+    for hit in &frame.hit_visuals {
         let lifetime = (hit.expires_at - hit.started_at).max(0.001);
         let age = ((state.time - hit.started_at) / lifetime).clamp(0., 1.) as f32;
         if age >= 1. {
@@ -111,7 +81,7 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
             Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], (255. * (1. - age)) as u8);
         // Captured before death/removal, so a killing blow remains visible.
         let position = [hit.position[0], hit.position[1] + 0.55, hit.position[2]];
-        if let Some(center) = crate::player::screen_point(camera, position, rect) {
+        if let Some(center) = screen_point(camera, position, rect) {
             let spread = 5. + age * 18.;
             for ray in 0..7 {
                 let angle = ray as f32 * std::f32::consts::TAU / 7. + (hit.target % 7) as f32 * 0.3;
@@ -127,7 +97,7 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
             hit.position[1] + 1.0 + age * 0.8,
             hit.position[2],
         ];
-        if let Some(p) = crate::player::screen_point(camera, label, rect) {
+        if let Some(p) = screen_point(camera, label, rect) {
             let text = format!("−{:.0}", hit.damage);
             painter.text(
                 p + Vec2::new(1., 1.),
@@ -217,7 +187,7 @@ pub(super) fn sector_shape(
     let mut points = (0..=28)
         .map(|n| {
             let a = angle - arc * 0.5 + arc * n as f32 / 28.;
-            crate::player::screen_point(
+            screen_point(
                 camera,
                 [
                     area.center[0] + a.cos() * area.range,
@@ -232,8 +202,7 @@ pub(super) fn sector_shape(
         points.pop();
         return Some(egui::Shape::convex_polygon(points, fill, stroke));
     }
-    let center =
-        crate::player::screen_point(camera, [area.center[0], 0.025, area.center[2]], rect)?;
+    let center = screen_point(camera, [area.center[0], 0.025, area.center[2]], rect)?;
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(center, fill);
     for p in &points {
@@ -259,8 +228,8 @@ fn direction_arrow(painter: &egui::Painter, camera: Camera, rect: Rect, area: &M
         ]
     };
     if let (Some(start), Some(end)) = (
-        crate::player::screen_point(camera, offset(0.45), rect),
-        crate::player::screen_point(camera, offset(area.range * 0.82), rect),
+        screen_point(camera, offset(0.45), rect),
+        screen_point(camera, offset(area.range * 0.82), rect),
     ) {
         painter.arrow(
             start,
@@ -283,7 +252,7 @@ fn slash(
     let head = middle - arc * 0.5 + arc * progress;
     let tail = (head - arc * 0.32).max(middle - arc * 0.5);
     let point = |angle: f32, radius: f32| {
-        crate::player::screen_point(
+        screen_point(
             camera,
             [
                 area.center[0] + angle.cos() * radius,
@@ -333,7 +302,7 @@ fn target_ring(
     let points = (0..24)
         .filter_map(|n| {
             let a = n as f32 * std::f32::consts::TAU / 24.;
-            crate::player::screen_point(
+            screen_point(
                 camera,
                 [
                     center[0] + a.cos() * radius,
@@ -352,8 +321,15 @@ fn target_ring(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use module_engine_core::{GameInput, GameProject, GameSession, WorldKind};
+    use crate::{ArpgInput, ProjectExt};
+    use module_engine_core::{GameProject, GameSession, WorldKind};
     use serde_json::json;
+
+    fn edit_frame(state: &mut GameState, edit: impl FnOnce(&mut crate::ArpgFrame)) {
+        let mut frame = state.arpg();
+        edit(&mut frame);
+        state.set_arpg(frame).unwrap();
+    }
 
     fn camera() -> Camera {
         Camera {
@@ -396,18 +372,19 @@ mod tests {
                     .insert("health".into(), json!({"maximum":36.0,"current":1.0}));
             }
         }
-        GameSession::new(project, WorldKind::Objects).unwrap()
+        crate::session(project, WorldKind::Objects).unwrap()
     }
     fn attacked_encounter() -> GameSession {
         let mut session = encounter();
         session
             .step(
                 1. / 60.,
-                &GameInput {
+                &ArpgInput {
                     attack: true,
                     aim_world: [0., 0., 3.],
-                    ..GameInput::default()
-                },
+                    ..ArpgInput::default()
+                }
+                .into_input(),
             )
             .unwrap();
         session
@@ -466,7 +443,7 @@ mod tests {
             range: 3.,
             arc: std::f32::consts::TAU,
         };
-        let center = crate::player::screen_point(camera(), [0., 0.025, 4.], viewport()).unwrap();
+        let center = screen_point(camera(), [0., 0.025, 4.], viewport()).unwrap();
         let fill = Color32::from_rgba_unmultiplied(250, 180, 80, 90);
         let stroke = Stroke::new(2., Color32::WHITE);
         let circle = sector_shape(camera(), viewport(), &area, fill, stroke).unwrap();
@@ -498,8 +475,8 @@ mod tests {
                 .iter()
                 .all(|tri| tri[0] == 0)
         );
-        let inside = crate::player::screen_point(camera(), [2., 0.025, 4.], viewport()).unwrap();
-        let gap = crate::player::screen_point(camera(), [-2., 0.025, 4.], viewport()).unwrap();
+        let inside = screen_point(camera(), [2., 0.025, 4.], viewport()).unwrap();
+        let gap = screen_point(camera(), [-2., 0.025, 4.], viewport()).unwrap();
         let in_triangle = |p: Pos2, a: Pos2, b: Pos2, c: Pos2| {
             let side = |a: Pos2, b: Pos2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
             let signs = [side(a, b), side(b, c), side(c, a)];
@@ -547,7 +524,7 @@ mod tests {
         for (ring, id) in rings.iter().zip(state.melee_targets(1, &forward_area)) {
             let entity = state.world.entity(id).unwrap();
             let radius = entity.components["actor"]["radius"].as_f64().unwrap() as f32;
-            let expected = crate::player::screen_point(
+            let expected = screen_point(
                 camera(),
                 [
                     entity.object.transform.translation[0] + radius,
@@ -615,6 +592,7 @@ mod tests {
 
         let mut expired = before_state.clone();
         expired.time = expired
+            .arpg()
             .hit_visuals
             .iter()
             .map(|h| h.expires_at)
@@ -624,7 +602,7 @@ mod tests {
         assert_eq!(expired_snapshot, before_snapshot);
         for status in [GameStatus::Defeat, GameStatus::Victory] {
             let mut terminal = before_state.clone();
-            terminal.status = status;
+            edit_frame(&mut terminal, |frame| frame.status = status);
             let mut terminal_snapshot = before_snapshot.clone();
             apply_hit_flashes(&mut terminal_snapshot, &terminal);
             assert_eq!(terminal_snapshot, before_snapshot);
@@ -636,10 +614,12 @@ mod tests {
         let session = attacked_encounter();
         let active = session.state();
         assert!(!active.world.contains(10));
-        assert!(active.hit_visuals.iter().any(|h| h.target == 10));
+        assert!(active.arpg().hit_visuals.iter().any(|h| h.target == 10));
         let mut blank = active.clone();
-        blank.attack_visuals.clear();
-        blank.hit_visuals.clear();
+        edit_frame(&mut blank, |frame| {
+            frame.attack_visuals.clear();
+            frame.hit_visuals.clear();
+        });
         let empty_shapes = render_shapes(&blank, None);
         let active_shapes = render_shapes(active, None);
         assert!(leaves(&active_shapes).len() > leaves(&empty_shapes).len());
@@ -655,8 +635,10 @@ mod tests {
         ));
 
         let mut lethal_only = active.clone();
-        lethal_only.attack_visuals.clear();
-        lethal_only.hit_visuals.retain(|h| h.target == 10);
+        edit_frame(&mut lethal_only, |frame| {
+            frame.attack_visuals.clear();
+            frame.hit_visuals.retain(|h| h.target == 10);
+        });
         let lethal_shapes = render_shapes(&lethal_only, None);
         assert!(leaves(&lethal_shapes).len() > leaves(&empty_shapes).len());
         assert_eq!(
@@ -667,13 +649,13 @@ mod tests {
                 .count(),
             2
         );
-        lethal_only.time = lethal_only.hit_visuals[0].expires_at;
+        lethal_only.time = lethal_only.arpg().hit_visuals[0].expires_at;
         assert_eq!(
             leaves(&render_shapes(&lethal_only, None)).len(),
             leaves(&empty_shapes).len()
         );
         let mut terminal = active.clone();
-        terminal.status = GameStatus::Victory;
+        edit_frame(&mut terminal, |frame| frame.status = GameStatus::Victory);
         assert_eq!(
             leaves(&render_shapes(&terminal, Some([0., 0., 3.]))).len(),
             leaves(&empty_shapes).len()
@@ -706,44 +688,47 @@ mod tests {
                 .components
                 .insert("ai".into(), json!({"kind":"chase","aggro_radius":100.}));
             enemy.components.insert("melee".into(), json!({"range":4.,"damage":0.,"cooldown":1.,"arc":std::f32::consts::TAU,"duration":1.,"windup":windup}));
-            let mut session = GameSession::new(project, WorldKind::Ecs).unwrap();
+            let mut session = crate::session(project, WorldKind::Ecs).unwrap();
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &ArpgInput {
                         attack: true,
                         aim_world: [0.2, 0., 3.5],
                         ..Default::default()
-                    },
+                    }
+                    .into_input(),
                 )
                 .unwrap();
             let mut state = session.state().clone();
-            let old_player_attack = state
+            let mut frame = state.arpg();
+            let old_player_attack = frame
                 .attack_visuals
                 .iter()
                 .find(|attack| attack.attacker == 1)
                 .unwrap()
                 .clone();
             assert!(
-                state
+                frame
                     .hit_visuals
                     .iter()
                     .any(|hit| hit.target == 11 && hit.target_player == Some(false))
             );
             if windup == 0. {
                 assert!(
-                    state.attack_visuals.iter().any(
+                    frame.attack_visuals.iter().any(
                         |attack| attack.attacker == 11 && attack.attacker_player == Some(false)
                     )
                 );
             } else {
-                assert!(state.telegraphs.iter().any(
+                assert!(frame.telegraphs.iter().any(
                     |warning| warning.attacker == 11 && warning.attacker_player == Some(false)
                 ));
             }
-            state.attack_visuals.retain(|attack| attack.attacker == 11);
-            state.telegraphs.retain(|warning| warning.attacker == 11);
-            state.hit_visuals.retain(|hit| hit.target == 11);
+            frame.attack_visuals.retain(|attack| attack.attacker == 11);
+            frame.telegraphs.retain(|warning| warning.attacker == 11);
+            frame.hit_visuals.retain(|hit| hit.target == 11);
+            state.set_arpg(frame.clone()).unwrap();
             let mut replacement = state.world.entity(11).unwrap();
             replacement.object.transform.translation = [0., 0., 5.];
             replacement.components.insert("player".into(), json!({}));
@@ -764,9 +749,11 @@ mod tests {
 
             let aim = Some([0., 0., 8.]);
             let mut preview_only = state.clone();
-            preview_only.attack_visuals.clear();
-            preview_only.telegraphs.clear();
-            preview_only.hit_visuals.clear();
+            edit_frame(&mut preview_only, |frame| {
+                frame.attack_visuals.clear();
+                frame.telegraphs.clear();
+                frame.hit_visuals.clear();
+            });
             let preview_shapes = render_shapes(&preview_only, aim);
             assert_eq!(target_rings(&preview_shapes).len(), 1);
             let shapes = render_shapes(&state, aim);
@@ -785,7 +772,7 @@ mod tests {
                     "The recorded enemy swing stays red after its ID becomes a player");
                 assert!(!leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::Path(path) if path.stroke.color == player_stroke)));
             }
-            let hit = &state.hit_visuals[0];
+            let hit = &frame.hit_visuals[0];
             let age = ((state.time - hit.started_at) / (hit.expires_at - hit.started_at))
                 .clamp(0., 1.) as f32;
             let alpha = (255. * (1. - age)) as u8;
@@ -798,9 +785,10 @@ mod tests {
             // Also retain an actual friendly attack after its attacker is
             // replaced by an enemy. Its old gold shape remains, but it must
             // not query the replacement's opposing team for new target rings.
-            state.attack_visuals = vec![old_player_attack];
-            state.telegraphs.clear();
-            state.hit_visuals.clear();
+            frame.attack_visuals = vec![old_player_attack];
+            frame.telegraphs.clear();
+            frame.hit_visuals.clear();
+            state.set_arpg(frame.clone()).unwrap();
             let mut enemy = state.world.entity(1).unwrap();
             enemy.components.get_mut("actor").unwrap()["team"] = json!("enemy");
             state
@@ -815,7 +803,7 @@ mod tests {
             state.world.transform_mut(11).unwrap().translation = [0., 0., 4.];
             assert!(
                 !state
-                    .melee_targets(1, &state.attack_visuals[0].area)
+                    .melee_targets(1, &frame.attack_visuals[0].area)
                     .is_empty()
             );
             let shapes = render_shapes(&state, None);
@@ -851,21 +839,22 @@ mod tests {
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &ArpgInput {
                         aim_world: [0., 0., 8.],
-                        ..GameInput::default()
-                    },
+                        ..ArpgInput::default()
+                    }
+                    .into_input(),
                 )
                 .unwrap();
         }
-        assert!(session.state().attack_visuals.is_empty());
+        assert!(session.state().arpg().attack_visuals.is_empty());
         let next_preview = render_shapes(session.state(), Some([0., 0., 8.]));
         let next_rings = target_rings(&next_preview);
         assert_eq!(next_rings.len(), 1);
         assert_ne!(next_rings[0].points, backward_rings[0].points);
         let target = session.state().world.entity(13).unwrap();
         let radius = target.components["actor"]["radius"].as_f64().unwrap() as f32;
-        let expected = crate::player::screen_point(
+        let expected = screen_point(
             camera(),
             [
                 target.object.transform.translation[0] + radius,
@@ -896,36 +885,49 @@ mod tests {
             .find(|e| e.object.id == 1)
             .unwrap();
         player.components.get_mut("melee").unwrap()["windup"] = json!(0.2);
-        let mut session = GameSession::new(project, WorldKind::Objects).unwrap();
+        let mut session = crate::session(project, WorldKind::Objects).unwrap();
         session
             .step(
                 1. / 60.,
-                &GameInput {
+                &ArpgInput {
                     attack: true,
                     aim_world: [0., 0., 3.],
-                    ..GameInput::default()
-                },
+                    ..ArpgInput::default()
+                }
+                .into_input(),
             )
             .unwrap();
-        assert!(session.state().telegraphs.iter().any(|w| w.attacker == 1));
-        assert!(session.state().attack_visuals.is_empty());
+        assert!(
+            session
+                .state()
+                .arpg()
+                .telegraphs
+                .iter()
+                .any(|w| w.attacker == 1)
+        );
+        assert!(session.state().arpg().attack_visuals.is_empty());
         let cyan =
             egui::epaint::ColorMode::Solid(Color32::from_rgba_unmultiplied(125, 225, 255, 180));
         let mut windup_frames = 0;
         let mut swing_frames = 0;
         for _ in 0..60 {
             let state = session.state();
-            let preparing = state.telegraphs.iter().any(|w| w.attacker == 1);
-            let swinging = state.attack_visuals.iter().any(|a| a.attacker == 1);
+            let preparing = state.arpg().telegraphs.iter().any(|w| w.attacker == 1);
+            let swinging = state.arpg().attack_visuals.iter().any(|a| a.attacker == 1);
             if !preparing && !swinging {
                 break;
             }
             windup_frames += usize::from(preparing);
             swing_frames += usize::from(swinging);
-            for warning in state.telegraphs.iter().filter(|w| w.attacker == 1) {
+            for warning in state.arpg().telegraphs.iter().filter(|w| w.attacker == 1) {
                 assert_eq!(warning.direction, [0., -1.]);
             }
-            for attack in state.attack_visuals.iter().filter(|a| a.attacker == 1) {
+            for attack in state
+                .arpg()
+                .attack_visuals
+                .iter()
+                .filter(|a| a.attacker == 1)
+            {
                 assert_eq!(attack.area.direction, [0., -1.]);
             }
             let shapes = render_shapes(state, Some([0., 0., 8.]));
@@ -939,19 +941,28 @@ mod tests {
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &ArpgInput {
                         aim_world: [0., 0., 8.],
-                        ..GameInput::default()
-                    },
+                        ..ArpgInput::default()
+                    }
+                    .into_input(),
                 )
                 .unwrap();
         }
         assert!(windup_frames > 1);
         assert!(swing_frames > 1);
-        assert!(!session.state().telegraphs.iter().any(|w| w.attacker == 1));
         assert!(
             !session
                 .state()
+                .arpg()
+                .telegraphs
+                .iter()
+                .any(|w| w.attacker == 1)
+        );
+        assert!(
+            !session
+                .state()
+                .arpg()
                 .attack_visuals
                 .iter()
                 .any(|a| a.attacker == 1)

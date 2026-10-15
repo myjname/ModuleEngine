@@ -594,46 +594,57 @@ impl App for NativeEditorBenchmark {
                 .engine_panes
                 .get(&SCENE_PANE)
                 .is_some_and(|pane| pane.scene_view.texture.is_some());
-            self.previous = Some(FrameSample {
-                started: Some(start),
-                phase: self.phase.name(),
-                editor_handler_ms: handler_ms,
-                editor_ui_calls: 1,
-                frame_interval_ms: 0.,
-                framework_cpu_ms: None,
-                pan_before: before,
-                pan_after: after,
-                focused: ui.input(|input| input.focused),
-                visible: ui.input(|input| input.viewport().visible()),
-                game_time: self
-                    .editor
-                    .game_workbench
-                    .game_snapshot()
-                    .map(|snapshot| snapshot.state.time),
-                game_status: self
-                    .editor
-                    .game_workbench
-                    .game_snapshot()
-                    .map(|snapshot| format!("{:?}", snapshot.state.status)),
-                living_enemies: self
-                    .editor
-                    .game_workbench
-                    .game_snapshot()
-                    .map(|snapshot| snapshot.state.living_enemies()),
-                game_render_ms_last: self
-                    .editor
-                    .game_workbench
-                    .game_snapshot()
-                    .map(|snapshot| snapshot.last_render_ms),
-                scene_render_ms_last: self
-                    .editor
-                    .game_workbench
-                    .preview_host
-                    .as_ref()
-                    .map(|host| host.last_render_ms),
-                game_frame_ready,
-                scene_texture_present,
-            });
+            self.previous =
+                Some(FrameSample {
+                    started: Some(start),
+                    phase: self.phase.name(),
+                    editor_handler_ms: handler_ms,
+                    editor_ui_calls: 1,
+                    frame_interval_ms: 0.,
+                    framework_cpu_ms: None,
+                    pan_before: before,
+                    pan_after: after,
+                    focused: ui.input(|input| input.focused),
+                    visible: ui.input(|input| input.viewport().visible()),
+                    game_time: self
+                        .editor
+                        .game_workbench
+                        .game_snapshot()
+                        .map(|snapshot| snapshot.state.time),
+                    game_status: self
+                        .editor
+                        .game_workbench
+                        .game_snapshot()
+                        .and_then(|snapshot| {
+                            snapshot
+                                .game_diagnostics
+                                .get("status")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        }),
+                    living_enemies: self.editor.game_workbench.game_snapshot().and_then(
+                        |snapshot| {
+                            snapshot
+                                .game_diagnostics
+                                .get("active_enemies")
+                                .and_then(serde_json::Value::as_u64)
+                                .map(|value| value as usize)
+                        },
+                    ),
+                    game_render_ms_last: self
+                        .editor
+                        .game_workbench
+                        .game_snapshot()
+                        .map(|snapshot| snapshot.last_render_ms),
+                    scene_render_ms_last: self
+                        .editor
+                        .game_workbench
+                        .preview_host
+                        .as_ref()
+                        .map(|host| host.last_render_ms),
+                    game_frame_ready,
+                    scene_texture_present,
+                });
         }
         ui.ctx().request_repaint();
     }

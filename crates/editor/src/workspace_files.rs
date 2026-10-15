@@ -47,10 +47,10 @@ pub fn template_document(
                 .game
                 .as_ref()
                 .map(|g| g.execution.clone())
-                .unwrap_or_else(module_engine_core::ExecutionGraph::gameplay),
+                .unwrap_or_else(module_engine_arpg::gameplay_schedule),
             audio_cues: BTreeMap::new(),
         },
-        ProjectTemplate::TwoArenas => GameProject::demo(),
+        ProjectTemplate::TwoArenas => module_engine_two_arenas::demo_project(),
     };
     if let Some(existing) = &current.game {
         game.execution = existing.execution.clone();

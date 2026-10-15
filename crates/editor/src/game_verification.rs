@@ -2,10 +2,11 @@
 //! Automated progression changes only authored fixture health, never teleports
 //! or removes runtime actors; benchmark runs the supplied shipping document.
 use crate::game_host::{GameHost, game_registry_at, script_ids};
+use module_engine_arpg::{ArpgEvent, ArpgInput, GameStateExt, GameStatus};
 use module_engine_core::{
-    ExecutableSystem, GameEntity, GameEvent, GameInput, GameSession, GameState, GameStatus,
-    GraphDocument, RenderOverrides, SystemContext, SystemDescriptor, SystemNode, SystemRegistry,
-    SystemStage, WorldKind,
+    ExecutableSystem, GameEntity, GameInput, GameSession, GameState, GraphDocument,
+    RenderOverrides, SystemContext, SystemDescriptor, SystemNode, SystemRegistry, SystemStage,
+    WorldKind,
 };
 use serde_json::{Value, json};
 use std::{
@@ -211,12 +212,12 @@ fn defeat_fixture(
             .session
             .events()
             .iter()
-            .any(|e| matches!(e, GameEvent::Death { object: 1 }));
-        if host.session.state().status == GameStatus::Defeat {
+            .any(|e| matches!(ArpgEvent::try_from(e), Ok(ArpgEvent::Death { object: 1 })));
+        if host.session.state().arpg().status == GameStatus::Defeat {
             break;
         }
     }
-    if host.session.state().status != GameStatus::Defeat || !death_event {
+    if host.session.state().arpg().status != GameStatus::Defeat || !death_event {
         return Err("Enemy attacks did not produce player death/defeat in the low-health acceptance fixture".into());
     }
     fs::write(
@@ -231,7 +232,7 @@ fn defeat_fixture(
             ..GameInput::default()
         },
     )?;
-    if host.session.state().status != GameStatus::Playing
+    if host.session.state().arpg().status != GameStatus::Playing
         || host.session.state().living_enemies() != enemies
     {
         return Err("Restart action failed after defeat".into());
@@ -249,25 +250,36 @@ fn parity(
 ) -> Result<Value, String> {
     let mut objects = GameHost::new(document.clone(), root, compile_root, WorldKind::Objects)?;
     let mut ecs = GameHost::new(document.clone(), root, compile_root, WorldKind::Ecs)?;
+    let graph = &document.game.as_ref().ok_or("No game")?.execution;
     let mut event_count = 0;
+    let mut raw_state_equal = true;
+    let mut raw_system_states_equal = true;
     for index in 0_usize..180 {
         let movement = match index / 60 {
             0 => [0.7, 0.],
             1 => [0., -0.7],
             _ => [-0.7, 0.],
         };
-        let input = GameInput {
+        let input = ArpgInput {
             movement,
             aim_world: [0., 0., -5.],
             attack: index.is_multiple_of(23),
-            ..GameInput::default()
-        };
+            ..ArpgInput::default()
+        }
+        .into_input();
         objects.step(DT, &input)?;
         ecs.step(DT, &input)?;
-        if objects.session.state() != ecs.session.state()
+        let object_states = objects.session.system_states();
+        let ecs_states = ecs.session.system_states();
+        raw_state_equal &= objects.session.state() == ecs.session.state();
+        raw_system_states_equal &= object_states == ecs_states;
+        let portable_object_states =
+            module_engine_arpg::portable_system_states(graph, &object_states)?;
+        let portable_ecs_states = module_engine_arpg::portable_system_states(graph, &ecs_states)?;
+        if !module_engine_arpg::states_equivalent(objects.session.state(), ecs.session.state())
             || objects.session.snapshot() != ecs.session.snapshot()
             || objects.session.events() != ecs.session.events()
-            || objects.session.system_states() != ecs.session.system_states()
+            || portable_object_states != portable_ecs_states
         {
             return Err(format!(
                 "Object/ECS gameplay, event or Custom state parity failed at tick {index}"
@@ -284,7 +296,10 @@ fn parity(
     crate::write_png(&folder.join("game-parity-ecs.png"), &b)?;
     Ok(
         json!({"passed":true,"fixed_ticks":objects.session.state().tick,"input_frames":180,"events_compared":event_count,
-        "world_queries_equal":true,"scene_snapshots_equal":true,"vulkan_pixels_equal":true,"system_states_equal":true,
+        "world_queries_equal":true,"scene_snapshots_equal":true,"vulkan_pixels_equal":true,
+        "raw_state_equal":raw_state_equal,"raw_system_states_equal":raw_system_states_equal,
+        "semantic_state_equal":true,"semantic_system_states_equal":true,
+        "comparison_scope":"All 180 input frames compare complete world, session control, other module data, typed ARPG frame, events, snapshots and system-owned state. Only documented ARPG incarnation tokens are excluded from semantic equality.",
         "custom_sources":script_ids(document.game.as_ref().ok_or("No game")?),"audio_cues_consumed":objects.audio.played,
         "render_size":[960,540],"device":objects.device}),
     )
@@ -326,7 +341,7 @@ fn progression(
     let mut warning_image_saved = false;
     for index in 0..9000 {
         let input = autopilot(host.session.state(), index)?;
-        if !host.session.state().telegraphs.is_empty() {
+        if !host.session.state().arpg().telegraphs.is_empty() {
             if !host
                 .session
                 .state()
@@ -349,46 +364,47 @@ fn progression(
         host.step(DT, &input)?;
         last_frame = index;
         for event in host.session.events() {
-            let key = match event {
-                GameEvent::Attack { .. } => {
+            let key = match ArpgEvent::try_from(event) {
+                Ok(ArpgEvent::Attack { .. }) => {
                     attacks += 1;
                     "Attack"
                 }
-                GameEvent::Hit {
+                Ok(ArpgEvent::Hit {
                     attacker, target, ..
-                } => {
+                }) => {
                     hits += 1;
-                    if *target == 1
+                    if target == 1
                         && host
                             .session
                             .state()
                             .world
-                            .component(*attacker, "boss")
+                            .component(attacker, "boss")
                             .is_some()
                     {
                         boss_hits += 1;
                     }
                     "Hit"
                 }
-                GameEvent::Death { .. } => "Death",
-                GameEvent::SceneChanged { to, .. } => {
-                    scenes.push(to.clone());
+                Ok(ArpgEvent::Death { .. }) => "Death",
+                Ok(ArpgEvent::SceneChanged { to, .. }) => {
+                    scenes.push(to);
                     "SceneChanged"
                 }
-                GameEvent::Victory => "Victory",
-                GameEvent::Sound { .. } => "Sound",
-                GameEvent::Custom { .. } => "Custom",
+                Ok(ArpgEvent::Victory) => "Victory",
+                Ok(ArpgEvent::Sound { .. }) => "Sound",
+                Ok(ArpgEvent::Custom { .. }) => "Custom",
+                Err(_) => &event.name,
             };
             *events.entry(key.into()).or_default() += 1;
         }
-        if host.session.state().status == GameStatus::Victory {
+        if host.session.state().arpg().status == GameStatus::Victory {
             break;
         }
-        if host.session.state().status == GameStatus::Defeat {
+        if host.session.state().arpg().status == GameStatus::Defeat {
             return Err("Unattended progression fixture player died".into());
         }
     }
-    if host.session.state().status != GameStatus::Victory {
+    if host.session.state().arpg().status != GameStatus::Victory {
         return Err(format!(
             "Autopilot did not complete the two-scene fixture after {} input frames; scene={}, enemies={}, player={:?}",
             last_frame + 1,
@@ -411,7 +427,7 @@ fn progression(
     let played = host.audio.played;
     host.session.restart()?;
     if host.session.state().living_enemies() != initial_enemies
-        || host.session.state().status != GameStatus::Playing
+        || host.session.state().arpg().status != GameStatus::Playing
     {
         return Err("Restart failed to restore authored enemies and status".into());
     }
@@ -433,10 +449,11 @@ fn performance(
 ) -> Result<Value, String> {
     let mut host = GameHost::new(document.clone(), root, compile_root, WorldKind::Objects)?;
     let initial_enemies = host.session.state().living_enemies();
-    let input = GameInput {
+    let input = ArpgInput {
         aim_world: [0., 0., -4.],
-        ..GameInput::default()
-    };
+        ..ArpgInput::default()
+    }
+    .into_input();
     for _ in 0..WARM_FRAMES {
         host.step(DT, &input)?;
         host.render(WIDTH, HEIGHT)?;
@@ -464,11 +481,11 @@ fn performance(
     let p95 = percentile(&total_ms, 0.95);
     let budget = 1000. / 60.;
     let actual_workload =
-        minimum_enemies >= 20 && host.session.state().status == GameStatus::Playing;
+        minimum_enemies >= 20 && host.session.state().arpg().status == GameStatus::Playing;
     Ok(
         json!({"device":host.device,"resolution":[WIDTH,HEIGHT],"warmup_frames":WARM_FRAMES,"measured_frames":MEASURED_FRAMES,
         "fixed_step_seconds":DT,"initial_enemies":initial_enemies,"minimum_living_enemies":minimum_enemies,
-        "player_status_after_measurement":host.session.state().status,"target_60_fps_20_enemies_workload":actual_workload,
+        "player_status_after_measurement":host.session.state().arpg().status,"target_60_fps_20_enemies_workload":actual_workload,
         "frame_processing_ms":{"mean":mean_ms,"median":percentile(&total_ms,0.5),"p95":p95,"max":percentile(&total_ms,1.)},
         "simulation_ms":{"median":percentile(&step_ms,0.5),"p95":percentile(&step_ms,0.95)},
         "render_ms":{"median":percentile(&render_ms,0.5),"p95":percentile(&render_ms,0.95)},
@@ -550,7 +567,8 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
     if let Some(target) = target {
         let goal = target.object.transform.translation;
         let d = horizontal_distance(p, goal);
-        let warning = state
+        let frame = state.arpg();
+        let warning = frame
             .telegraphs
             .iter()
             .find(|t| t.attacker == target.object.id);
@@ -558,17 +576,19 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
             if d < warning.range + radius + 1.0 {
                 let away = direction(goal, p);
                 let escape = [p[0] + away[0] * 2., p[1], p[2] + away[1] * 2.];
-                return Ok(GameInput {
+                return Ok(ArpgInput {
                     movement: navigate(p, escape, radius, &obstacles),
                     aim_world: goal,
                     attack: index.is_multiple_of(23),
-                    ..GameInput::default()
-                });
+                    ..ArpgInput::default()
+                }
+                .into_input());
             }
-            return Ok(GameInput {
+            return Ok(ArpgInput {
                 aim_world: goal,
-                ..GameInput::default()
-            });
+                ..ArpgInput::default()
+            }
+            .into_input());
         }
         let target_radius = number(target, "actor", "radius", 0.4);
         let desired = (number(&player, "melee", "range", 2.2) + target_radius - 0.4).max(0.8);
@@ -577,23 +597,25 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
         } else {
             [0., 0.]
         };
-        return Ok(GameInput {
+        return Ok(ArpgInput {
             movement,
             aim_world: goal,
             attack: index.is_multiple_of(23),
-            ..GameInput::default()
-        });
+            ..ArpgInput::default()
+        }
+        .into_input());
     }
     let portal = entities
         .iter()
         .find(|e| e.components.contains_key("portal"))
         .ok_or("No living target and no exit portal")?;
     let goal = portal.object.transform.translation;
-    Ok(GameInput {
+    Ok(ArpgInput {
         movement: navigate(p, goal, radius, &obstacles),
         aim_world: goal,
-        ..GameInput::default()
-    })
+        ..ArpgInput::default()
+    }
+    .into_input())
 }
 
 type Obstacle = ([f32; 3], [f32; 2]);
@@ -707,7 +729,7 @@ mod tests {
     }
     #[test]
     fn unattended_input_fixture_completes_both_scenes_without_world_commands() {
-        let mut game = module_engine_core::GameProject::demo();
+        let mut game = module_engine_two_arenas::demo_project();
         for scene in game.scenes.values_mut() {
             for entity in &mut scene.objects {
                 if entity.components.contains_key("player") {
@@ -717,23 +739,24 @@ mod tests {
                 }
             }
         }
-        let mut session = module_engine_core::GameSession::new(game, WorldKind::Objects).unwrap();
+        let mut session = module_engine_arpg::session(game, WorldKind::Objects).unwrap();
         let mut warning = false;
         let mut transitioned = false;
         for index in 0..9000 {
             let input = autopilot(session.state(), index).unwrap();
             session.step(DT, &input).unwrap();
-            warning |= !session.state().telegraphs.is_empty() && session.state().scene == "boss";
+            warning |=
+                !session.state().arpg().telegraphs.is_empty() && session.state().scene == "boss";
             transitioned |= session
                 .events()
                 .iter()
-                .any(|e| matches!(e, GameEvent::SceneChanged { .. }));
-            if session.state().status == GameStatus::Victory {
+                .any(|e| matches!(ArpgEvent::try_from(e), Ok(ArpgEvent::SceneChanged { .. })));
+            if session.state().arpg().status == GameStatus::Victory {
                 break;
             }
         }
         assert_eq!(
-            session.state().status,
+            session.state().arpg().status,
             GameStatus::Victory,
             "scene={} enemies={} player={:?}",
             session.state().scene,

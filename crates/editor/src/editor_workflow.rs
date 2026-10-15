@@ -1442,7 +1442,7 @@ pub(crate) fn verify_workflow(source: &Path, output: &Path) -> Result<serde_json
 mod workflow_tests {
     use super::*;
     use eframe::egui::{Event, Id, Pos2, Rect, Sense, Vec2};
-    use module_engine_core::{GameProject, WorldKind, demo_document};
+    use module_engine_core::{WorldKind, demo_document};
 
     struct Fixture {
         root: PathBuf,
@@ -1461,7 +1461,7 @@ mod workflow_tests {
             let path = root.join("project.json");
             let mut document = demo_document(WorldKind::Objects);
             if game {
-                document.game = Some(GameProject::demo());
+                document.game = Some(module_engine_two_arenas::demo_project());
             }
             let installation = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
             if let Some(game) = &document.game {

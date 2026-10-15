@@ -2,7 +2,7 @@
 //! factories choose behavior. Contracts are validated before any lifecycle hook.
 use crate::{GameEvent, GameInput, GameState};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -229,6 +229,12 @@ struct NoTickTransaction;
 impl TickTransaction for NoTickTransaction {}
 
 type Factory = Arc<dyn Fn(&Value) -> Result<Box<dyn ExecutableSystem>, String> + Send + Sync>;
+type ProjectValidator = Arc<
+    dyn Fn(&crate::GameProject, &crate::ComponentValidationContext<'_>) -> Result<(), String>
+        + Send
+        + Sync,
+>;
+type ProjectPreparer = Arc<dyn Fn(&mut crate::GameProject) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct SystemRegistry {
@@ -236,9 +242,95 @@ pub struct SystemRegistry {
     components: crate::ComponentRegistry,
     installed_versions: BTreeMap<String, String>,
     module_dependencies: BTreeMap<String, BTreeSet<String>>,
+    project_contracts: BTreeMap<String, (ProjectValidator, ProjectPreparer)>,
+    game_contributions: BTreeMap<String, crate::GameContribution>,
 }
 
 impl SystemRegistry {
+    pub fn register_project_contract<V, P>(
+        &mut self,
+        owner: &str,
+        validate: V,
+        prepare: P,
+    ) -> Result<(), String>
+    where
+        V: Fn(&crate::GameProject, &crate::ComponentValidationContext<'_>) -> Result<(), String>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(&mut crate::GameProject) -> Result<(), String> + Send + Sync + 'static,
+    {
+        if !self.installed_versions.contains_key(owner)
+            || self.project_contracts.contains_key(owner)
+        {
+            return Err("Project contract needs a unique installed owner".into());
+        }
+        self.project_contracts
+            .insert(owner.into(), (Arc::new(validate), Arc::new(prepare)));
+        Ok(())
+    }
+    pub fn validate_project_contracts(
+        &self,
+        project: &crate::GameProject,
+        context: &crate::ComponentValidationContext<'_>,
+    ) -> Result<(), String> {
+        for (validate, _) in self.project_contracts.values() {
+            validate(project, context)?;
+        }
+        Ok(())
+    }
+    pub fn prepare_project_contracts(
+        &self,
+        project: &mut crate::GameProject,
+    ) -> Result<(), String> {
+        for (_, prepare) in self.project_contracts.values() {
+            prepare(project)?;
+        }
+        Ok(())
+    }
+    pub fn register_game_contribution(
+        &mut self,
+        contribution: crate::GameContribution,
+    ) -> Result<(), String> {
+        if contribution.id.trim().is_empty()
+            || contribution.activation_modules.is_empty()
+            || self.game_contributions.contains_key(&contribution.id)
+            || contribution
+                .activation_modules
+                .iter()
+                .any(|id| !self.installed_versions.contains_key(id))
+        {
+            return Err(
+                "Game contribution needs a unique ID and installed activating modules".into(),
+            );
+        }
+        self.game_contributions
+            .insert(contribution.id.clone(), contribution);
+        Ok(())
+    }
+    pub fn active_game_contributions(
+        &self,
+        graph: &ExecutionGraph,
+    ) -> Vec<&crate::GameContribution> {
+        let scheduled: BTreeSet<_> = graph
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.nodes)
+            .map(|node| node.module.as_str())
+            .collect();
+        self.game_contributions
+            .values()
+            .filter(|contribution| {
+                contribution
+                    .activation_modules
+                    .iter()
+                    .any(|id| scheduled.contains(id.as_str()))
+            })
+            .collect()
+    }
+    pub fn game_contributions(&self) -> impl Iterator<Item = &crate::GameContribution> {
+        self.game_contributions.values()
+    }
     pub fn builtin() -> Self {
         let mut result = Self::default();
         crate::register_builtin_component_schemas(result.components_mut())
@@ -246,7 +338,6 @@ impl SystemRegistry {
         result
             .install_module("scene.extract", env!("CARGO_PKG_VERSION"))
             .expect("Valid built-in scene module");
-        crate::register_game_systems(&mut result);
         result
     }
     pub fn components(&self) -> &crate::ComponentRegistry {
@@ -520,6 +611,8 @@ struct TickCheckpoint {
 pub struct SystemExecutor {
     systems: Vec<LiveSystem>,
     resources: ResourceStore,
+    event_validators: Vec<crate::GameEventValidator>,
+    begin_tick_hooks: Vec<crate::GameTickHook>,
 }
 
 impl SystemExecutor {
@@ -551,7 +644,22 @@ impl SystemExecutor {
                 )
             })
             .collect();
-        Ok(Self { systems, resources })
+        let event_validators = registry
+            .active_game_contributions(graph)
+            .iter()
+            .map(|contribution| contribution.validate_event)
+            .collect();
+        let begin_tick_hooks = registry
+            .active_game_contributions(graph)
+            .iter()
+            .map(|contribution| contribution.begin_tick)
+            .collect();
+        Ok(Self {
+            systems,
+            resources,
+            event_validators,
+            begin_tick_hooks,
+        })
     }
     pub fn step(
         &mut self,
@@ -721,6 +829,12 @@ impl SystemExecutor {
         checkpoint: &mut TickCheckpoint,
         transaction: &mut dyn TickTransaction,
     ) -> Result<(), String> {
+        // step_with_transaction has already checkpointed all owned values.
+        // A failed preparation follows the same rollback path as a failed
+        // authored system and cannot initialize or retire a replacement.
+        for begin_tick in &self.begin_tick_hooks {
+            begin_tick(game).map_err(|error| format!("Game contribution begin_tick: {error}"))?;
+        }
         for index in 0..self.systems.len() {
             Self::refresh_service_resources(&mut self.resources, input, events)?;
             self.activate_replacement(
@@ -761,6 +875,12 @@ impl SystemExecutor {
                 .implementation
                 .validate_tick()
                 .map_err(|e| format!("System '{}' staged output: {e}", system.node.id))?;
+        }
+        for event in events.iter() {
+            event.validate()?;
+            for validate in &self.event_validators {
+                validate(event)?;
+            }
         }
         transaction
             .validate(game)
@@ -881,70 +1001,19 @@ impl SystemExecutor {
     }
 }
 
-impl ExecutionGraph {
-    /// Editable demonstration schedule; the executor itself has no game route.
-    pub fn gameplay() -> Self {
-        let resources = vec![
-            SystemResource {
-                name: "world".into(),
-                data_type: "GameWorld".into(),
-                external: true,
-                initial: Value::Null,
-            },
-            SystemResource {
-                name: "input".into(),
-                data_type: "GameInput".into(),
-                external: true,
-                initial: Value::Null,
-            },
-            SystemResource {
-                name: "events".into(),
-                data_type: "GameEvents".into(),
-                external: true,
-                initial: json!([]),
-            },
-            SystemResource {
-                name: "previous".into(),
-                data_type: "Positions".into(),
-                external: false,
-                initial: Value::Null,
-            },
-        ];
-        let configs = [
-            ("Controllers", "game.input", vec!["world", "input"]),
-            ("AI", "game.ai", vec!["world"]),
-            ("Movement", "game.movement", vec!["world", "previous"]),
-            ("Collisions", "game.collision", vec!["world", "previous"]),
-            ("Combat", "game.combat", vec!["world", "events"]),
-            ("Health", "game.health", vec!["world", "events"]),
-            ("Scenes", "game.portals", vec!["world", "events"]),
-            ("Audio events", "game.audio", vec!["events"]),
-        ];
-        let stages = configs
-            .into_iter()
-            .enumerate()
-            .map(|(i, (name, module, ports))| SystemStage {
-                name: name.into(),
-                nodes: vec![SystemNode {
-                    id: format!("system-{i}"),
-                    module: module.into(),
-                    params: json!({}),
-                    bindings: ports.into_iter().map(|p| (p.into(), p.into())).collect(),
-                    after: if i == 0 {
-                        vec![]
-                    } else {
-                        vec![format!("system-{}", i - 1)]
-                    },
-                }],
-            })
-            .collect();
-        Self { resources, stages }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    fn empty_project() -> crate::GameProject {
+        crate::GameProject {
+            entry_scene: "empty".into(),
+            scenes: BTreeMap::from([("empty".into(), crate::AuthoredScene::default())]),
+            prefabs: BTreeMap::new(),
+            execution: ExecutionGraph::default(),
+            audio_cues: BTreeMap::new(),
+        }
+    }
     struct BoundNoop;
     impl ExecutableSystem for BoundNoop {
         fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
@@ -1037,15 +1106,15 @@ mod tests {
     }
     #[test]
     fn wrong_order_and_resource_type_are_rejected() {
-        let r = SystemRegistry::builtin();
-        let mut g = ExecutionGraph::gameplay();
+        let (original, r) = graph_registry(false, "1");
+        let mut g = original.clone();
         r.validate(&g).unwrap();
-        g.stages.swap(2, 3);
+        g.stages[0].nodes.swap(0, 1);
         assert!(r.validate(&g).is_err());
-        g = ExecutionGraph::gameplay();
-        g.resources[3].data_type = "Texture".into();
+        g = original.clone();
+        g.resources[0].data_type = "Texture".into();
         assert!(r.validate(&g).unwrap_err().contains("Type mismatch"));
-        g = ExecutionGraph::gameplay();
+        g = original;
         g.stages[0].nodes[0].module = "custom.missing".into();
         assert!(r.validate(&g).unwrap_err().contains("factory"));
     }
@@ -1094,10 +1163,10 @@ mod tests {
             if self.config.initialize_outputs {
                 ctx.game.time += 50.;
                 ctx.set_resource("value", json!(77))?;
-                ctx.events.push(GameEvent::Custom {
-                    name: self.config.label.into(),
-                    payload: json!("initialized"),
-                });
+                ctx.events.push(GameEvent::new(
+                    "Custom",
+                    json!({"name":self.config.label,"payload":"initialized"}),
+                ));
             }
             if self.config.reject_initialize {
                 Err("initialize rejected".into())
@@ -1141,10 +1210,10 @@ mod tests {
             *state = json!(999);
             ctx.game.time = 999.;
             ctx.set_resource("value", json!(999))?;
-            ctx.events.push(GameEvent::Custom {
-                name: "teardown".into(),
-                payload: Value::Null,
-            });
+            ctx.events.push(GameEvent::new(
+                "Custom",
+                json!({"name":"teardown","payload":null}),
+            ));
             if self.config.reject_stop {
                 Err("stop rejected".into())
             } else {
@@ -1205,7 +1274,7 @@ mod tests {
                 }],
             }],
         };
-        let game = crate::GameSession::new(crate::GameProject::demo(), crate::WorldKind::Objects)
+        let game = crate::GameSession::new(empty_project(), crate::WorldKind::Objects)
             .unwrap()
             .state()
             .clone();
@@ -1468,10 +1537,10 @@ mod tests {
         assert_eq!(executor.resources()["counter"].value, json!(77));
         assert_eq!(
             events,
-            vec![GameEvent::Custom {
-                name: "new".into(),
-                payload: json!("initialized")
-            }]
+            vec![GameEvent::new(
+                "Custom",
+                json!({"name":"new","payload":"initialized"})
+            )]
         );
         assert_eq!(executor.states()["probe"], json!(12));
         assert_eq!(call_count(&calls, "new:initialize:11"), 2);
@@ -1510,11 +1579,10 @@ mod tests {
             )
             .unwrap();
         let mut executor = SystemExecutor::new(&graph, &registry).unwrap();
-        let mut game =
-            crate::GameSession::new(crate::GameProject::demo(), crate::WorldKind::Objects)
-                .unwrap()
-                .state()
-                .clone();
+        let mut game = crate::GameSession::new(empty_project(), crate::WorldKind::Objects)
+            .unwrap()
+            .state()
+            .clone();
         executor.replace("b", &replacement, None, false).unwrap();
         executor
             .step(&mut game, &GameInput::default(), 0.01, &mut vec![])
@@ -1688,11 +1756,11 @@ mod tests {
     #[test]
     fn third_party_factories_execute_and_tick_failure_rolls_back_state() {
         let (g, r) = graph_registry(false, "1");
-        let mut project = crate::GameProject::demo();
+        let mut project = empty_project();
         project.execution = g.clone();
         let session = crate::GameSession::new(project, crate::WorldKind::Objects);
         assert!(session.is_err());
-        let mut project = crate::GameProject::demo();
+        let mut project = empty_project();
         project.execution = g.clone();
         let mut game =
             crate::GameSession::new_with_registry(project, crate::WorldKind::Objects, r.clone())
@@ -1810,11 +1878,10 @@ mod tests {
             }],
         };
         let mut executor = SystemExecutor::new(&graph, &registry).unwrap();
-        let mut game =
-            crate::GameSession::new(crate::GameProject::demo(), crate::WorldKind::Objects)
-                .unwrap()
-                .state()
-                .clone();
+        let mut game = crate::GameSession::new(empty_project(), crate::WorldKind::Objects)
+            .unwrap()
+            .state()
+            .clone();
         let mut events = vec![];
         executor
             .step(&mut game, &GameInput::default(), 0.01, &mut events)
@@ -1851,5 +1918,341 @@ mod tests {
         );
         assert_eq!(*values[1].lock().unwrap(), 1);
         assert_eq!(executor.states(), before);
+    }
+
+    #[test]
+    fn source_project_hooks_validate_strict_context_and_prepare_only_copies() {
+        let mut registry = SystemRegistry::default();
+        assert!(
+            registry
+                .register_project_contract("fixture.project", |_, _| Ok(()), |_| Ok(()))
+                .is_err()
+        );
+        registry.install_module("fixture.project", "2").unwrap();
+        registry
+            .register_project_contract(
+                "fixture.project",
+                |project, context| {
+                    if !context.modules.contains("fixture.project") {
+                        return Err("Source project owner is unavailable".into());
+                    }
+                    crate::validate_component_asset_reference(
+                        project
+                            .audio_cues
+                            .get("fixture.config")
+                            .ok_or("Missing source configuration")?,
+                        &["json".into()],
+                        context,
+                    )
+                },
+                |project| {
+                    project.audio_cues.remove("fixture.editor-only");
+                    if project
+                        .audio_cues
+                        .contains_key("fixture.reject-preparation")
+                    {
+                        return Err("Source preparation rejected".into());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(
+            registry
+                .register_project_contract("fixture.project", |_, _| Ok(()), |_| Ok(()))
+                .is_err()
+        );
+        let mut project = crate::GameProject::empty();
+        project.audio_cues = BTreeMap::from([
+            ("fixture.config".into(), "asset://config".into()),
+            (
+                "fixture.editor-only".into(),
+                "source authoring metadata".into(),
+            ),
+        ]);
+        let source = project.clone();
+        let modules = registry.installed_modules();
+        let mut assets = BTreeMap::new();
+        {
+            let context = crate::ComponentValidationContext {
+                scenes: &project.scenes,
+                modules: &modules,
+                asset_paths: Some(&assets),
+                active_components: None,
+            };
+            assert!(
+                project
+                    .validate_with_context(&registry, &context)
+                    .unwrap_err()
+                    .contains("Unknown asset ID")
+            );
+        }
+        assets.insert("config".into(), "assets/config.json".into());
+        {
+            let context = crate::ComponentValidationContext {
+                scenes: &project.scenes,
+                modules: &modules,
+                asset_paths: Some(&assets),
+                active_components: None,
+            };
+            let runtime = project
+                .prepare_runtime_with_context(&registry.clone(), &context)
+                .unwrap();
+            assert_eq!(
+                runtime.audio_cues,
+                BTreeMap::from([("fixture.config".into(), "asset://config".into())])
+            );
+        }
+        assert_eq!(project, source);
+        project
+            .audio_cues
+            .insert("fixture.reject-preparation".into(), "reject".into());
+        let rejected_source = project.clone();
+        let context = crate::ComponentValidationContext {
+            scenes: &project.scenes,
+            modules: &modules,
+            asset_paths: Some(&assets),
+            active_components: None,
+        };
+        assert!(
+            project
+                .prepare_runtime_with_context(&registry, &context)
+                .unwrap_err()
+                .contains("Source preparation rejected")
+        );
+        assert_eq!(
+            project, rejected_source,
+            "Failed preparation must discard its partially changed copy"
+        );
+    }
+
+    #[derive(Default)]
+    struct ContributionPublication {
+        value: u64,
+        commits: usize,
+        rollbacks: usize,
+    }
+    struct ContributionEmitter {
+        private_counter: u64,
+        before: u64,
+        publication: Arc<std::sync::Mutex<ContributionPublication>>,
+    }
+    impl ExecutableSystem for ContributionEmitter {
+        fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            self.before = self.private_counter;
+            self.private_counter += 1;
+            *state = json!(self.private_counter);
+            ctx.game.time += 1.;
+            ctx.game.world.transform_mut(1).unwrap().translation[0] += 1.;
+            ctx.game
+                .module_data
+                .insert("fixture.counter".into(), json!(self.private_counter));
+            ctx.set_resource("value", json!(self.private_counter))?;
+            ctx.events.push(GameEvent::new(
+                "fixture.changed",
+                json!({
+                    "count": self.private_counter,
+                    "accepted": ctx.input.pressed("accept"),
+                }),
+            ));
+            Ok(())
+        }
+        fn commit_tick(&mut self) -> Result<(), String> {
+            let mut publication = self.publication.lock().unwrap();
+            publication.value = self.private_counter;
+            publication.commits += 1;
+            Ok(())
+        }
+        fn rollback_tick(&mut self) -> Result<(), String> {
+            self.private_counter = self.before;
+            self.publication.lock().unwrap().rollbacks += 1;
+            Ok(())
+        }
+    }
+    fn neutral_contribution() -> crate::GameContribution {
+        crate::GameContribution {
+            begin_tick: |_| Ok(()),
+            id: "fixture.presentation".into(),
+            activation_modules: BTreeSet::from(["fixture.optional".into()]),
+            initial_camera: |_| crate::Camera::default(),
+            follow_target: |_| None,
+            decorate_snapshot: |_, _| {},
+            script_input: |input| serde_json::to_value(input).unwrap(),
+            validate_event: |event| {
+                if event.name == "fixture.changed" && event.payload["accepted"] != json!(true) {
+                    return Err("Source event contract rejected".into());
+                }
+                Ok(())
+            },
+            diagnostics: |_| json!({}),
+        }
+    }
+
+    #[test]
+    fn scheduled_contribution_event_rejection_rolls_back_all_staged_outputs() {
+        let publication = Arc::new(std::sync::Mutex::new(ContributionPublication::default()));
+        let mut registry = SystemRegistry::default();
+        let shared = publication.clone();
+        registry
+            .register(
+                SystemDescriptor {
+                    id: "fixture.emitter".into(),
+                    state_schema: "counter/1".into(),
+                    components: vec![],
+                    ports: vec![SystemPort {
+                        name: "value".into(),
+                        data_type: "Number".into(),
+                        access: ResourceAccess::ReadWrite,
+                    }],
+                    requires: vec![],
+                },
+                move |_| {
+                    Ok(Box::new(ContributionEmitter {
+                        private_counter: 0,
+                        before: 0,
+                        publication: shared.clone(),
+                    }))
+                },
+            )
+            .unwrap();
+        let contribution = neutral_contribution();
+        assert!(
+            registry
+                .register_game_contribution(contribution.clone())
+                .is_err()
+        );
+        registry
+            .register(
+                SystemDescriptor {
+                    id: "fixture.optional".into(),
+                    state_schema: "1".into(),
+                    components: vec![],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(BoundNoop)),
+            )
+            .unwrap();
+        registry
+            .register_game_contribution(contribution.clone())
+            .unwrap();
+        assert!(
+            registry
+                .register_game_contribution(contribution.clone())
+                .is_err()
+        );
+        let mut graph = ExecutionGraph {
+            resources: vec![SystemResource {
+                name: "counter".into(),
+                data_type: "Number".into(),
+                external: true,
+                initial: json!(0),
+            }],
+            stages: vec![SystemStage {
+                name: "Source".into(),
+                nodes: vec![SystemNode {
+                    id: "emitter".into(),
+                    module: "fixture.emitter".into(),
+                    params: Value::Null,
+                    bindings: BTreeMap::from([("value".into(), "counter".into())]),
+                    after: vec![],
+                }],
+            }],
+        };
+        let original_game = GameState {
+            scene: "empty".into(),
+            time: 0.,
+            tick: 0,
+            world: crate::EcsWorld::from_objects(vec![crate::WorldObject {
+                id: 1,
+                parent: None,
+                transform: crate::Transform::default(),
+                color: [255; 4],
+            }])
+            .unwrap(),
+            module_data: BTreeMap::from([("fixture.untouched".into(), json!({"keep":[1,2,3]}))]),
+            control: crate::SessionControl::default(),
+        };
+        assert!(!contribution.is_active(&graph));
+        assert!(registry.active_game_contributions(&graph).is_empty());
+        let mut inactive = SystemExecutor::new(&graph, &registry).unwrap();
+        let mut inactive_game = original_game.clone();
+        inactive
+            .step(&mut inactive_game, &GameInput::default(), 0.01, &mut vec![])
+            .unwrap();
+        assert_eq!(
+            publication.lock().unwrap().value,
+            1,
+            "Installation alone must not enable the event validator"
+        );
+
+        graph.stages[0].nodes.push(SystemNode {
+            id: "optional".into(),
+            module: "fixture.optional".into(),
+            params: Value::Null,
+            bindings: BTreeMap::new(),
+            after: vec!["emitter".into()],
+        });
+        assert!(contribution.is_active(&graph));
+        assert_eq!(
+            registry
+                .active_game_contributions(&graph)
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fixture.presentation"]
+        );
+        let mut executor = SystemExecutor::new(&graph, &registry).unwrap();
+        let mut game = original_game;
+        let mut events = vec![GameEvent::new("fixture.previous", json!({"keep":true}))];
+        let accepted = GameInput {
+            actions: BTreeSet::from(["accept".into()]),
+            ..Default::default()
+        };
+        executor
+            .step(&mut game, &accepted, 0.01, &mut events)
+            .unwrap();
+        let before_game = game.clone();
+        let before_states = executor.states();
+        let before_resources = executor.resources().clone();
+        let before_events = events.clone();
+        let before_commits = publication.lock().unwrap().commits;
+        let mut transaction = InitializationTransaction::default();
+        let error = executor
+            .step_with_transaction(
+                &mut game,
+                &GameInput::default(),
+                0.01,
+                &mut events,
+                &mut transaction,
+            )
+            .unwrap_err();
+        assert!(error.contains("Source event contract rejected"));
+        assert_eq!(game, before_game);
+        assert_eq!(executor.states(), before_states);
+        assert_eq!(executor.resources(), &before_resources);
+        assert_eq!(events, before_events);
+        assert_eq!(publication.lock().unwrap().value, 1);
+        assert_eq!(publication.lock().unwrap().commits, before_commits);
+        assert_eq!(publication.lock().unwrap().rollbacks, 1);
+        assert!(transaction.validated_times.is_empty());
+        assert_eq!(transaction.commits, 0);
+        assert_eq!(transaction.rollbacks, 1);
+        executor
+            .step(&mut game, &accepted, 0.01, &mut events)
+            .unwrap();
+        assert_eq!(
+            executor.states()["emitter"],
+            json!(2),
+            "Rejected ticks must restore implementation-private counters before retry"
+        );
+        assert_eq!(executor.resources()["counter"].value, json!(2));
+        assert_eq!(publication.lock().unwrap().value, 2);
+        assert_eq!(game.world.object(1).unwrap().transform.translation[0], 2.);
+        assert_eq!(
+            game.module_data["fixture.untouched"],
+            json!({"keep":[1,2,3]})
+        );
+        assert_eq!(events.len(), before_events.len() + 1);
     }
 }

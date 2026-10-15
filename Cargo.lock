@@ -1176,6 +1176,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "module-engine-arpg"
+version = "0.4.0"
+dependencies = [
+ "egui",
+ "module-engine-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "module-engine-content"
 version = "0.4.0"
 dependencies = [
@@ -1212,11 +1222,13 @@ name = "module-engine-editor"
 version = "0.4.0"
 dependencies = [
  "eframe",
+ "module-engine-arpg",
  "module-engine-content",
  "module-engine-core",
  "module-engine-custom",
  "module-engine-project",
  "module-engine-script",
+ "module-engine-two-arenas",
  "module-engine-vulkan",
  "png",
  "serde",
@@ -1242,6 +1254,15 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "module-engine-two-arenas"
+version = "0.4.0"
+dependencies = [
+ "module-engine-arpg",
+ "module-engine-core",
+ "serde_json",
 ]
 
 [[package]]

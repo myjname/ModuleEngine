@@ -104,6 +104,8 @@ pub struct GameSnapshot {
     pub frame_revision: Option<u64>,
     pub frame_completed_at: Option<Instant>,
     pub presentation_revision: u64,
+    pub presentation_ids: Vec<String>,
+    pub game_diagnostics: Value,
     pub device: String,
     pub world_kind: WorldKind,
     pub renderer_performance: RendererPerformance,
@@ -279,7 +281,7 @@ impl GameWorker {
         let Ok(mut mailbox) = self.shared.mailbox.try_lock() else {
             return Err(input);
         };
-        let pressed = input.attack || input.interact || input.restart;
+        let pressed = !input.actions.is_empty() || input.restart;
         if pressed && !input.restart && mailbox.edges.len() >= EDGE_CAPACITY {
             return Err(input);
         }
@@ -292,8 +294,8 @@ impl GameWorker {
             mailbox.edges.clear();
         }
         mailbox.held = GameInput {
-            attack: false,
-            interact: false,
+            actions: Default::default(),
+            action_values: Default::default(),
             restart: false,
             ..input.clone()
         };
@@ -467,10 +469,9 @@ impl Actor {
                         (mailbox.held.clone(), edge)
                     };
                     if let Some((_, pressed)) = &edge {
-                        input.attack = pressed.attack;
-                        input.interact = pressed.interact;
+                        input.actions.clone_from(&pressed.actions);
+                        input.action_values.clone_from(&pressed.action_values);
                         input.restart = pressed.restart;
-                        input.aim_world = pressed.aim_world;
                     }
                     let before_tick = self.host.session.state().tick;
                     let result = if input.restart {
@@ -704,8 +705,8 @@ impl Actor {
             .max(through)
             .max(mailbox.cancelled_through);
         mailbox.edges.retain(|edge| edge.sequence > through);
-        mailbox.held.attack = false;
-        mailbox.held.interact = false;
+        mailbox.held.actions.clear();
+        mailbox.held.action_values.clear();
         mailbox.held.restart = false;
         Ok(())
     }
@@ -815,8 +816,8 @@ impl Actor {
             Ok(()) if self.host.accepted_document().execution_eq(&document) => {
                 self.preparation_error = None;
                 self.document = None;
-                if authoring && let Some(player) = self.host.session.state().player() {
-                    self.host.camera.target = player.object.transform.translation;
+                if authoring && let Some(target) = self.host.frame_target() {
+                    self.host.camera.target = target;
                 }
                 self.reply(request, WorkerReplyKind::Document, Ok(()));
                 true
@@ -939,6 +940,8 @@ impl Actor {
             frame_revision: self.frame_revision,
             frame_completed_at: self.frame_completed_at,
             presentation_revision: self.host.presentation_revision(),
+            presentation_ids: self.host.presentation_ids(),
+            game_diagnostics: self.host.game_diagnostics(),
             device: self.host.device.clone(),
             world_kind: self.host.session.world_kind(),
             renderer_performance: self.host.renderer_performance(),

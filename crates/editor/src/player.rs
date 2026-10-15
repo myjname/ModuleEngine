@@ -1,8 +1,10 @@
 //! Standalone game presentation. Shares gameplay and renderer with editor Play.
-use crate::game_host::{GameHost, aim_at};
+use crate::game_host::GameHost;
+use crate::game_presentations::{capture_input_for, has_input_for};
+pub use crate::game_presentations::{draw_hud_for, preview_aim_for, read_input_for};
 use crate::game_worker::{GameSnapshot, GameWorker, WorkerCommand};
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use module_engine_core::{Camera, GameInput, GameState, GameStatus, GraphDocument, WorldKind};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
+use module_engine_core::{GameInput, GraphDocument, WorldKind};
 use serde::Serialize;
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -27,36 +29,13 @@ pub fn run(
     // capture can verify the HUD for an authored combat fixture.
     if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
         let mut input = GameInput::default();
-        if std::env::var_os("MODULE_ENGINE_CAPTURE_ATTACK").is_some()
-            && let Some(player) = host.session.state().player()
-        {
-            let p = player.object.transform.translation;
-            if let Some(target) = host
-                .session
-                .state()
-                .world
-                .entities_snapshot()
-                .into_iter()
-                .filter(|e| {
-                    e.components
-                        .get("actor")
-                        .and_then(|a| a.get("team"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some("enemy")
-                })
-                .min_by(|a, b| {
-                    let distance = |v: [f32; 3]| (v[0] - p[0]).powi(2) + (v[2] - p[2]).powi(2);
-                    distance(a.object.transform.translation)
-                        .total_cmp(&distance(b.object.transform.translation))
-                })
-            {
-                input.attack = true;
-                input.aim_world = target.object.transform.translation;
-            }
+        if std::env::var_os("MODULE_ENGINE_CAPTURE_ATTACK").is_some() {
+            input = capture_input_for(host.presentation_id(), host.session.state());
         }
         host.step(1. / 60., &input)?;
-        if input.attack {
-            input.attack = false;
+        if !input.actions.is_empty() {
+            input.actions.clear();
+            input.action_values.clear();
             for _ in 0..2 {
                 host.step(1. / 60., &input)?;
             }
@@ -70,7 +49,7 @@ pub fn run(
         ..Default::default()
     };
     eframe::run_native(
-        "ModuleEngine / Two Arenas",
+        "ModuleEngine / Player",
         options,
         Box::new(move |cc| {
             crate::app::configure_style(&cc.egui_ctx);
@@ -237,7 +216,7 @@ impl Player {
             // unreachable, despite the actor's priority restart protocol.
             self.pending_inputs.clear();
             self.pending_inputs.push_back(input.clone());
-        } else if input.attack || input.interact {
+        } else if !input.actions.is_empty() {
             if self.pending_inputs.len() < 128 {
                 self.pending_inputs.push_back(input.clone());
             } else {
@@ -257,8 +236,8 @@ impl Player {
             }
         }
         let mut held = input;
-        held.attack = false;
-        held.interact = false;
+        held.actions.clear();
+        held.action_values.clear();
         held.restart = false;
         // A contended tiny mailbox is retried on the next UI frame; it never
         // locks the UI behind a running script, renderer or state query.
@@ -327,7 +306,11 @@ impl eframe::App for Player {
             .show(ui, |ui| {
                 let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click());
                 let camera = snapshot.as_ref().map(|s| s.camera).unwrap_or_default();
-                let mut input = read_input_mode(ui, &response, rect, camera, false);
+                let presentation = snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.presentation_ids.first())
+                    .map(String::as_str);
+                let mut input = read_input_for(presentation, ui, &response, rect, camera, false);
                 if ui.input(|i| i.focused && i.key_pressed(egui::Key::Escape)) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -384,16 +367,23 @@ impl eframe::App for Player {
                                     (rect.height() * pixels_per_point).round() as u32,
                                 ],
                                 pixels_per_point,
-                                enemies: snapshot.state.living_enemies(),
-                                game_status: snapshot.state.status,
+                                enemies: snapshot
+                                    .game_diagnostics
+                                    .get("active_enemies")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or_default()
+                                    as usize,
+                                game_status: snapshot
+                                    .game_diagnostics
+                                    .get("status")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
                                 render_success: snapshot.frame.is_some()
                                     && snapshot.render_error.is_none(),
                                 focused: ui.input(|i| i.focused),
                                 window_visible: ui.input(|i| i.viewport().visible()),
-                                user_input: input.movement != [0.; 2]
-                                    || input.attack
-                                    || input.interact
-                                    || input.restart,
+                                user_input: has_input_for(presentation, &input),
                                 had_error: self.error.is_some(),
                             });
                         }
@@ -417,34 +407,22 @@ impl eframe::App for Player {
                 }
                 let hud_started = Instant::now();
                 if let Some(snapshot) = &snapshot {
-                    let aim = (response.hovered() && ui.input(|i| i.focused))
-                        .then_some(input.aim_world)
-                        .or_else(|| {
-                            if std::env::var_os("EFRAME_SCREENSHOT_TO").is_none()
-                                || std::env::var_os("MODULE_ENGINE_CAPTURE_ATTACK").is_none()
-                            {
-                                return None;
-                            }
-                            snapshot
-                                .state
-                                .attack_visuals
-                                .iter()
-                                .find(|a| {
-                                    snapshot
-                                        .state
-                                        .world
-                                        .component(a.attacker, "player")
-                                        .is_some()
-                                })
-                                .map(|a| {
-                                    [
-                                        a.area.center[0] + a.area.direction[0] * a.area.range,
-                                        a.area.center[1],
-                                        a.area.center[2] + a.area.direction[1] * a.area.range,
-                                    ]
-                                })
-                        });
-                    if draw_hud(ui, rect, &snapshot.state, snapshot.camera, aim) {
+                    let aim = preview_aim_for(
+                        presentation,
+                        &snapshot.state,
+                        &input,
+                        response.hovered() && ui.input(|i| i.focused),
+                        std::env::var_os("EFRAME_SCREENSHOT_TO").is_some()
+                            && std::env::var_os("MODULE_ENGINE_CAPTURE_ATTACK").is_some(),
+                    );
+                    if draw_hud_for(
+                        presentation,
+                        ui,
+                        rect,
+                        &snapshot.state,
+                        snapshot.camera,
+                        aim,
+                    ) {
                         self.pending_inputs.clear();
                         self.pending_commands
                             .push_back(WorkerCommand::Restart { request: ui_frame });
@@ -521,7 +499,7 @@ struct NativeFrameSample {
     canvas_pixels: [u32; 2],
     pixels_per_point: f32,
     enemies: usize,
-    game_status: GameStatus,
+    game_status: String,
     render_success: bool,
     focused: bool,
     window_visible: Option<bool>,
@@ -627,7 +605,7 @@ impl NativeBenchmark {
         let workload_met = complete
             && self.samples.iter().all(|s| {
                 s.enemies == 20
-                    && s.game_status == GameStatus::Playing
+                    && s.game_status == "Playing"
                     && s.render_success
                     && !s.had_error
                     && s.window_visible != Some(false)
@@ -640,10 +618,10 @@ impl NativeBenchmark {
                 .as_ref()
                 .is_some_and(|s| s.mean_ms <= FRAME_BUDGET_MS && s.p95_ms <= FRAME_BUDGET_MS);
         let target_met = physical_resolution_met && workload_met && timing_met && error.is_none();
-        let state = snapshot.map(|s| s.state.as_ref());
-        let player_health = state
-            .and_then(|s| s.player())
-            .and_then(|p| p.components.get("health").cloned());
+        let diagnostics = snapshot.map(|snapshot| &snapshot.game_diagnostics);
+        let player_health = diagnostics
+            .and_then(|value| value.get("player_health"))
+            .cloned();
         let mut report = serde_json::json!({
             "schema_version":2,
             "kind":"native-player-window",
@@ -680,7 +658,7 @@ impl NativeBenchmark {
             "cpu_identifier":std::env::var("PROCESSOR_IDENTIFIER").ok(),
             "native_vsync_requested":true,"model_paths":self.model_paths,"world_kind":snapshot.map(|s|format!("{:?}",s.world_kind)),
             "enemy_count_min":self.samples.iter().map(|s|s.enemies).min(),"enemy_count_max":self.samples.iter().map(|s|s.enemies).max(),
-            "game_status_final":state.map(|s|format!("{:?}",s.status)),"player_health_final":player_health,
+            "game_status_final":diagnostics.and_then(|value|value.get("status")),"player_health_final":player_health,
             "focused_frames":self.samples.iter().filter(|s|s.focused).count(),"user_input_frames":self.samples.iter().filter(|s|s.user_input).count(),
             "error_frames":self.samples.iter().filter(|s|s.had_error).count(),"last_error":error,"interrupted":interrupted,
             "measurement_scope":"Callback cadence measures UI/presentation including texture upload, draw, swap/vsync and OS scheduling. Simulation and Vulkan/readback run on the Game worker; their last completed costs are reported separately. Unique game frames are counted by changed Frame Arc identity; repeats of an old frame never increase mean_fps. Observed frame intervals are quantized by UI sampling; this is not photons/display scanout or GPU timestamps."
@@ -720,296 +698,14 @@ pub fn update_texture(
         );
     }
 }
-pub fn read_input(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    rect: Rect,
-    camera: Camera,
-) -> GameInput {
-    read_input_mode(ui, response, rect, camera, true)
-}
-
-fn read_input_mode(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    rect: Rect,
-    camera: Camera,
-    respect_editor_focus: bool,
-) -> GameInput {
-    let mut input = GameInput::default();
-    if ui.input(|i| i.focused && i.pointer.any_pressed()) && response.hovered() {
-        response.request_focus();
-    }
-    if ui.input(|i| !i.focused)
-        || (respect_editor_focus && ui.ctx().egui_wants_keyboard_input() && !response.has_focus())
-        || rect.width() <= 0.
-        || rect.height() <= 0.
-    {
-        return input;
-    }
-    ui.input(|i| {
-        input.movement = [
-            i.key_down(egui::Key::D) as u8 as f32 - i.key_down(egui::Key::A) as u8 as f32,
-            i.key_down(egui::Key::S) as u8 as f32 - i.key_down(egui::Key::W) as u8 as f32,
-        ];
-        input.attack = response.hovered() && i.pointer.button_pressed(egui::PointerButton::Primary);
-        input.interact = i.key_pressed(egui::Key::E);
-        input.restart = i.key_pressed(egui::Key::R);
-        if let Some(p) = i.pointer.hover_pos() {
-            input.aim_world = aim_at(
-                camera,
-                [
-                    (p.x - rect.center().x) / (rect.width() * 0.5),
-                    (rect.center().y - p.y) / (rect.height() * 0.5),
-                ],
-                rect.aspect_ratio(),
-            );
-        }
-    });
-    input
-}
-pub fn draw_hud(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    state: &GameState,
-    camera: Camera,
-    aim: Option<[f32; 3]>,
-) -> bool {
-    let painter = ui.painter_at(rect);
-    for warning in state
-        .telegraphs
-        .iter()
-        .filter(|_| state.status == GameStatus::Playing)
-    {
-        if let Some(shape) = telegraph_shape(camera, warning, rect) {
-            painter.add(shape);
-        }
-    }
-    crate::combat_visuals::draw(ui, rect, camera, state, aim);
-    let player = state.player();
-    if let Some(player) = player {
-        let health = player.components.get("health");
-        let current = health
-            .and_then(|h| h.get("current"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.);
-        let maximum = health
-            .and_then(|h| h.get("maximum"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(100.);
-        let bar = Rect::from_min_size(rect.left_top() + Vec2::new(22., 22.), Vec2::new(230., 24.));
-        painter.rect_filled(bar, 5., Color32::from_black_alpha(180));
-        painter.rect_filled(
-            Rect::from_min_size(
-                bar.min,
-                Vec2::new(
-                    bar.width() * (current / maximum.max(1.)).clamp(0., 1.) as f32,
-                    bar.height(),
-                ),
-            ),
-            5.,
-            Color32::from_rgb(80, 195, 140),
-        );
-        painter.text(
-            bar.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("HP {current:.0} / {maximum:.0}"),
-            egui::FontId::proportional(15.),
-            Color32::WHITE,
-        );
-    }
-    let enemies = state
-        .world
-        .entities_with(&["actor"])
-        .into_iter()
-        .filter(|id| {
-            state
-                .world
-                .component(*id, "actor")
-                .and_then(|a| a.get("team"))
-                .and_then(|t| t.as_str())
-                == Some("enemy")
-        })
-        .count();
-    painter.text(
-        rect.left_top() + Vec2::new(22., 60.),
-        egui::Align2::LEFT_TOP,
-        format!(
-            "{}  ·  Enemies {enemies}\nWASD move · LMB attack · R restart",
-            state.scene
-        ),
-        egui::FontId::proportional(15.),
-        Color32::WHITE,
-    );
-    for entity in state
-        .world
-        .entities_with(&["boss"])
-        .into_iter()
-        .filter_map(|id| state.world.entity(id))
-    {
-        let health = entity.components.get("health");
-        let current = health
-            .and_then(|h| h.get("current"))
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.);
-        let maximum = health
-            .and_then(|h| h.get("maximum"))
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(1.);
-        let bar = Rect::from_min_size(
-            Pos2::new(rect.center().x - 200., rect.top() + 24.),
-            Vec2::new(400., 18.),
-        );
-        painter.rect_filled(bar, 4., Color32::from_black_alpha(180));
-        painter.rect_filled(
-            Rect::from_min_size(
-                bar.min,
-                Vec2::new(
-                    bar.width() * (current / maximum.max(1.)) as f32,
-                    bar.height(),
-                ),
-            ),
-            4.,
-            Color32::from_rgb(200, 70, 100),
-        );
-        painter.text(
-            bar.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("BOSS {current:.0} / {maximum:.0}"),
-            egui::FontId::proportional(14.),
-            Color32::WHITE,
-        );
-    }
-    if state.status != GameStatus::Playing {
-        painter.rect_filled(
-            Rect::from_center_size(rect.center(), Vec2::new(370., 130.)),
-            12.,
-            Color32::from_black_alpha(220),
-        );
-        painter.text(
-            rect.center() - Vec2::new(0., 26.),
-            egui::Align2::CENTER_CENTER,
-            if state.status == GameStatus::Victory {
-                "VICTORY"
-            } else {
-                "DEFEAT"
-            },
-            egui::FontId::proportional(32.),
-            Color32::WHITE,
-        );
-        if ui
-            .put(
-                Rect::from_center_size(rect.center() + Vec2::new(0., 27.), Vec2::new(150., 32.)),
-                egui::Button::new("Restart / R"),
-            )
-            .clicked()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn telegraph_shape(
-    camera: Camera,
-    warning: &module_engine_core::AttackTelegraph,
-    rect: Rect,
-) -> Option<egui::Shape> {
-    if !warning.range.is_finite()
-        || warning.range <= 0.
-        || !warning.arc.is_finite()
-        || warning.arc <= 0.
-        || !warning
-            .center
-            .iter()
-            .chain(&warning.direction)
-            .all(|v| v.is_finite())
-    {
-        return None;
-    }
-    let arc = warning.arc.min(std::f32::consts::TAU);
-    let angle = warning.direction[1].atan2(warning.direction[0]);
-    let mut points = (0..=28)
-        .map(|n| {
-            let a = angle - arc * 0.5 + arc * n as f32 / 28.;
-            screen_point(
-                camera,
-                [
-                    warning.center[0] + a.cos() * warning.range,
-                    0.02,
-                    warning.center[2] + a.sin() * warning.range,
-                ],
-                rect,
-            )
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let fill = Color32::from_rgba_unmultiplied(
-        245,
-        60,
-        55,
-        65 + (warning.progress.clamp(0., 1.) * 95.) as u8,
-    );
-    let stroke = Stroke::new(2., Color32::LIGHT_RED);
-    if arc >= std::f32::consts::TAU - 0.001 {
-        // A full circle has no center in its boundary. Perspective projects it
-        // into a convex ellipse; including its center breaks convex tessellation.
-        points.pop();
-        return Some(egui::Shape::convex_polygon(points, fill, stroke));
-    }
-    let center = screen_point(camera, warning.center, rect)?;
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(center, fill);
-    for point in &points {
-        mesh.colored_vertex(*point, fill);
-    }
-    for n in 1..points.len() {
-        mesh.add_triangle(0, n as u32, n as u32 + 1);
-    }
-    let mut boundary = vec![center];
-    boundary.extend(points);
-    Some(egui::Shape::Vec(vec![
-        egui::Shape::mesh(mesh),
-        egui::Shape::closed_line(boundary, stroke),
-    ]))
-}
-pub fn screen_point(camera: Camera, p: [f32; 3], rect: Rect) -> Option<Pos2> {
-    let yaw = camera.yaw;
-    let pitch = camera.pitch;
-    let offset = [
-        yaw.sin() * pitch.cos() * camera.distance,
-        pitch.sin() * camera.distance,
-        yaw.cos() * pitch.cos() * camera.distance,
-    ];
-    let eye: [f32; 3] = std::array::from_fn(|i| camera.target[i] + offset[i]);
-    let delta: [f32; 3] = std::array::from_fn(|i| p[i] - eye[i]);
-    let forward = [
-        -yaw.sin() * pitch.cos(),
-        -pitch.sin(),
-        -yaw.cos() * pitch.cos(),
-    ];
-    let right = [yaw.cos(), 0., -yaw.sin()];
-    let up = [
-        -yaw.sin() * pitch.sin(),
-        pitch.cos(),
-        -yaw.cos() * pitch.sin(),
-    ];
-    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-        a.iter().zip(b).map(|(a, b)| a * b).sum()
-    }
-    let depth = dot(delta, forward);
-    if depth < 0.08 {
-        return None;
-    }
-    let f = rect.height() * 0.5 / (55_f32.to_radians() * 0.5).tan();
-    Some(Pos2::new(
-        rect.center().x + dot(delta, right) * f / depth,
-        rect.center().y - dot(delta, up) * f / depth,
-    ))
-}
+#[cfg(test)]
+pub use module_engine_arpg::ui::{draw_hud, read_input, screen_point, telegraph_shape};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use module_engine_arpg::{ArpgInput, GameInputExt};
+    use module_engine_core::{Camera, GameState};
 
     #[test]
     fn player_restart_reaches_paused_full_mailbox_and_cancels_unsent_old_actions() {
@@ -1026,10 +722,11 @@ mod tests {
         .unwrap();
         let mut player = Player::new(host, &egui::Context::default(), None);
         player.pending_commands.clear(); // The actor starts paused for this fixture.
-        let edge = GameInput {
+        let edge = ArpgInput {
             interact: true,
             ..Default::default()
-        };
+        }
+        .into_input();
         let mut accepted = 0;
         while accepted < 128 {
             if player.worker.submit_input(edge.clone()).is_ok() {
@@ -1146,13 +843,13 @@ mod tests {
     fn viewport_focus_keeps_keyboard_and_press_attacks_but_code_focus_blocks_them() {
         let ctx = egui::Context::default();
         input_frame(&ctx, vec![], false, true);
-        assert!(input_frame(&ctx, mouse(true), false, true).attack);
-        assert!(!input_frame(&ctx, mouse(false), false, true).attack);
+        assert!(input_frame(&ctx, mouse(true), false, true).attack());
+        assert!(!input_frame(&ctx, mouse(false), false, true).attack());
         let movement = input_frame(&ctx, vec![key_w(true)], false, true);
-        assert_eq!(movement.movement, [0., -1.]);
+        assert_eq!(movement.movement(), [0., -1.]);
         let next = input_frame(&ctx, mouse(true), false, true);
-        assert!(next.attack);
-        assert_eq!(next.movement, [0., -1.]);
+        assert!(next.attack());
+        assert_eq!(next.movement(), [0., -1.]);
         let editing = input_frame(&ctx, mouse(false), true, true);
         assert_eq!(editing, GameInput::default());
         assert_eq!(
@@ -1181,7 +878,7 @@ mod tests {
             target: [0.; 3],
         };
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920., 1080.));
-        let mut warning = module_engine_core::AttackTelegraph {
+        let mut warning = module_engine_arpg::AttackTelegraph {
             attacker: 100,
             attacker_lifetime: None,
             attacker_player: None,

@@ -172,6 +172,7 @@ struct RustSystem {
     overrides: Arc<Mutex<RenderOverrides>>,
     pending: Option<ScriptTick>,
     checkpoint: Option<(Value, RenderOverrides)>,
+    input_contributions: Vec<GameContribution>,
 }
 impl ExecutableSystem for RustSystem {
     fn initialize(
@@ -204,7 +205,19 @@ impl ExecutableSystem for RustSystem {
         input.asset_paths =
             module_engine_project::AssetManifest::from_value(&document.asset_manifest)?
                 .asset_paths();
-        input.input = serde_json::to_value(ctx.input).map_err(|e| e.to_string())?;
+        let script_input = document
+            .game
+            .as_ref()
+            .and_then(|game| {
+                self.input_contributions
+                    .iter()
+                    .find(|contribution| contribution.is_active(&game.execution))
+            })
+            .map_or(
+                generic_script_input as fn(&GameInput) -> Value,
+                |contribution| contribution.script_input,
+            );
+        input.input = script_input(ctx.input);
         input.events = ctx
             .events
             .iter()
@@ -377,6 +390,7 @@ fn game_registry_shared(
     overrides: Arc<Mutex<RenderOverrides>>,
 ) -> Result<SystemRegistry, String> {
     let mut registry = crate::host::composition_at(backend_root)?.systems;
+    let input_contributions = registry.game_contributions().cloned().collect::<Vec<_>>();
     let slots = slots.clone();
     let root = root.to_path_buf();
     let backend_root = backend_root.to_path_buf();
@@ -401,9 +415,14 @@ fn game_registry_shared(
             overrides: overrides.clone(),
             pending: None,
             checkpoint: None,
+            input_contributions: input_contributions.clone(),
         }))
     })?;
     Ok(registry)
+}
+
+fn generic_script_input(input: &GameInput) -> Value {
+    serde_json::to_value(input).expect("Portable input contains JSON values")
 }
 
 /// Resolve only the package selected and checked by distribution policy. A
@@ -506,12 +525,42 @@ pub struct GameHost {
     rejected_preparation: Option<(GraphDocument, String)>,
     rejected_preparation_dependencies: Option<ShaderDependencyWatch>,
     presentation_revision: u64,
+    contributions: Vec<GameContribution>,
 }
 fn next_presentation_revision() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 impl GameHost {
+    pub fn presentation_ids(&self) -> Vec<String> {
+        self.contributions
+            .iter()
+            .map(|contribution| contribution.id.clone())
+            .collect()
+    }
+    pub fn presentation_id(&self) -> Option<&str> {
+        self.contributions
+            .first()
+            .map(|contribution| contribution.id.as_str())
+    }
+    pub fn frame_target(&self) -> Option<[f32; 3]> {
+        self.contributions
+            .iter()
+            .find_map(|contribution| (contribution.follow_target)(self.session.state()))
+    }
+    pub fn game_diagnostics(&self) -> Value {
+        self.contributions.first().map_or_else(
+            || json!({}),
+            |contribution| (contribution.diagnostics)(self.session.state()),
+        )
+    }
+    fn follow_camera(&mut self) {
+        for contribution in &self.contributions {
+            if let Some(target) = (contribution.follow_target)(self.session.state()) {
+                self.camera.target = target;
+            }
+        }
+    }
     /// Unique host/presentation identity. Cosmetic graph edits do not invalidate
     /// the displayed frame; accepted world/GPU changes and simulation do.
     pub fn presentation_revision(&self) -> u64 {
@@ -686,6 +735,19 @@ impl GameHost {
             registry.clone(),
             &context,
         )?;
+        let contributions = registry
+            .active_game_contributions(&game.execution)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if contributions.len() > 1 {
+            return Err("Composition selects multiple game control presentations".into());
+        }
+        let camera = contributions
+            .first()
+            .map_or_else(Camera::default, |contribution| {
+                (contribution.initial_camera)(&game)
+            });
         let graph = selected_render_graph(&document)?.clone();
         if let Some(progress) = progress {
             progress.stage("Подготовка Vulkan и шейдеров");
@@ -740,12 +802,7 @@ impl GameHost {
         Ok(Self {
             session,
             content,
-            camera: Camera {
-                yaw: 0.,
-                pitch: 0.95,
-                distance: 21.,
-                target: [0., 0., 0.],
-            },
+            camera,
             slots,
             script_sources,
             last_step_ms: 0.,
@@ -754,6 +811,7 @@ impl GameHost {
             root,
             backend_root,
             document,
+            contributions,
             live_document,
             graph,
             renderer,
@@ -919,14 +977,23 @@ impl GameHost {
         let session = GameSession::new_with_registry_and_context(
             game.clone(),
             self.session.world_kind(),
-            registry,
+            registry.clone(),
             &context,
         )?;
+        let contributions = registry
+            .active_game_contributions(&game.execution)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if contributions.len() > 1 {
+            return Err("Composition selects multiple game control presentations".into());
+        }
         let mut live = self
             .live_document
             .lock()
             .map_err(|_| "Game configuration poisoned")?;
         self.session = session;
+        self.contributions = contributions;
         self.document = document.clone();
         *live = document.clone();
         if let Some(content) = staged_content {
@@ -951,14 +1018,7 @@ impl GameHost {
         max_ticks: usize,
     ) -> Result<usize, String> {
         if input.restart {
-            if !dt.is_finite()
-                || dt < 0.
-                || !input
-                    .movement
-                    .iter()
-                    .chain(&input.aim_world)
-                    .all(|value| value.is_finite())
-            {
+            if !dt.is_finite() || dt < 0. {
                 return Err("Game dt/input must be finite and dt nonnegative".into());
             }
             self.simulation_started = true;
@@ -975,9 +1035,7 @@ impl GameHost {
         self.presentation_revision = next_presentation_revision();
         self.last_step_ms = started.elapsed().as_secs_f64() * 1000.;
         self.audio.consume(self.session.events())?;
-        if let Some(player) = self.session.state().player() {
-            self.camera.target = player.object.transform.translation;
-        }
+        self.follow_camera();
         Ok(ticks)
     }
     /// Restart the whole hosted game, including state held outside GameSession.
@@ -1002,10 +1060,9 @@ impl GameHost {
         }
         *controls = RenderOverrides::default();
         drop(controls);
+        drop(slots);
         self.audio.reset_playback();
-        if let Some(player) = self.session.state().player() {
-            self.camera.target = player.object.transform.translation;
-        }
+        self.follow_camera();
         self.last_step_ms = 0.;
         self.last_render_ms = 0.;
         self.presentation_revision = next_presentation_revision();
@@ -1028,7 +1085,9 @@ impl GameHost {
                 }
             }
         }
-        crate::combat_visuals::apply_hit_flashes(&mut snapshot, self.session.state());
+        for contribution in &self.contributions {
+            (contribution.decorate_snapshot)(&mut snapshot, self.session.state());
+        }
         Ok(snapshot)
     }
     pub fn render(&mut self, width: usize, height: usize) -> Result<Frame, String> {
@@ -1465,7 +1524,8 @@ impl AudioModule {
     }
     pub fn consume(&mut self, events: &[GameEvent]) -> Result<(), String> {
         for event in events {
-            if let GameEvent::Sound { cue, .. } = event
+            if event.name == "Sound"
+                && let Some(cue) = event.payload.get("cue").and_then(Value::as_str)
                 && let Some(path) = self.cues.get(cue)
             {
                 self.played += 1;
@@ -1503,6 +1563,7 @@ impl Drop for AudioModule {
 }
 
 /// Cursor ray intersection with the horizontal gameplay plane. Uses the same camera/FOV as Vulkan.
+#[cfg(test)]
 pub fn aim_at(camera: Camera, normalized: [f32; 2], aspect: f32) -> [f32; 3] {
     fn norm(a: [f32; 3]) -> [f32; 3] {
         let l = a.iter().map(|v| v * v).sum::<f32>().sqrt().max(0.000001);
@@ -1542,66 +1603,7 @@ pub fn aim_at(camera: Camera, normalized: [f32; 2], aspect: f32) -> [f32; 3] {
 pub fn demo_document() -> GraphDocument {
     let mut document = crate::host::gpu_document(WorldKind::Ecs, RenderPath::Forward);
     crate::host::ensure_authoring_configuration(&mut document);
-    document.root.nodes.retain(|n| {
-        !matches!(
-            n.module.as_str(),
-            "custom.rust" | "clock.time" | "scalar.value"
-        )
-    });
-    let ids = document
-        .root
-        .nodes
-        .iter()
-        .map(|n| n.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    document
-        .root
-        .edges
-        .retain(|e| ids.contains(&e.from_node) && ids.contains(&e.to_node));
-    document.custom_sources.clear();
-    let mut game = GameProject::demo();
-    for scene in game.scenes.values_mut() {
-        if let Some(player) = scene.objects.iter_mut().find(|o| o.object.id == 1) {
-            player.components.insert(
-                "mesh".into(),
-                json!({"path":"assets/models/demo_crystal.glb"}),
-            );
-        }
-    }
-    game.execution.stages.push(SystemStage {
-        name: "Custom game logic".into(),
-        nodes: vec![SystemNode {
-            id: "game-controller".into(),
-            module: "custom.rust.update".into(),
-            params: json!({"source_id":"game-controller"}),
-            bindings: BTreeMap::from([
-                ("world".into(), "world".into()),
-                ("input".into(), "input".into()),
-                ("events".into(), "events".into()),
-            ]),
-            after: vec!["system-7".into()],
-        }],
-    });
-    document.custom_sources.insert(
-        "game-controller".into(),
-        r#"// module-engine-state: {"schema":"game.counter.v1","initial":{"ticks":0,"hits":0}}
-fn update(ctx: &mut ScriptContext) {
-    let ticks = ctx.state["ticks"].as_u64().unwrap_or(0) + 1;
-    let hits = ctx.state["hits"].as_u64().unwrap_or(0)
-        + ctx.events.iter().filter(|event| event.get("Hit").is_some()).count() as u64;
-    ctx.state["ticks"] = serde_json::json!(ticks);
-    ctx.state["hits"] = serde_json::json!(hits);
-    if ctx.input["interact"].as_bool() == Some(true) {
-        ctx.set_color(1, [250, 180, 75, 255]);
-        ctx.emit_event(serde_json::json!({"Sound":{"cue":"hit","object":1}}));
-    }
-}
-"#
-        .into(),
-    );
-    document.name = "ModuleEngine / Two arenas".into();
-    document.game = Some(game);
-    document
+    module_engine_two_arenas::document(document)
 }
 
 #[cfg(test)]
@@ -1864,10 +1866,11 @@ fn update(ctx: &mut ScriptContext) {
         let executable = slot.lock().unwrap().executable().to_path_buf();
         host.step(
             1. / 60.,
-            &GameInput {
+            &module_engine_arpg::ArpgInput {
                 movement: [1., 0.],
                 ..Default::default()
-            },
+            }
+            .into_input(),
         )
         .unwrap();
         assert!(

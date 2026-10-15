@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 module-engine-core = { path = "../engine-core" }
+module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }
+module-engine-two-arenas = { path = "../example-two-arenas" }
 module-engine-custom = { path = "../custom-rust" }
 module-engine-vulkan = { path = "../render-vulkan" }
 module-engine-script = { path = "../runtime-script" }

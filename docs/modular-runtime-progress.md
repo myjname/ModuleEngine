@@ -12,7 +12,7 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | 1 | Hierarchical death, scene transfer, system replacement, tool doctor | Regression tests; unchanged failure candidates | Complete |
 | 2 | Shared composition and component schemas | Source module defaults/Inspector/validation/save/runtime/export share contracts | Complete |
 | 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Complete |
-| 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Pending |
+| 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Complete |
 | 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Pending |
 | 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Pending |
 | 7 | Profiles, exact versions, separate Player | Safe checked migration and relocated exports for both games | Pending |
@@ -146,3 +146,43 @@ warnings denied. These scoped rechecks are recorded separately from the earlier
 full run. The two isolated/diagnostic tests remain excluded until stage 8.
 No release performance or complete migration acceptance is claimed here. The
 authored game file remains byte-identical.
+
+## Stage 4 result
+
+Core session state now contains the canonical world, opaque module JSON and
+generic halt/explicit scene-transition controls. Input separates latest held
+values, pressed action names and captured action context; event envelopes retain
+the externally tagged wire shape without genre enum branches. Native systems,
+ARPG schemas, frame/outcome types, queries and optional egui feedback
+now live in `crates/gameplay-arpg`. The concrete Two Arenas scenes, prefab,
+placements, resources and Rust controller live in `crates/example-two-arenas`.
+Production ARPG does not depend on that project. Source-installed project hooks and pure
+contributions connect package validation, camera/snapshot behavior, script input,
+events and diagnostics to the shared composition. See `optional-gameplay.md`.
+
+Core tests use neutral synthetic systems; ARPG owns the transferred combat
+and visual regressions, with explicit test-only example data. Independent source
+rules demonstrate renamed scenes, different opponent counts and a project-owned
+outcome. The default boss policy no longer implicitly declares victory; the
+example explicitly opts in.
+
+Review caught and fixed two extraction regressions: multiple UI panes could lose
+captured action context, and ARPG transients could clear a source module's freshly
+written intent. Active package tick hooks now run inside the checkpoint before
+every authored initialization/step. Scene transitions prepare the merged target,
+references, provider and system constructors before committing the source tick;
+rejection retains input, world, resources, events and private system state.
+An error from source `stop` after a committed tick is a separate lifecycle
+boundary: the destination is not published, the request remains pending, and
+native teardown effects and that already committed tick are not rewound.
+
+Checks: the final full workspace run passed 394 tests (core 82, ARPG including
+UI 46, editor 187, Two Arenas 2, and unchanged supporting suites); two dedicated
+diagnostic/isolated UI tests remain for stage 8. After moving the last example
+document constructor, scoped project and host checks supplement that full run.
+Workspace/all-targets Clippy passed with warnings denied. Logs are under
+`stage4-*` in the run directory. No release performance claim is made.
+
+The editor still installs ARPG, `GameHost` remains editor-owned and
+constructs Vulkan, and Player is not yet an independently built profile that can
+omit ARPG. Those are later-stage requirements, not results of this extraction.

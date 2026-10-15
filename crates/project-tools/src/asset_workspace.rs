@@ -1671,13 +1671,45 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn fixture() -> (PathBuf, AssetWorkspace, GraphDocument) {
+        use module_engine_core::{
+            AuthoredObject, AuthoredScene, GameProject, Prefab, Transform, WorldObject,
+        };
         let root =
             std::env::temp_dir().join(format!("asset-workspace-{}", crate::history::unique_id()));
         fs::create_dir_all(root.join("assets/models")).unwrap();
         fs::create_dir_all(root.join("assets/textures")).unwrap();
         let workspace = AssetWorkspace::new(&root, vec!["assets/gpu".into()]).unwrap();
         let mut doc = module_engine_core::demo_document(module_engine_core::WorldKind::Objects);
-        doc.game = Some(module_engine_core::GameProject::demo());
+        let mut project = GameProject::empty();
+        project.entry_scene = "arena".into();
+        let mut objects = vec![];
+        for id in [1, 2] {
+            let mut object = AuthoredObject::new(WorldObject {
+                id,
+                parent: None,
+                transform: Transform::default(),
+                color: [255; 4],
+            });
+            if id == 2 {
+                object.prefab = Some("asset-template".into());
+            }
+            objects.push(object);
+        }
+        project.scenes = BTreeMap::from([(
+            "arena".into(),
+            AuthoredScene {
+                name: "Asset fixture".into(),
+                objects,
+            },
+        )]);
+        project.prefabs.insert(
+            "asset-template".into(),
+            Prefab {
+                color: [80, 120, 160, 255],
+                components: BTreeMap::from([("fixture.data".into(), json!({"value":1}))]),
+            },
+        );
+        doc.game = Some(project);
         (root, workspace, doc)
     }
     fn id(doc: &GraphDocument, path: &str) -> String {
@@ -1950,7 +1982,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .prefabs
-            .get_mut("small-monster")
+            .get_mut("asset-template")
             .unwrap()
             .components
             .insert("mesh".into(), json!({"path":"assets/models/a.gltf"}));
@@ -1974,6 +2006,20 @@ mod tests {
             "assets/renamed/model.gltf"
         );
         assert_eq!(id(&op.document, "assets/renamed/model.gltf"), asset);
+        let game = op.document.game.as_ref().unwrap();
+        assert_eq!(
+            game.prefabs["asset-template"].components["mesh"]["path"],
+            "assets/renamed/model.gltf"
+        );
+        assert_eq!(
+            game.resolve_scene("arena")
+                .unwrap()
+                .iter()
+                .find(|entity| entity.object.id == 2)
+                .unwrap()
+                .components["mesh"]["path"],
+            "assets/renamed/model.gltf"
+        );
         let undone = op.record.undo(&root, &op.document).unwrap();
         assert_eq!(undone, doc);
         assert!(root.join("assets/models/a.gltf").exists());
@@ -2257,12 +2303,13 @@ mod tests {
         crate::history::remove_test_directory(&root);
     }
     #[test]
-    fn source_actor_team_contract_rejects_detach_before_files_change() {
+    fn source_required_resource_contract_rejects_detach_before_files_change() {
+        use module_engine_core::{ComponentSchema, PropertySchema, PropertyScope, PropertyType};
         let (root, workspace, mut doc) = fixture();
         write(&root, "assets/textures/a.png", b"image");
         workspace.synchronize(&mut doc).unwrap();
         let asset = id(&doc, "assets/textures/a.png");
-        let player = doc
+        let object = doc
             .game
             .as_mut()
             .unwrap()
@@ -2273,30 +2320,38 @@ mod tests {
             .iter_mut()
             .find(|object| object.object.id == 1)
             .unwrap();
-        player.components.get_mut("actor").unwrap()["team"] =
-            serde_json::json!("assets/textures/a.png");
-        // Unlike the builtin neutral fallback, this source contract requires
-        // an explicit, nonempty team after default resolution.
-        let mut schema = module_engine_core::SystemRegistry::builtin()
-            .components()
-            .schema("actor")
-            .unwrap()
-            .clone();
-        schema.owner_module = "source.required-actor-team".into();
-        schema.version = "required-team/1".into();
-        schema.defaults["team"] = json!("");
-        schema
-            .fields
-            .iter_mut()
-            .find(|field| field.id == "actor.team")
-            .unwrap()
-            .default = json!("");
+        object.components.insert(
+            "source.required-resource".into(),
+            json!({"path":"assets/textures/a.png"}),
+        );
+        // This source-owned contract requires a nonempty value after defaults;
+        // detaching its resource must reject before any file/journal changes.
+        let schema = ComponentSchema {
+            id: "source.required-resource".into(),
+            owner_module: "source.required-resource-owner".into(),
+            version: "required-resource/1".into(),
+            label: "Required resource".into(),
+            defaults: json!({"path":""}),
+            fields: vec![PropertySchema {
+                id: "source.required-resource.path".into(),
+                label: "Path".into(),
+                scope: PropertyScope::Component {
+                    component: "source.required-resource".into(),
+                },
+                value_type: PropertyType::Text { max_len: 1024 },
+                default: json!(""),
+                requires_modules: vec![],
+                requires_components: vec![],
+            }],
+            requires_modules: vec![],
+            requires_components: vec![],
+        };
         let workspace = with_source_contract(workspace, &mut doc, schema, |entity, _| {
-            if entity.components["actor"]["team"]
+            if entity.components["source.required-resource"]["path"]
                 .as_str()
                 .is_none_or(str::is_empty)
             {
-                return Err("Source actor team must be nonempty".into());
+                return Err("Source resource path must be nonempty".into());
             }
             Ok(())
         });
@@ -2305,7 +2360,7 @@ mod tests {
         let error = workspace
             .delete_asset(&doc, &asset, DeletePolicy::Detach)
             .unwrap_err();
-        assert!(error.contains("Source actor team must be nonempty"));
+        assert!(error.contains("Source resource path must be nonempty"));
         assert!(root.join("assets/textures/a.png").is_file());
         assert_eq!(
             fs::read(root.join("assets/textures/a.png")).unwrap(),

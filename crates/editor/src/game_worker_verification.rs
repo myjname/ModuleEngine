@@ -3,6 +3,7 @@ use crate::{
     game_host::GameHost,
     game_worker::{CustomApplyMode, GameSnapshot, GameWorker, WorkerCommand, WorkerReplyKind},
 };
+use module_engine_arpg::ArpgInput;
 use module_engine_core::{GameInput, GraphDocument, WorldKind};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -278,11 +279,12 @@ fn lifecycle(backend: &Path, compile: &Path, output: &Path) -> Result<Value, Str
         edges.push(
             input(
                 &worker,
-                GameInput {
+                ArpgInput {
                     interact: true,
                     aim_world: [aim, 0., 0.],
                     ..Default::default()
-                },
+                }
+                .into_input(),
                 &mut timings,
             )?
             .ok_or("Pressed edge did not receive a sequence")?,
@@ -436,11 +438,12 @@ fn lifecycle(backend: &Path, compile: &Path, output: &Path) -> Result<Value, Str
 
     // With Play paused, input can fill the bounded edge queue without being
     // consumed. Rejected input stays owned by the caller, then retries once.
-    let mut pending = GameInput {
+    let mut pending = ArpgInput {
         interact: true,
         aim_world: [404., 0., 0.],
         ..Default::default()
-    };
+    }
+    .into_input();
     let mut queued = vec![];
     // The protocol reserves 128 pressed packets. Retry transient pointer-lock
     // contention, then confirm that the 129th packet is returned intact.
@@ -498,11 +501,12 @@ fn lifecycle(backend: &Path, compile: &Path, output: &Path) -> Result<Value, Str
     wait_counter(&marker, before_restart_burst)?;
     let obsolete_edge = input(
         &worker,
-        GameInput {
+        ArpgInput {
             interact: true,
             aim_world: [111., 0., 0.],
             ..Default::default()
-        },
+        }
+        .into_input(),
         &mut timings,
     )?
     .ok_or("Pre-R interact missing sequence")?;
@@ -517,11 +521,12 @@ fn lifecycle(backend: &Path, compile: &Path, output: &Path) -> Result<Value, Str
     .ok_or("R input missing sequence")?;
     let after_restart_edge = input(
         &worker,
-        GameInput {
+        ArpgInput {
             interact: true,
             aim_world: [555., 0., 0.],
             ..Default::default()
-        },
+        }
+        .into_input(),
         &mut timings,
     )?
     .ok_or("Post-R interact missing sequence")?;

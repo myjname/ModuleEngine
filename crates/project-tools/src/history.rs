@@ -324,7 +324,19 @@ mod tests {
     #[test]
     fn initial_asset_metadata_rebase_preserves_scene_undo_and_redo_without_new_entry() {
         let mut initial = demo_document(WorldKind::Objects);
-        initial.game = Some(module_engine_core::GameProject::demo());
+        let mut project = module_engine_core::GameProject::empty();
+        project.scenes.get_mut("empty").unwrap().objects.push(
+            module_engine_core::AuthoredObject::new(module_engine_core::WorldObject {
+                id: 1,
+                parent: None,
+                transform: module_engine_core::Transform {
+                    translation: [2., 0., 3.],
+                    ..module_engine_core::Transform::default()
+                },
+                color: [255; 4],
+            }),
+        );
+        initial.game = Some(project);
         let scene = initial.game.as_ref().unwrap().entry_scene.clone();
         let original_position = initial.game.as_ref().unwrap().scenes[&scene].objects[0]
             .object

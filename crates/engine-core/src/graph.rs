@@ -787,7 +787,7 @@ mod tests {
                     .global
                     .insert("setting".into(), json!(true));
             },
-            |d| d.game = Some(crate::GameProject::demo()),
+            |d| d.game = Some(crate::GameProject::empty()),
             |d| d.root.nodes[0].params["value"] = json!(2.),
         ];
         for change in changes {
@@ -797,14 +797,36 @@ mod tests {
             assert!(!changed.execution_eq(&original));
         }
         let mut authored = original;
-        authored.game = Some(crate::GameProject::demo());
+        let mut project = crate::GameProject::empty();
+        project
+            .scenes
+            .get_mut("empty")
+            .unwrap()
+            .objects
+            .push(crate::AuthoredObject::new(crate::WorldObject {
+                id: 1,
+                parent: None,
+                transform: crate::Transform::default(),
+                color: [255; 4],
+            }));
+        project.execution.stages.push(crate::SystemStage {
+            name: "Equality fixture".into(),
+            nodes: vec![crate::SystemNode {
+                id: "fixture".into(),
+                module: "fixture.source".into(),
+                params: json!({"enabled":true}),
+                bindings: BTreeMap::new(),
+                after: vec![],
+            }],
+        });
+        authored.game = Some(project);
         let mut changed = authored.clone();
         changed
             .game
             .as_mut()
             .unwrap()
             .scenes
-            .get_mut("arena")
+            .get_mut("empty")
             .unwrap()
             .objects[0]
             .object

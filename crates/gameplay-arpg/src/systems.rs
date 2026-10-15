@@ -1,6 +1,9 @@
 use super::*;
+use crate::components::{Actor, Ai, Health, Melee, Obstacle, Portal};
+use crate::queries::{attack_direction, distance, normalized};
+use crate::state::read_frame;
 
-type TickFn = fn(&mut SystemContext<'_>, &mut Value) -> Result<(), String>;
+type TickFn = fn(&mut SystemContext<'_>, &mut ArpgFrame, &mut Value) -> Result<(), String>;
 type BuiltinConfiguration = (
     &'static str,
     TickFn,
@@ -10,11 +13,14 @@ type BuiltinConfiguration = (
 struct NativeSystem(TickFn);
 impl ExecutableSystem for NativeSystem {
     fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
-        (self.0)(ctx, state)
+        let mut frame = read_frame(ctx.game)?;
+        frame.ensure_tick(ctx.game);
+        (self.0)(ctx, &mut frame, state)?;
+        ctx.game.set_arpg(frame)
     }
 }
 
-pub(crate) fn register_game_systems(registry: &mut SystemRegistry) {
+pub(crate) fn register_arpg_systems(registry: &mut SystemRegistry) {
     use ResourceAccess::{Read, ReadWrite, Write};
     let configs: [BuiltinConfiguration; 8] = [
         (
@@ -118,8 +124,12 @@ pub(crate) fn register_game_systems(registry: &mut SystemRegistry) {
     }
 }
 
-fn input_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    let mut movement = ctx.input.movement;
+fn input_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
+    let mut movement = ctx.input.movement();
     let length = (movement[0] * movement[0] + movement[1] * movement[1]).sqrt();
     if length > 1. {
         movement = normalized(movement);
@@ -128,12 +138,12 @@ fn input_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String
         let Some(lifetime) = ctx.game.world.lifetime(id) else {
             continue;
         };
-        ctx.game.intentions.insert(
+        frame.intentions.insert(
             id,
             GameIntent {
                 movement,
-                aim: ctx.input.aim_world,
-                attack: ctx.input.attack,
+                aim: ctx.input.aim_world(),
+                attack: ctx.input.attack(),
                 lifetime: Some(lifetime),
             },
         );
@@ -153,7 +163,11 @@ fn column_health(world: &EcsWorld, id: u64) -> f32 {
     column_component::<Health>(world, id, "health").map_or(1., |health| health.current)
 }
 
-fn ai_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+fn ai_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
     let actors: Vec<_> = ctx
         .game
         .world
@@ -200,7 +214,7 @@ fn ai_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
         let Some(lifetime) = ctx.game.world.lifetime(id) else {
             continue;
         };
-        ctx.game.intentions.insert(
+        frame.intentions.insert(
             id,
             GameIntent {
                 movement,
@@ -224,9 +238,13 @@ enum PreviousPosition {
     },
 }
 
-fn movement_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+fn movement_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
     let mut previous = BTreeMap::new();
-    for (id, intent) in &ctx.game.intentions {
+    for (id, intent) in &frame.intentions {
         let Some(lifetime) = ctx.game.world.lifetime(*id) else {
             continue;
         };
@@ -255,7 +273,11 @@ fn movement_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), Str
     )
 }
 
-fn collision_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+fn collision_system(
+    ctx: &mut SystemContext<'_>,
+    _frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
     let previous: BTreeMap<u64, PreviousPosition> =
         serde_json::from_value(ctx.resource("previous")?.clone()).map_err(|e| e.to_string())?;
     let obstacles: Vec<_> = ctx
@@ -334,7 +356,11 @@ struct Swing {
     hit_lifetimes: BTreeMap<u64, u64>,
     active: bool,
 }
-fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+fn combat_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    state: &mut Value,
+) -> Result<(), String> {
     let mut swings: BTreeMap<u64, Swing> = if state.is_null() {
         BTreeMap::new()
     } else {
@@ -380,8 +406,7 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
             .hit_lifetimes
             .retain(|target, _| swing.hit.contains(target));
         swing.cooldown = (swing.cooldown - ctx.dt).max(0.);
-        let intent = ctx
-            .game
+        let intent = frame
             .intentions
             .get(&id)
             .filter(|intent| intent.lifetime.is_none_or(|previous| previous == lifetime))
@@ -395,7 +420,7 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
             swing.hit_lifetimes.clear();
             swing.active = true;
             swing.direction = attack_direction(pos, intent.aim);
-            ctx.events.push(GameEvent::Attack { attacker: id });
+            ctx.events.push(ArpgEvent::Attack { attacker: id }.into());
         }
         if !swing.active {
             continue;
@@ -403,7 +428,7 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
         // Attack direction is captured at windup start, giving an evasion window.
         if swing.windup > 0. {
             swing.windup = (swing.windup - ctx.dt).max(0.);
-            ctx.game.telegraphs.push(AttackTelegraph {
+            frame.telegraphs.push(AttackTelegraph {
                 attacker: id,
                 attacker_lifetime: Some(lifetime),
                 attacker_player: Some(ctx.game.world.component(id, "player").is_some()),
@@ -421,7 +446,7 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
             range: melee.range,
             arc: melee.arc,
         };
-        ctx.game.attack_visuals.push(AttackVisual {
+        frame.attack_visuals.push(AttackVisual {
             attacker: id,
             attacker_lifetime: Some(lifetime),
             attacker_player: Some(ctx.game.world.component(id, "player").is_some()),
@@ -454,7 +479,7 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
             *health = serde_json::to_value(hp).map_err(|e| e.to_string())?;
             swing.hit.push(target);
             swing.hit_lifetimes.insert(target, lifetime);
-            ctx.game.hit_visuals.push(HitVisual {
+            frame.hit_visuals.push(HitVisual {
                 attacker: id,
                 target,
                 target_lifetime: Some(lifetime),
@@ -464,11 +489,14 @@ fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
                 started_at: ctx.game.time,
                 expires_at: ctx.game.time + 0.35,
             });
-            ctx.events.push(GameEvent::Hit {
-                attacker: id,
-                target,
-                damage: melee.damage,
-            });
+            ctx.events.push(
+                ArpgEvent::Hit {
+                    attacker: id,
+                    target,
+                    damage: melee.damage,
+                }
+                .into(),
+            );
         }
         swing.remaining -= ctx.dt;
         if swing.remaining <= 0. {
@@ -489,7 +517,63 @@ enum DeathEmission {
     Current { object: u64, lifetime: u64 },
 }
 
-fn health_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+/// Verification uses the same private state readers as the native systems.
+/// Preserve every logical field and any extra combat data; remove only the
+/// process-local incarnation metadata after checking its expected shape.
+pub(crate) fn portable_native_state(module: &str, value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    match module {
+        "game.combat" => {
+            let _: BTreeMap<u64, Swing> = serde_json::from_value(value.clone())
+                .map_err(|error| format!("Invalid {module} state: {error}"))?;
+            let mut portable = value.clone();
+            for swing in portable
+                .as_object_mut()
+                .expect("Validated swing map")
+                .values_mut()
+            {
+                let swing = swing.as_object_mut().expect("Validated swing record");
+                swing.remove("lifetime");
+                swing.remove("hit_lifetimes");
+            }
+            Ok(portable)
+        }
+        "game.health" => {
+            let records: Vec<DeathEmission> = serde_json::from_value(value.clone())
+                .map_err(|error| format!("Invalid {module} state: {error}"))?;
+            for record in value.as_array().expect("Validated death records") {
+                if let Some(record) = record.as_object()
+                    && record
+                        .keys()
+                        .any(|key| key != "object" && key != "lifetime")
+                {
+                    return Err("Invalid game.health state: unknown death record field".into());
+                }
+            }
+            Ok(Value::Array(
+                records
+                    .into_iter()
+                    .map(|record| {
+                        let object = match record {
+                            DeathEmission::Legacy(object)
+                            | DeathEmission::Current { object, .. } => object,
+                        };
+                        json!(object)
+                    })
+                    .collect(),
+            ))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+fn health_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    state: &mut Value,
+) -> Result<(), String> {
     let records: Vec<DeathEmission> = if state.is_null() {
         vec![]
     } else {
@@ -540,13 +624,15 @@ fn health_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
             continue;
         }
         emitted.insert(id, lifetime);
-        ctx.events.push(GameEvent::Death { object: id });
+        ctx.events.push(ArpgEvent::Death { object: id }.into());
         if player {
-            ctx.game.status = GameStatus::Defeat;
+            frame.status = GameStatus::Defeat;
+            ctx.game.control.halted = true;
         } else {
             if victory {
-                ctx.game.status = GameStatus::Victory;
-                ctx.events.push(GameEvent::Victory);
+                frame.status = GameStatus::Victory;
+                ctx.game.control.halted = true;
+                ctx.events.push(ArpgEvent::Victory.into());
             }
             if ctx.game.world.contains(id) {
                 ctx.game.apply_commands(&[WorldCommand::Remove { id }])?;
@@ -564,8 +650,12 @@ fn health_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
     Ok(())
 }
 
-fn portal_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    if ctx.game.status != GameStatus::Playing {
+fn portal_system(
+    ctx: &mut SystemContext<'_>,
+    frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
+    if frame.status != GameStatus::Playing {
         return Ok(());
     }
     let Some(player) = ctx.game.world.entities_with(&["player"]).into_iter().next() else {
@@ -594,38 +684,66 @@ fn portal_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), Strin
         if distance(pos, target) <= portal.radius
             && (!portal.requires_clear || ctx.game.living_enemies() == 0)
         {
-            ctx.game.transition = Some(portal.scene);
-            ctx.game.transition_spawn = Some(portal.spawn);
+            ctx.game.control.transition = Some(SceneTransition {
+                destination: portal.scene,
+                carry: ctx
+                    .game
+                    .world
+                    .entities_with(&["persistent"])
+                    .into_iter()
+                    .collect(),
+                spawn: Some(portal.spawn),
+            });
             break;
         }
     }
     Ok(())
 }
 
-fn audio_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+fn audio_system(
+    ctx: &mut SystemContext<'_>,
+    _frame: &mut ArpgFrame,
+    _: &mut Value,
+) -> Result<(), String> {
     let sounds: Vec<_> = ctx
         .events
         .iter()
-        .filter_map(|event| match event {
-            GameEvent::Attack { attacker } => Some(("attack", Some(*attacker))),
-            GameEvent::Hit { target, .. } => Some(("hit", Some(*target))),
-            GameEvent::Death { object } => Some(("death", Some(*object))),
-            GameEvent::Victory => Some(("victory", None)),
+        .filter_map(|event| match ArpgEvent::try_from(event).ok()? {
+            ArpgEvent::Attack { attacker } => Some(("attack", Some(attacker))),
+            ArpgEvent::Hit { target, .. } => Some(("hit", Some(target))),
+            ArpgEvent::Death { object } => Some(("death", Some(object))),
+            ArpgEvent::Victory => Some(("victory", None)),
             _ => None,
         })
         .collect();
     for (cue, object) in sounds {
-        ctx.events.push(GameEvent::Sound {
-            cue: cue.into(),
-            object,
-        });
+        ctx.events.push(
+            ArpgEvent::Sound {
+                cue: cue.into(),
+                object,
+            }
+            .into(),
+        );
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[path = "regressions.rs"]
+mod regressions;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ArpgEvent as GameEvent;
+
+    fn arpg_events(session: &GameSession) -> Vec<GameEvent> {
+        session
+            .events()
+            .iter()
+            .filter_map(|e| ArpgEvent::try_from(e).ok())
+            .collect()
+    }
 
     fn actor(id: u64, team: &str, position: [f32; 3], speed: f32) -> crate::AuthoredObject {
         let mut entity = crate::AuthoredObject::new(WorldObject {
@@ -647,7 +765,7 @@ mod tests {
     fn native_state(objects: Vec<crate::AuthoredObject>) -> GameState {
         let mut project = GameProject::demo();
         project.scenes.get_mut("arena").unwrap().objects = objects;
-        GameSession::new(project, WorldKind::Ecs)
+        crate::session(project, WorldKind::Ecs)
             .unwrap()
             .state()
             .clone()
@@ -666,8 +784,13 @@ mod tests {
             input: &input,
             bindings: &bindings,
         };
-        tick(&mut context, state).unwrap();
+        let mut frame = context.game.arpg();
+        tick(&mut context, &mut frame, state).unwrap();
+        context.game.set_arpg(frame).unwrap();
         events
+            .into_iter()
+            .map(|event| ArpgEvent::try_from(event).unwrap())
+            .collect()
     }
 
     fn reuse_in_one_packet(game: &mut GameState, entity: GameEntity) {
@@ -692,7 +815,8 @@ mod tests {
     }
 
     fn attack_intent(game: &mut GameState) {
-        game.intentions.insert(
+        let mut frame = game.arpg();
+        frame.intentions.insert(
             1,
             GameIntent {
                 attack: true,
@@ -700,6 +824,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        game.set_arpg(frame).unwrap();
     }
 
     struct Reincarnate(crate::GameEntity);
@@ -735,7 +860,7 @@ mod tests {
             components: fresh.components,
             references: fresh.references,
         };
-        let mut registry = SystemRegistry::builtin();
+        let mut registry = crate::registry();
         registry
             .register(
                 SystemDescriptor {
@@ -780,12 +905,13 @@ mod tests {
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &(ArpgInput {
                         movement: [1., 0.],
                         attack: true,
                         aim_world: [20., 0., 4.],
                         ..Default::default()
-                    },
+                    })
+                    .into(),
                 )
                 .unwrap();
             assert_eq!(
@@ -800,14 +926,13 @@ mod tests {
             );
             assert!(session.state().world.component(1, "player").is_none());
             assert!(
-                session
-                    .events()
+                arpg_events(&session)
                     .iter()
                     .all(|event| !matches!(event, GameEvent::Attack { .. }))
             );
-            assert!(session.state().attack_visuals.is_empty());
+            assert!(session.state().arpg().attack_visuals.is_empty());
             assert_ne!(
-                session.state().intentions[&1].lifetime,
+                session.state().arpg().intentions[&1].lifetime,
                 session.state().world.lifetime(1)
             );
         }
@@ -838,7 +963,7 @@ mod tests {
                 [9., 0., 4.]
             );
             assert_ne!(
-                session.state().intentions[&1].lifetime,
+                session.state().arpg().intentions[&1].lifetime,
                 session.state().world.lifetime(1)
             );
         }
@@ -868,10 +993,11 @@ mod tests {
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &(ArpgInput {
                         movement: [1., 0.],
                         ..Default::default()
-                    },
+                    })
+                    .into(),
                 )
                 .unwrap();
             assert_eq!(
@@ -883,12 +1009,6 @@ mod tests {
                     .transform
                     .translation,
                 [2., 0., 0.]
-            );
-            let previous = &session.executor.resources()["previous"].value["1"];
-            assert_eq!(previous["position"], json!([0., 0., 0.]));
-            assert_ne!(
-                previous["lifetime"].as_u64(),
-                session.state().world.lifetime(1)
             );
         }
     }
@@ -919,6 +1039,7 @@ mod tests {
         let bindings = BTreeMap::from([("previous".into(), "positions".into())]);
         let input = GameInput::default();
         let mut events = vec![];
+        let mut frame = game.arpg();
         collision_system(
             &mut SystemContext {
                 game: &mut game,
@@ -928,12 +1049,13 @@ mod tests {
                 input: &input,
                 bindings: &bindings,
             },
+            &mut frame,
             &mut Value::Null,
         )
         .unwrap();
         let stopped = game.world.object(1).unwrap().transform.translation[0];
         assert!(stopped < 1.);
-        game.intentions.insert(
+        frame.intentions.insert(
             1,
             GameIntent {
                 movement: [1., 0.],
@@ -949,6 +1071,7 @@ mod tests {
                 input: &input,
                 bindings: &bindings,
             },
+            &mut frame,
             &mut Value::Null,
         )
         .unwrap();
@@ -1007,7 +1130,10 @@ mod tests {
             damage: 7.,
         };
         assert!(native_tick(&mut game, &mut state, combat_system).contains(&hit));
-        assert_eq!(game.hit_visuals[0].target_lifetime, previous_lifetime);
+        assert_eq!(
+            game.arpg().hit_visuals[0].target_lifetime,
+            previous_lifetime
+        );
         let same_target = game.world.entity(2).unwrap();
         game.world.upsert_entity(same_target).unwrap();
         assert!(!native_tick(&mut game, &mut state, combat_system).contains(&hit));
@@ -1015,7 +1141,7 @@ mod tests {
         assert!(native_tick(&mut game, &mut state, combat_system).contains(&hit));
         assert_ne!(game.world.lifetime(2), previous_lifetime);
         assert_eq!(
-            game.hit_visuals.last().unwrap().target_lifetime,
+            game.arpg().hit_visuals.last().unwrap().target_lifetime,
             game.world.lifetime(2)
         );
         assert_eq!(
@@ -1072,14 +1198,15 @@ mod tests {
             });
             let mut project = GameProject::demo();
             project.scenes.get_mut("arena").unwrap().objects = vec![player, enemy, decoration];
-            let mut session = GameSession::new(project, kind).unwrap();
+            let mut session = crate::session(project, kind).unwrap();
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &(ArpgInput {
                         movement: [1., 0.],
                         ..Default::default()
-                    },
+                    })
+                    .into(),
                 )
                 .unwrap();
             let state = session.state();
@@ -1097,7 +1224,7 @@ mod tests {
                 [10., 0., 0.]
             );
             assert_eq!(
-                state.intentions.keys().copied().collect::<Vec<_>>(),
+                state.arpg().intentions.keys().copied().collect::<Vec<_>>(),
                 vec![1, 2]
             );
         }
@@ -1120,40 +1247,36 @@ mod tests {
             }
             let mut project = GameProject::demo();
             project.scenes.get_mut("arena").unwrap().objects = vec![player, enemy];
-            let mut session = GameSession::new(project, kind).unwrap();
+            let mut session = crate::session(project, kind).unwrap();
             session
                 .step(
                     1. / 60.,
-                    &GameInput {
+                    &(ArpgInput {
                         aim_world: [0., 0., 1.],
                         attack: true,
                         ..Default::default()
-                    },
+                    })
+                    .into(),
                 )
                 .unwrap();
-            assert_eq!(session.state().status, GameStatus::Defeat);
+            assert_eq!(session.state().arpg().status, GameStatus::Defeat);
             assert_eq!(
                 session.state().world.component(1, "health").unwrap()["current"],
                 json!(0.)
             );
             assert!(!session.state().world.contains(2));
             for (attacker, target) in [(1, 2), (2, 1)] {
-                assert!(session.events().iter().any(|event| matches!(event, GameEvent::Hit { attacker: actual_attacker, target: actual_target, .. } if (*actual_attacker, *actual_target) == (attacker, target))));
-                assert!(
-                    session
-                        .events()
-                        .contains(&GameEvent::Death { object: target })
-                );
-                let visual = session
-                    .state()
+                assert!(arpg_events(&session).iter().any(|event| matches!(event, GameEvent::Hit { attacker: actual_attacker, target: actual_target, .. } if (*actual_attacker, *actual_target) == (attacker, target))));
+                assert!(arpg_events(&session).contains(&GameEvent::Death { object: target }));
+                let frame = session.state().arpg();
+                let visual = frame
                     .attack_visuals
                     .iter()
                     .find(|visual| visual.attacker == attacker)
                     .unwrap();
                 assert_eq!(visual.attacker_player, Some(attacker == 1));
                 assert!(visual.attacker_lifetime.is_some());
-                let hit = session
-                    .state()
+                let hit = frame
                     .hit_visuals
                     .iter()
                     .find(|visual| visual.target == target)
@@ -1161,5 +1284,204 @@ mod tests {
                 assert_eq!(hit.target_player, Some(target == 1));
             }
         }
+    }
+
+    struct SourceControllerBeforeMovement;
+    impl ExecutableSystem for SourceControllerBeforeMovement {
+        fn initialize(&mut self, ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            if !ctx.game.module_data.contains_key(FRAME_KEY) {
+                return Err("ARPG preparation must precede source initialization".into());
+            }
+            Ok(())
+        }
+        fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            let mut frame = ctx.game.arpg();
+            if !frame.intentions.is_empty() {
+                return Err("Source controller observed previous-tick intentions".into());
+            }
+            frame.intentions.insert(
+                1,
+                GameIntent {
+                    movement: [1., 0.],
+                    lifetime: ctx.game.world.lifetime(1),
+                    ..Default::default()
+                },
+            );
+            *state = json!(state.as_u64().unwrap_or_default() + 1);
+            ctx.game.set_arpg(frame)
+        }
+    }
+
+    #[test]
+    fn source_controller_before_movement_keeps_fresh_intent_and_sees_prepared_frame() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let mut project = demo_project();
+            project.scenes.get_mut("arena").unwrap().objects =
+                vec![actor(1, "source", [0.; 3], 3.)];
+            project.execution.stages.retain_mut(|stage| {
+                stage.nodes.retain_mut(|node| {
+                    node.after.clear();
+                    node.module == "game.movement"
+                });
+                !stage.nodes.is_empty()
+            });
+            project.execution.stages.insert(
+                0,
+                SystemStage {
+                    name: "Source controller".into(),
+                    nodes: vec![SystemNode {
+                        id: "source.controller".into(),
+                        module: "source.controller".into(),
+                        params: Value::Null,
+                        bindings: BTreeMap::from([("world".into(), "world".into())]),
+                        after: vec![],
+                    }],
+                },
+            );
+            let mut registry = crate::registry();
+            registry
+                .register(
+                    SystemDescriptor {
+                        id: "source.controller".into(),
+                        state_schema: "source.controller/1".into(),
+                        components: vec!["actor".into()],
+                        ports: vec![SystemPort {
+                            name: "world".into(),
+                            data_type: "GameWorld".into(),
+                            access: ResourceAccess::ReadWrite,
+                        }],
+                        requires: vec![],
+                    },
+                    |_| Ok(Box::new(SourceControllerBeforeMovement)),
+                )
+                .unwrap();
+            let mut session = GameSession::new_with_registry(project, kind, registry).unwrap();
+            session.step(1. / 60., &GameInput::default()).unwrap();
+            session.step(1. / 60., &GameInput::default()).unwrap();
+            assert!(
+                (session
+                    .state()
+                    .world
+                    .object(1)
+                    .unwrap()
+                    .transform
+                    .translation[0]
+                    - 0.1)
+                    .abs()
+                    < 0.000001
+            );
+            assert_eq!(session.system_states()["source.controller"], json!(2));
+        }
+    }
+
+    struct BeginTickProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl ExecutableSystem for BeginTickProbe {
+        fn initialize(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *state = json!(state.as_u64().unwrap_or_default() + 1);
+            let value = ctx.resource("scratch")?.as_u64().unwrap();
+            ctx.set_resource("scratch", json!(value + 1))?;
+            ctx.events.push(module_engine_core::GameEvent::new(
+                "source.probed",
+                json!({"count":value+1}),
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_begin_tick_rolls_back_before_entering_initialized_systems() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        let mut registry = SystemRegistry::builtin();
+        registry
+            .register(
+                SystemDescriptor {
+                    id: "source.probe".into(),
+                    state_schema: "source.probe/1".into(),
+                    components: vec![],
+                    ports: vec![SystemPort {
+                        name: "scratch".into(),
+                        data_type: "Json".into(),
+                        access: ResourceAccess::ReadWrite,
+                    }],
+                    requires: vec![],
+                },
+                move |_| Ok(Box::new(BeginTickProbe(factory_calls.clone()))),
+            )
+            .unwrap();
+        let mut contribution = host_contribution();
+        contribution.id = "source.preparation".into();
+        contribution.activation_modules = BTreeSet::from(["source.probe".into()]);
+        contribution.begin_tick = |game| {
+            crate::state::begin_tick(game)?;
+            if game.module_data.get("fail_begin") == Some(&json!(true)) {
+                game.world.clear();
+                game.module_data.insert("corruption".into(), json!(true));
+                return Err("Source preparation failed".into());
+            }
+            Ok(())
+        };
+        registry.register_game_contribution(contribution).unwrap();
+        let graph = ExecutionGraph {
+            resources: vec![SystemResource {
+                name: "scratch".into(),
+                data_type: "Json".into(),
+                external: true,
+                initial: json!(0),
+            }],
+            stages: vec![SystemStage {
+                name: "Probe".into(),
+                nodes: vec![SystemNode {
+                    id: "probe".into(),
+                    module: "source.probe".into(),
+                    params: Value::Null,
+                    bindings: BTreeMap::from([("scratch".into(), "scratch".into())]),
+                    after: vec![],
+                }],
+            }],
+        };
+        let mut executor = SystemExecutor::new(&graph, &registry).unwrap();
+        let mut game = native_state(vec![actor(1, "source", [0.; 3], 3.)]);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 1. / 60., &mut events)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        game.module_data.insert("fail_begin".into(), json!(true));
+        let before = game.clone();
+        let lifetime = game.world.lifetime(1);
+        let states = executor.states();
+        let resources = executor.resources().clone();
+        let before_events = events.clone();
+        assert!(
+            executor
+                .step(&mut game, &GameInput::default(), 1. / 60., &mut events)
+                .unwrap_err()
+                .contains("Source preparation failed")
+        );
+        assert_eq!(game, before);
+        assert_eq!(game.world.lifetime(1), lifetime);
+        assert_eq!(executor.states(), states);
+        assert_eq!(executor.resources(), &resources);
+        assert_eq!(events, before_events);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        game.module_data.insert("fail_begin".into(), json!(false));
+        executor
+            .step(&mut game, &GameInput::default(), 1. / 60., &mut events)
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "Preparation failure reinitialized a retained implementation"
+        );
     }
 }

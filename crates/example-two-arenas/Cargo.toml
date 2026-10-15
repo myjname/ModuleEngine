@@ -1,0 +1,10 @@
+[package]
+name = "module-engine-two-arenas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+module-engine-arpg = { path = "../gameplay-arpg" }
+serde_json.workspace = true

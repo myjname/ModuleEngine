@@ -1,7 +1,7 @@
 //! Persisted, renderer-neutral scenes and linked templates. Runtime owns a copy.
-use crate::{ComponentValidationContext, ExecutionGraph, SystemRegistry, Transform, WorldObject};
+use crate::{ComponentValidationContext, ExecutionGraph, SystemRegistry, WorldObject};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Source project; scenes and templates use stable identifiers, never pointers.
@@ -13,7 +13,7 @@ pub struct GameProject {
     #[serde(default)]
     pub prefabs: BTreeMap<String, Prefab>,
     pub execution: ExecutionGraph,
-    /// Optional audio module cue names map to project-relative PCM WAV files.
+    /// Archived cue metadata; installed source contracts validate and prepare it.
     #[serde(default)]
     pub audio_cues: BTreeMap<String, String>,
 }
@@ -44,7 +44,7 @@ pub struct AuthoredObject {
     pub prefab: Option<String>,
     #[serde(default)]
     pub components: BTreeMap<String, Value>,
-    /// Dot paths such as `health.maximum`; `color` overrides template color.
+    /// Dot paths such as `source.stats.value`; `color` overrides template color.
     #[serde(default)]
     pub overrides: BTreeMap<String, Value>,
     /// Scene-local object references; missing targets reject the complete scene.
@@ -75,6 +75,22 @@ impl AuthoredObject {
 }
 
 impl GameProject {
+    /// A neutral authored starting point with no installed gameplay assumptions.
+    pub fn empty() -> Self {
+        Self {
+            entry_scene: "empty".into(),
+            scenes: BTreeMap::from([(
+                "empty".into(),
+                AuthoredScene {
+                    name: "Empty".into(),
+                    objects: vec![],
+                },
+            )]),
+            prefabs: BTreeMap::new(),
+            execution: ExecutionGraph::default(),
+            audio_cues: BTreeMap::new(),
+        }
+    }
     /// Resolve authored structure without requiring installed component schemas.
     /// Unavailable override fields stay archived until active schema resolution.
     pub fn resolve_scene(&self, id: &str) -> Result<Vec<GameEntity>, String> {
@@ -232,17 +248,7 @@ impl GameProject {
         for id in self.scenes.keys() {
             self.resolve_scene_with_context(id, registry, context)?;
         }
-        if self
-            .execution
-            .stages
-            .iter()
-            .flat_map(|stage| &stage.nodes)
-            .any(|node| node.module == "game.audio")
-        {
-            for reference in self.audio_cues.values() {
-                crate::validate_component_asset_reference(reference, &["wav".into()], context)?;
-            }
-        }
+        registry.validate_project_contracts(self, context)?;
         Ok(())
     }
     /// Validate persisted data independently of the host's installed factories.
@@ -308,142 +314,16 @@ impl GameProject {
         for prefab in result.prefabs.values_mut() {
             prefab.components.retain(|name, _| active.contains(name));
         }
-        if !self
-            .execution
-            .stages
-            .iter()
-            .flat_map(|s| &s.nodes)
-            .any(|n| n.module == "game.audio")
-        {
-            result.audio_cues.clear();
-        }
+        registry.prepare_project_contracts(&mut result)?;
         Ok(result)
-    }
-
-    /// The acceptance game is authored data using the same reusable systems.
-    pub fn demo() -> Self {
-        let prefab = Prefab {
-            color: [190, 80, 85, 255],
-            components: BTreeMap::from([
-                (
-                    "actor".into(),
-                    json!({"team":"enemy","radius":0.36,"speed":2.1}),
-                ),
-                ("health".into(), json!({"maximum":36.0,"current":36.0})),
-                ("ai".into(), json!({"kind":"chase","aggro_radius":14.0})),
-                (
-                    "melee".into(),
-                    json!({"range":1.2,"damage":7.0,"cooldown":1.25,"arc":1.5,"duration":0.15,"windup":0.4}),
-                ),
-            ]),
-        };
-        fn object(id: u64, position: [f32; 3], scale: [f32; 3], color: [u8; 4]) -> AuthoredObject {
-            AuthoredObject::new(WorldObject {
-                id,
-                parent: None,
-                transform: Transform {
-                    translation: position,
-                    scale,
-                    ..Transform::default()
-                },
-                color,
-            })
-        }
-        fn arena(name: &str) -> AuthoredScene {
-            let mut objects = vec![object(
-                1000,
-                [0., -0.5, 0.],
-                [8., 0.2, 8.],
-                [60, 78, 86, 255],
-            )];
-            for (id, pos, scale) in [
-                (1001, [-8., 0.5, 0.], [0.2, 1., 8.]),
-                (1002, [8., 0.5, 0.], [0.2, 1., 8.]),
-                (1003, [0., 0.5, 8.], [8., 1., 0.2]),
-                (1004, [-4.75, 0.5, -8.], [3.25, 1., 0.2]),
-                (1005, [4.75, 0.5, -8.], [3.25, 1., 0.2]),
-                (1006, [-3., 0.4, 1.], [0.8, 0.8, 0.8]),
-            ] {
-                let mut wall = object(id, pos, scale, [95, 104, 119, 255]);
-                wall.components.insert(
-                    "obstacle".into(),
-                    json!({"half_extents":[scale[0],scale[2]]}),
-                );
-                objects.push(wall);
-            }
-            let mut player = object(1, [0., 0., 5.], [0.35, 0.7, 0.35], [70, 170, 245, 255]);
-            player.components = BTreeMap::from([
-                ("player".into(), json!({})),
-                ("persistent".into(), json!({})),
-                (
-                    "actor".into(),
-                    json!({"team":"player","radius":0.35,"speed":6.0}),
-                ),
-                ("health".into(), json!({"maximum":100.0,"current":100.0})),
-                (
-                    "melee".into(),
-                    json!({"range":2.2,"damage":28.0,"cooldown":0.35,"arc":1.9,"duration":0.12,"windup":0.0}),
-                ),
-            ]);
-            objects.push(player);
-            AuthoredScene {
-                name: name.into(),
-                objects,
-            }
-        }
-        let mut first = arena("Small monsters");
-        for index in 0..20_u64 {
-            let mut monster = object(
-                index + 10,
-                [
-                    -5. + (index % 5) as f32 * 2.4,
-                    0.,
-                    -5. + (index / 5) as f32 * 1.6,
-                ],
-                [0.3, 0.45, 0.3],
-                [190, 80, 85, 255],
-            );
-            monster.prefab = Some("small-monster".into());
-            first.objects.push(monster);
-        }
-        let mut passage = object(1100, [0., 0., -7.2], [1.4, 0.08, 0.5], [60, 190, 140, 255]);
-        passage.components.insert(
-            "portal".into(),
-            json!({"scene":"boss","radius":1.1,"requires_clear":true,"spawn":[0.,0.,5.]}),
-        );
-        first.objects.push(passage);
-        let mut second = arena("Boss arena");
-        let mut boss = object(100, [0., 0., -3.], [0.9, 1.2, 0.9], [150, 65, 210, 255]);
-        boss.components = BTreeMap::from([
-            (
-                "actor".into(),
-                json!({"team":"enemy","radius":0.9,"speed":1.6}),
-            ),
-            ("health".into(), json!({"maximum":400.0,"current":400.0})),
-            ("ai".into(), json!({"kind":"boss","aggro_radius":20.0})),
-            ("boss".into(), json!({"victory_on_death":true})),
-            (
-                "melee".into(),
-                json!({"range":3.0,"damage":30.0,"cooldown":2.2,"arc":6.3,"duration":0.1,"windup":1.0}),
-            ),
-        ]);
-        second.objects.push(boss);
-        Self {
-            entry_scene: "arena".into(),
-            scenes: BTreeMap::from([("arena".into(), first), ("boss".into(), second)]),
-            prefabs: BTreeMap::from([("small-monster".into(), prefab)]),
-            execution: ExecutionGraph::gameplay(),
-            audio_cues: ["attack", "hit", "death", "victory"]
-                .into_iter()
-                .map(|cue| (cue.into(), format!("assets/audio/{cue}.wav")))
-                .collect(),
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transform;
+    use serde_json::json;
     struct Noop;
     impl crate::ExecutableSystem for Noop {
         fn step(&mut self, _: &mut crate::SystemContext<'_>, _: &mut Value) -> Result<(), String> {
@@ -451,23 +331,65 @@ mod tests {
         }
     }
     fn schema_project() -> (GameProject, SystemRegistry) {
-        let mut project = GameProject::demo();
-        project.scenes = BTreeMap::from([(
-            "arena".into(),
-            AuthoredScene {
-                name: "Schema fixture".into(),
-                objects: vec![AuthoredObject::new(WorldObject {
-                    id: 1,
-                    parent: None,
-                    transform: Transform::default(),
-                    color: [255; 4],
-                })],
-            },
-        )]);
-        project.prefabs.clear();
-        project.audio_cues.clear();
-        project.execution = ExecutionGraph::default();
+        let project = GameProject {
+            entry_scene: "arena".into(),
+            scenes: BTreeMap::from([(
+                "arena".into(),
+                AuthoredScene {
+                    name: "Schema fixture".into(),
+                    objects: vec![AuthoredObject::new(WorldObject {
+                        id: 1,
+                        parent: None,
+                        transform: Transform::default(),
+                        color: [255; 4],
+                    })],
+                },
+            )]),
+            prefabs: BTreeMap::new(),
+            audio_cues: BTreeMap::new(),
+            execution: ExecutionGraph::default(),
+        };
         (project, SystemRegistry::builtin())
+    }
+    fn template_project() -> GameProject {
+        let (mut project, _) = schema_project();
+        project.prefabs.insert(
+            "fixture.template".into(),
+            Prefab {
+                color: [80, 120, 160, 255],
+                components: BTreeMap::from([("fixture.data".into(), json!({"count":36.}))]),
+            },
+        );
+        let objects = &mut project.scenes.get_mut("arena").unwrap().objects;
+        objects.clear();
+        for id in [10, 11] {
+            let mut object = AuthoredObject::new(WorldObject {
+                id,
+                parent: None,
+                transform: Transform {
+                    translation: [-5., 0., -5.],
+                    ..Transform::default()
+                },
+                color: [255; 4],
+            });
+            object.prefab = Some("fixture.template".into());
+            objects.push(object);
+        }
+        project
+    }
+    #[test]
+    fn unclaimed_project_metadata_remains_archived_during_runtime_preparation() {
+        let (mut project, registry) = schema_project();
+        project
+            .audio_cues
+            .insert("source.cue".into(), "../archived-source-value".into());
+        let source = project.clone();
+        project.validate_with_registry(&registry).unwrap();
+        assert_eq!(
+            project.prepare_runtime(&registry).unwrap().audio_cues,
+            source.audio_cues
+        );
+        assert_eq!(project, source);
     }
     fn activate_fixture(project: &mut GameProject, registry: &mut SystemRegistry) {
         registry
@@ -723,26 +645,26 @@ mod tests {
     }
     #[test]
     fn template_edits_propagate_except_overridden_fields() {
-        let mut p = GameProject::demo();
+        let mut p = template_project();
         let a = &mut p.scenes.get_mut("arena").unwrap().objects;
         a.iter_mut()
             .find(|e| e.object.id == 10)
             .unwrap()
             .overrides
-            .insert("health.maximum".into(), json!(80.));
+            .insert("fixture.data.count".into(), json!(80.));
         p.prefabs
-            .get_mut("small-monster")
+            .get_mut("fixture.template")
             .unwrap()
             .components
-            .get_mut("health")
-            .unwrap()["maximum"] = json!(60.);
+            .get_mut("fixture.data")
+            .unwrap()["count"] = json!(60.);
         let resolved = p.resolve_scene("arena").unwrap();
         assert_eq!(
             resolved
                 .iter()
                 .find(|e| e.object.id == 10)
                 .unwrap()
-                .components["health"]["maximum"],
+                .components["fixture.data"]["count"],
             80.
         );
         assert_eq!(
@@ -750,7 +672,7 @@ mod tests {
                 .iter()
                 .find(|e| e.object.id == 11)
                 .unwrap()
-                .components["health"]["maximum"],
+                .components["fixture.data"]["count"],
             60.
         );
         assert_eq!(
@@ -766,7 +688,7 @@ mod tests {
     }
     #[test]
     fn missing_reference_and_template_are_rejected() {
-        let mut p = GameProject::demo();
+        let mut p = template_project();
         p.scenes.get_mut("arena").unwrap().objects[0]
             .references
             .insert("owner".into(), 999999);
