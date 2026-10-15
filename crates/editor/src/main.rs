@@ -11,6 +11,8 @@ mod game_host;
 mod game_package;
 mod game_ui;
 mod game_verification;
+mod game_worker;
+mod game_worker_verification;
 mod host;
 mod layout;
 mod native_dialogs;
@@ -37,7 +39,11 @@ use std::{
 };
 
 fn main() {
-    if let Err(error) = run() {
+    let result = run();
+    // The native window is already closed. Finish detached Game owners here
+    // so their persistent Custom children are destroyed before process exit.
+    let cleanup = game_worker::finish_after_ui();
+    if let Err(error) = result.and(cleanup) {
         eprintln!("ModuleEngine: {error}");
         std::process::exit(1);
     }
@@ -69,9 +75,20 @@ fn run() -> Result<(), String> {
             "  module-engine-editor --scene-assets-check game-project.json output-folder\n\nScene: G/R/S tools, MMB orbit, Shift+MMB pan, wheel zoom, F frame, Escape cancel."
         );
         println!("  module-engine-editor --editor-benchmark game-project.json output-folder");
+        println!("  module-engine-editor --game-worker-check game-project.json output-folder");
         return Ok(());
     }
     match args.first().map(String::as_str) {
+        Some("--game-worker-check") => {
+            let source = Path::new(args.get(1).ok_or("Provide source project JSON")?);
+            let output = Path::new(args.get(2).ok_or("Provide separate verification folder")?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&game_worker_verification::run(source, output)?)
+                    .map_err(|e| e.to_string())?
+            );
+            return Ok(());
+        }
         Some("--editor-benchmark") => {
             let path = PathBuf::from(args.get(1).ok_or("Provide a source project JSON")?);
             let folder = PathBuf::from(args.get(2).ok_or("Provide a separate benchmark folder")?);

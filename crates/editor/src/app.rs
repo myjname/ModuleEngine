@@ -71,10 +71,10 @@ pub struct Editor {
     diagnostics: Vec<module_engine_core::Diagnostic>,
     runtime_error: Option<String>,
     game_preparation_error: Option<(String, String)>,
+    game_execution_error: Option<String>,
     status: String,
     dirty: bool,
     path: String,
-    export_path: String,
     tab: Tab,
     custom_view: CustomView,
     graph_path: Vec<usize>,
@@ -293,10 +293,10 @@ impl Editor {
             diagnostics: vec![],
             runtime_error: None,
             game_preparation_error: None,
+            game_execution_error: None,
             status: initial_status,
             dirty: false,
             path: path.to_string_lossy().into(),
-            export_path: "exports/my-engine".into(),
             tab: Tab::Graph,
             custom_view: CustomView::Both,
             graph_path: vec![],
@@ -394,6 +394,14 @@ impl Editor {
 
     fn is_update_source(&self) -> bool {
         self.is_update_id(&self.current_source)
+    }
+
+    fn is_game_source(&self, id: &str) -> bool {
+        self.document.game.as_ref().is_some_and(|game| {
+            crate::game_host::script_ids(game)
+                .iter()
+                .any(|source| source == id)
+        })
     }
 
     fn is_update_id(&self, id: &str) -> bool {
@@ -581,22 +589,31 @@ impl Editor {
         if self.json_dirty {
             return;
         }
-        if let Some(node) = self
-            .document
-            .root
-            .nodes
-            .iter_mut()
-            .find(|n| self.registry.is_renderer(&n.module))
-        {
+        self.flush_history();
+        let (old_passes, old_resources) = document_render_targets(&self.document);
+        let active = active_renderer_node(&self.document).map(|node| node.id.clone());
+        if let Some(node) = self.document.root.nodes.iter_mut().find(|node| {
+            active.as_ref() == Some(&node.id) && self.registry.is_renderer(&node.module)
+        }) {
             node.module = "render.vulkan".into();
             node.label = "Vulkan renderer".into();
             node.params = serde_json::json!({});
             node.subgraph = Some(Box::new(module_engine_vulkan::default_graph(path)));
+            let (passes, resources) = document_render_targets(&self.document);
+            module_engine_core::cleanup_removed_render_settings(
+                &mut self.document,
+                &old_passes.difference(&passes).cloned().collect(),
+                &old_resources.difference(&resources).cloned().collect(),
+            );
+            for id in passes.difference(&old_passes) {
+                properties::expose_new_gpu_pass(&mut self.document, id);
+            }
             self.graph_path.clear();
             self.graph_canvas.home();
             self.graph_canvas.zoom = 0.82;
             self.policy_baseline = self.document.clone();
             self.changed(true);
+            self.flush_history();
         }
     }
 
@@ -617,7 +634,15 @@ impl Editor {
             self.runtime_error = None;
             self.game_preparation_error = None;
         }
-        if let Some(mut runtime) = self.preview_builder.poll(&self.document, &self.registry) {
+        let backend_root = self
+            .distribution
+            .as_ref()
+            .map(|distribution| distribution.package_root.clone())
+            .unwrap_or_else(project::source_root);
+        if let Some(mut runtime) =
+            self.preview_builder
+                .poll_at(&self.document, &self.registry, &backend_root)
+        {
             if let Err(error) = runtime.apply_project_settings(self.time) {
                 self.preview_builder.failed_apply(&error);
                 self.runtime_error = Some(error);
@@ -663,6 +688,20 @@ impl Editor {
             .collect::<Vec<_>>();
         for id in ready {
             self.rust_edits.remove(&id);
+            if self.is_game_source(&id)
+                && !self.document.root.nodes.iter().any(|node| {
+                    node.module.starts_with("custom.rust")
+                        && node
+                            .params
+                            .get("source_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(id.as_str())
+                })
+            {
+                // Game instances use explicit Apply and their own host/state.
+                // Do not start a second, invisible legacy preview compilation.
+                continue;
+            }
             if let Some(source) = self.document.custom_sources.get(&id) {
                 let update = self.is_update_id(&id);
                 if update || self.scripts.has_active(&id) {
@@ -710,7 +749,7 @@ impl Editor {
 
     fn changed(&mut self, rebuild: bool) {
         if self.document.game.is_some()
-            && let Some(host) = &self.game_workbench.host
+            && let Some(active_kind) = self.game_workbench.game_world_kind()
         {
             let kind = if self
                 .document
@@ -723,7 +762,7 @@ impl Editor {
             } else {
                 WorldKind::Objects
             };
-            if host.session.world_kind() != kind {
+            if active_kind != kind {
                 self.game_workbench.stop();
                 self.playing = false;
             }
@@ -751,7 +790,13 @@ impl Editor {
             .iter()
             .any(|n| n.module == "render.vulkan")
         {
-            self.preview_builder.request(&self.document, &self.registry);
+            let backend_root = self
+                .distribution
+                .as_ref()
+                .map(|distribution| distribution.package_root.clone())
+                .unwrap_or_else(project::source_root);
+            self.preview_builder
+                .request_at(&self.document, &self.registry, &backend_root);
             self.last_render = -1.;
             return;
         }
@@ -1037,7 +1082,10 @@ impl Editor {
                 self.game_workbench = crate::game_ui::GameWorkbench::default();
                 self.game_workbench
                     .set_deferred_preparation(self.interactive_ui);
+                self.game_workbench
+                    .set_background_game(self.interactive_ui, None);
                 self.game_preparation_error = None;
+                self.game_execution_error = None;
                 if document.game.is_some() {
                     self.playing = false;
                 }
@@ -1602,13 +1650,14 @@ impl Editor {
         if self.document.game.is_some() {
             // Game may already be open before Play. Refresh its stopped copy
             // from author data before graphics sync can accept that document.
-            if self.playing || self.game_workbench.host.is_some() {
+            if self.playing || self.game_workbench.has_game_host() {
                 let (root, compile, kind) = self.game_context();
                 if let Err(error) =
                     self.game_workbench
                         .ensure(&self.document, &root, compile.as_deref(), kind)
                 {
                     self.game_preparation_error = Some((error.clone(), error.clone()));
+                    self.game_workbench.suspend_game_execution();
                     self.runtime_error = Some(error);
                     self.playing = false;
                     return;
@@ -1621,8 +1670,18 @@ impl Editor {
                 self.runtime_error = Some(displayed);
             }
             if let Err(error) = self.game_workbench.tick(dt, self.playing) {
+                self.game_execution_error = Some(error.clone());
                 self.runtime_error = Some(error);
                 self.playing = false;
+            }
+            if self.game_workbench.take_restart_recovered()
+                && self
+                    .game_execution_error
+                    .as_ref()
+                    .is_some_and(|error| self.runtime_error.as_ref() == Some(error))
+            {
+                self.runtime_error = None;
+                self.game_execution_error = None;
             }
             return;
         }
@@ -1955,33 +2014,8 @@ impl Editor {
         ui.add_space(14.0);
         ui.separator();
         ui.label(RichText::new("ПРОЕКТ С ИСХОДНИКАМИ").size(10.0).strong());
-        ui.add(
-            egui::TextEdit::singleline(&mut self.export_path).desired_width(ui.available_width()),
-        );
-        if ui.button("Экспорт проекта").clicked() {
-            if self.json_dirty && !self.apply_json() {
-                return;
-            }
-            let project_path = PathBuf::from(&self.path);
-            let asset_root = project_path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new("."));
-            match project::export_with_package_root(
-                &PathBuf::from(&self.export_path),
-                &self.document,
-                asset_root,
-                &self
-                    .distribution
-                    .as_ref()
-                    .expect("Engine authoring has a verified distribution")
-                    .package_root,
-            ) {
-                Ok(path) => {
-                    self.status = format!("Исходники и конфиг экспортированы: {}", path.display())
-                }
-                Err(error) => self.status = error,
-            }
+        if ui.button("Экспорт проекта…").clicked() {
+            self.dispatch_command(editor_workflow::Command::ExportSource, ui.ctx());
         }
         ui.label(
             RichText::new("Экспорт включает workspace, документацию и текущий project.json.")
@@ -2238,36 +2272,22 @@ impl Editor {
             ui.selectable_value(&mut self.custom_view, CustomView::Text, "Текст");
             ui.selectable_value(&mut self.custom_view, CustomView::Graph, "Граф");
             ui.selectable_value(&mut self.custom_view, CustomView::Both, "Рядом");
-            if ui.button("Применить Rust").clicked()
+            if !self.is_game_source(&self.current_source)
+                && ui.button("Применить Rust").clicked()
                 && let Some(source) = self.document.custom_sources.get(&self.current_source)
             {
-                if self
-                    .document
-                    .game
-                    .as_ref()
-                    .is_some_and(|g| crate::game_host::script_ids(g).contains(&self.current_source))
-                {
-                    if let Some(root) = self
-                        .distribution
-                        .as_ref()
-                        .and_then(|p| p.compile_root().ok())
-                    {
-                        self.game_workbench
-                            .request_custom(&self.current_source, source, &root);
-                    }
-                } else {
-                    self.scripts.request(
-                        &self.current_source,
-                        source,
-                        if self.is_update_source() {
-                            ScriptKind::Update
-                        } else {
-                            ScriptKind::Speed
-                        },
-                    );
-                }
+                self.scripts.request(
+                    &self.current_source,
+                    source,
+                    if self.is_update_source() {
+                        ScriptKind::Update
+                    } else {
+                        ScriptKind::Speed
+                    },
+                );
             }
-            if self.scripts.has_rejected_candidate(&self.current_source)
+            if !self.is_game_source(&self.current_source)
+                && self.scripts.has_rejected_candidate(&self.current_source)
                 && ui.button("Применить со сбросом состояния").clicked()
             {
                 match self.scripts.apply_rejected_with_reset(&self.current_source) {
@@ -2276,67 +2296,88 @@ impl Editor {
                 }
             }
         });
-        if let Some(source) = self.scripts.rejected_source(&self.current_source) {
-            ui.collapsing(
-                "Несовместимый кандидат: сохранённый исходник",
-                |ui| {
-                    ui.label(source);
-                },
-            );
-        }
-        if self.scripts.has_rejected_candidate(&self.current_source) {
-            ui.collapsing(
-                "Явная миграция состояния (JSON)",
-                |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.state_migration)
-                            .code_editor()
-                            .desired_rows(4),
-                    );
-                    if ui.button("Применить с этим состоянием").clicked() {
-                        match serde_json::from_str(&self.state_migration) {
-                            Ok(state) => match self
-                                .scripts
-                                .apply_rejected_with_migration(&self.current_source, state)
-                            {
-                                Ok(()) => {
-                                    self.status = "Rust применён с явно заданным состоянием".into()
-                                }
-                                Err(e) => self.status = e,
-                            },
-                            Err(e) => self.status = e.to_string(),
-                        }
-                    }
-                },
-            );
-        }
-        if self.scripts.pending(&self.current_source) {
-            ui.label(if self.scripts.has_active(&self.current_source) {
-                "Компиляция в фоне. Предыдущая версия остаётся активной."
-            } else {
-                "Компиляция в фоне. Код начнёт исполняться после успешной сборки."
-            });
-        }
-        if let Some(error) = self.scripts.errors.get(&self.current_source) {
-            egui::CollapsingHeader::new("Диагностика компилятора Rust")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.colored_label(Color32::from_rgb(246, 134, 130), error);
-                });
-        }
-        if let Some(active) = self.scripts.active_source(&self.current_source) {
-            ui.label(
-                if self
-                    .document
+        if self.is_game_source(&self.current_source) {
+            let (root, compile, kind) = self.game_context();
+            if let Err(error) =
+                self.game_workbench
+                    .ensure(&self.document, &root, compile.as_deref(), kind)
+            {
+                ui.colored_label(Color32::LIGHT_RED, format!("Подготовка Game: {error}"));
+            }
+            self.game_workbench.custom_editor_ui(
+                ui,
+                &self.current_source,
+                self.document
                     .custom_sources
                     .get(&self.current_source)
-                    .is_some_and(|s| s == active)
-                {
-                    "Исполняется скомпилированная версия исходника"
-                } else {
-                    "Исходник изменён; исполняется предыдущая скомпилированная версия"
-                },
+                    .map(String::as_str),
+                compile.as_deref(),
             );
+        } else {
+            if let Some(source) = self.scripts.rejected_source(&self.current_source) {
+                ui.collapsing(
+                    "Несовместимый кандидат: сохранённый исходник",
+                    |ui| {
+                        ui.label(source);
+                    },
+                );
+            }
+            if self.scripts.has_rejected_candidate(&self.current_source) {
+                ui.collapsing(
+                    "Явная миграция состояния (JSON)",
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.state_migration)
+                                .code_editor()
+                                .desired_rows(4),
+                        );
+                        if ui.button("Применить с этим состоянием").clicked()
+                        {
+                            match serde_json::from_str(&self.state_migration) {
+                                Ok(state) => match self
+                                    .scripts
+                                    .apply_rejected_with_migration(&self.current_source, state)
+                                {
+                                    Ok(()) => {
+                                        self.status =
+                                            "Rust применён с явно заданным состоянием".into()
+                                    }
+                                    Err(e) => self.status = e,
+                                },
+                                Err(e) => self.status = e.to_string(),
+                            }
+                        }
+                    },
+                );
+            }
+            if self.scripts.pending(&self.current_source) {
+                ui.label(if self.scripts.has_active(&self.current_source) {
+                    "Компиляция в фоне. Предыдущая версия остаётся активной."
+                } else {
+                    "Компиляция в фоне. Код начнёт исполняться после успешной сборки."
+                });
+            }
+            if let Some(error) = self.scripts.errors.get(&self.current_source) {
+                egui::CollapsingHeader::new("Диагностика компилятора Rust")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.colored_label(Color32::from_rgb(246, 134, 130), error);
+                    });
+            }
+            if let Some(active) = self.scripts.active_source(&self.current_source) {
+                ui.label(
+                    if self
+                        .document
+                        .custom_sources
+                        .get(&self.current_source)
+                        .is_some_and(|s| s == active)
+                    {
+                        "Исполняется скомпилированная версия исходника"
+                    } else {
+                        "Исходник изменён; исполняется предыдущая скомпилированная версия"
+                    },
+                );
+            }
         }
         ui.label(
             RichText::new(
@@ -2642,6 +2683,8 @@ impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.interactive_ui = true;
         self.game_workbench.set_deferred_preparation(true);
+        self.game_workbench
+            .set_background_game(true, Some(ui.ctx()));
         self.draw(ui);
     }
 }
@@ -2661,7 +2704,7 @@ pub fn configure_style(ctx: &egui::Context) {
 
 /// Global render settings address the renderer wired to the active viewport.
 /// An unused alternative renderer may reuse local pass IDs without owning them.
-fn active_vulkan_node(document: &GraphDocument) -> Option<&module_engine_core::Node> {
+fn active_renderer_node(document: &GraphDocument) -> Option<&module_engine_core::Node> {
     let mut outputs = document
         .root
         .nodes
@@ -2684,7 +2727,11 @@ fn active_vulkan_node(document: &GraphDocument) -> Option<&module_engine_core::N
         .root
         .nodes
         .iter()
-        .find(|node| node.id == source.from_node && node.module == "render.vulkan")
+        .find(|node| node.id == source.from_node)
+}
+
+fn active_vulkan_node(document: &GraphDocument) -> Option<&module_engine_core::Node> {
+    active_renderer_node(document).filter(|node| node.module == "render.vulkan")
 }
 
 fn document_render_targets(document: &GraphDocument) -> (BTreeSet<String>, BTreeSet<String>) {
@@ -3491,6 +3538,249 @@ mod tests {
         assert_eq!(editor.document, before);
         assert!(editor.status.contains("hdr_linear") && editor.status.contains("ldr_linear"));
         assert!(editor.graph_canvas.message.is_some());
+    }
+
+    #[test]
+    fn switching_render_path_reconciles_actual_ids_preserves_controls_and_undo() {
+        for path in [RenderPath::Forward, RenderPath::Deferred] {
+            let root = crate::project::source_root();
+            let mut document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Forward);
+            crate::host::ensure_authoring_configuration(&mut document);
+            document
+                .engine
+                .exposure
+                .variants
+                .get_mut("tonemap")
+                .unwrap()
+                .label = "Authored tone choices".into();
+            document
+                .project
+                .parameters
+                .insert("exposure".into(), serde_json::json!(1.4));
+            let mut alternative = active_vulkan_node(&document).unwrap().clone();
+            alternative.id = "alternative".into();
+            let alternative_graph = alternative.subgraph.clone();
+            document.root.nodes.insert(0, alternative);
+            document
+                .root
+                .edges
+                .push(make_edge("extract", "scene", "alternative", "scene"));
+            let mut editor = Editor::new(document, root.join("unused-switch-path.json"));
+            editor.authoring_intent = true;
+            editor.graph_path = vec![
+                editor
+                    .document
+                    .root
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == "renderer")
+                    .unwrap(),
+            ];
+            editor.delete_engine_node("aa");
+            editor.add_node("gpu.fxaa");
+            let replacement = editor.graph_canvas.selected.clone().unwrap();
+            editor.engine_actions(vec![
+                CanvasAction::Connect {
+                    from_node: "tonemap".into(),
+                    from_port: "color".into(),
+                    to_node: replacement.clone(),
+                    to_port: "color".into(),
+                },
+                CanvasAction::Connect {
+                    from_node: replacement.clone(),
+                    from_port: "color".into(),
+                    to_node: "encode".into(),
+                    to_port: "color".into(),
+                },
+            ]);
+            let before = editor.document.clone();
+            let tone = before.engine.exposure.variants["tonemap"].clone();
+            editor.switch_gpu_path(path);
+            let switched = editor.document.clone();
+            assert_eq!(switched.engine.exposure.variants["tonemap"], tone);
+            assert_eq!(
+                switched.project.parameters["exposure"],
+                serde_json::json!(1.4)
+            );
+            assert_eq!(
+                switched
+                    .root
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == "alternative")
+                    .unwrap()
+                    .subgraph,
+                alternative_graph
+            );
+            let graph = active_vulkan_node(&switched)
+                .unwrap()
+                .subgraph
+                .as_deref()
+                .unwrap();
+            assert!(graph.nodes.iter().any(|node| node.module
+                == if path == RenderPath::Forward {
+                    "gpu.forward"
+                } else {
+                    "gpu.gbuffer"
+                }));
+            let validator = module_engine_vulkan::RenderGraphValidator::new(graph).unwrap();
+            for group in switched.engine.exposure.variants.values() {
+                for variant in group.options.values() {
+                    let mut overrides = module_engine_core::RenderOverrides::default();
+                    overrides.apply_commands(&variant.commands).unwrap();
+                    validator.validate(&overrides).unwrap();
+                }
+            }
+            assert!(
+                !switched
+                    .engine
+                    .exposure
+                    .parameters
+                    .values()
+                    .any(|definition| definition.target.pass == replacement)
+            );
+            editor.undo();
+            assert_eq!(editor.document, before);
+            editor.redo();
+            assert_eq!(editor.document, switched);
+        }
+    }
+
+    #[test]
+    fn rust_panel_prepares_hidden_game_recovers_bad_source_and_applies_to_game_backend() {
+        let root = crate::project::source_root();
+        let id = "game-controller";
+        let mut document = crate::game_host::demo_document();
+        let good = document.custom_sources[id].clone();
+        document
+            .custom_sources
+            .insert(id.into(), "fn update(".into());
+        let mut editor = Editor::new(document, root.join("unused-hidden-game-rust.json"));
+        editor.playing = false;
+        editor.current_source = id.into();
+        editor.custom_view = CustomView::Text;
+        editor.game_workbench.set_deferred_preparation(true);
+        let ctx = egui::Context::default();
+        let frame = |editor: &mut Editor, events| {
+            editor.poll_candidates();
+            editor.tick_simulation(0.);
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1400., 1000.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| editor.custom_panel(ui),
+            )
+        };
+        frame(&mut editor, vec![]).drop_without_applying_deltas();
+        assert!(editor.game_workbench.host.is_none());
+        assert!(editor.game_workbench.has_pending_preparation());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while editor.game_workbench.has_pending_preparation() {
+            frame(&mut editor, vec![]).drop_without_applying_deltas();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(editor.game_workbench.host.is_none());
+        let output = frame(&mut editor, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with("Подготовка Game:"))));
+        output.drop_without_applying_deltas();
+        editor
+            .document
+            .custom_sources
+            .insert(id.into(), good.clone());
+        editor.changed(false);
+        loop {
+            frame(&mut editor, vec![]).drop_without_applying_deltas();
+            if editor.game_workbench.host.is_some()
+                && !editor.game_workbench.has_pending_preparation()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "correcting the Rust text must retry initial host preparation without opening Game"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let edited = format!("{good}\n// edited and applied from the standalone Rust pane\n");
+        editor
+            .document
+            .custom_sources
+            .insert(id.into(), edited.clone());
+        editor.changed(false);
+        editor.rust_edits.insert(id.into(), 0.);
+        editor.last_tick = 2.;
+        editor.poll_candidates();
+        assert!(
+            !editor.scripts.pending(id),
+            "a game-only source must not compile into an unused legacy preview backend"
+        );
+        let output = frame(&mut editor, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("предыдущая скомпилированная версия"))));
+        let apply = text_center(&output, "Применить Rust");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            frame(
+                &mut editor,
+                vec![
+                    egui::Event::PointerMoved(apply),
+                    egui::Event::PointerButton {
+                        pos: apply,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(
+            editor
+                .preparation_activities()
+                .iter()
+                .any(|activity| activity.title == format!("Rust Custom {id}")
+                    && activity.state == crate::activity::ActivityState::Running)
+        );
+        loop {
+            frame(&mut editor, vec![]).drop_without_applying_deltas();
+            if editor.game_workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .source()
+                == edited
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Rust Apply must update the Game instances"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!editor.scripts.has_active(id));
+        let output = frame(&mut editor, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Game: текущий исходник скомпилирован"))));
+        output.drop_without_applying_deltas();
+        editor.game_execution_error = Some("Owned previous game execution error".into());
+        editor.runtime_error = editor.game_execution_error.clone();
+        editor.game_workbench.input.restart = true;
+        editor.tick_simulation(0.);
+        assert!(
+            editor.runtime_error.is_none(),
+            "explicit restart while paused must recover its previous game execution error"
+        );
+        editor.runtime_error = Some("Unrelated GPU diagnostic".into());
+        editor.game_workbench.input.restart = true;
+        editor.tick_simulation(0.);
+        assert_eq!(
+            editor.runtime_error.as_deref(),
+            Some("Unrelated GPU diagnostic")
+        );
     }
 
     #[test]

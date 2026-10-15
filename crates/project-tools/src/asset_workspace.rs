@@ -22,6 +22,11 @@ pub fn asset_reference(id: &str) -> String {
     format!("asset://{id}")
 }
 
+#[cfg(test)]
+thread_local! {
+    static USAGE_DOCUMENT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetKind {
     Model,
@@ -307,37 +312,93 @@ impl AssetWorkspace {
         self.synchronize(&mut candidate)?;
         validate_candidate(&candidate)?;
         let id = crate::history::unique_id();
-        let mut deltas = vec![];
-        for (index, path) in paths.iter().enumerate() {
-            let bytes = fs::read(resolve_relative(&self.root, path)?).map_err(|e| e.to_string())?;
-            let snapshot_path = format!(".asset-history/{id}/after/{index}.bin");
-            write_new(&self.checked_target(&snapshot_path)?, &bytes)?;
-            deltas.push(AssetFileDelta {
-                path: path.clone(),
-                before: None,
-                after: Some(AssetFileSnapshot {
-                    snapshot_path,
-                    sha256: hash_bytes(&bytes),
-                }),
-            });
-        }
-        let record = AssetOperationRecord {
-            id,
-            label: "Import asset".into(),
-            before: document.clone(),
-            after: candidate.clone(),
-            files: deltas,
-            deleted_asset: None,
-            created_directories: vec![],
-        };
-        write_new(
-            &self.checked_target(&format!(".asset-history/{}/record.json", record.id))?,
-            &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
-        )?;
-        Ok(AssetOperation {
-            document: candidate,
-            record,
+        self.with_import_journal(&id, || {
+            let mut deltas = vec![];
+            for (index, path) in paths.iter().enumerate() {
+                let bytes =
+                    fs::read(resolve_relative(&self.root, path)?).map_err(|e| e.to_string())?;
+                let snapshot_path = format!(".asset-history/{id}/after/{index}.bin");
+                write_new(&self.checked_target(&snapshot_path)?, &bytes)?;
+                deltas.push(AssetFileDelta {
+                    path: path.clone(),
+                    before: None,
+                    after: Some(AssetFileSnapshot {
+                        snapshot_path,
+                        sha256: hash_bytes(&bytes),
+                    }),
+                });
+            }
+            let record = AssetOperationRecord {
+                id: id.clone(),
+                label: "Import asset".into(),
+                before: document.clone(),
+                after: candidate.clone(),
+                files: deltas,
+                deleted_asset: None,
+                created_directories: vec![],
+            };
+            write_new(
+                &self.checked_target(&format!(".asset-history/{}/record.json", record.id))?,
+                &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
+            )?;
+            Ok(AssetOperation {
+                document: candidate,
+                record,
+            })
         })
+    }
+    /// Adoption has not mutated live files yet. A failed snapshot/record write
+    /// may therefore remove only its freshly created, marked journal directory.
+    /// Normal file-operation failures retain recovery snapshots instead.
+    fn with_import_journal<T>(
+        &self,
+        id: &str,
+        write: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("Invalid import journal ID".into());
+        }
+        let parent = self.checked_target(".asset-history")?;
+        fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+        let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+        if !parent.starts_with(&self.root) {
+            return Err("Import journal leaves the project".into());
+        }
+        let journal = parent.join(id);
+        fs::create_dir(&journal).map_err(|error| error.to_string())?;
+        let journal = journal.canonicalize().map_err(|error| error.to_string())?;
+        if journal.parent() != Some(parent.as_path()) {
+            return Err("Import journal ownership check failed".into());
+        }
+        // The directory was created exclusively above; this marker permits
+        // cleanup to verify ownership again immediately before recursive removal.
+        let marker = journal.join(".import-owner");
+        if let Err(error) = write_new(&marker, id.as_bytes()) {
+            // No callback ran and remove_dir cannot delete pre-existing contents.
+            let _ = fs::remove_file(&marker);
+            let _ = fs::remove_dir(&journal);
+            return Err(error);
+        }
+        let result = write();
+        if let Err(error) = &result {
+            let owned = journal.canonicalize().ok().as_ref() == Some(&journal)
+                && journal.parent() == Some(parent.as_path())
+                && journal.starts_with(&self.root)
+                && fs::read(&marker).ok().as_deref() == Some(id.as_bytes());
+            if !owned {
+                return Err(format!(
+                    "{error}; import journal retained after failed ownership check: {}",
+                    journal.display()
+                ));
+            }
+            fs::remove_dir_all(&journal).map_err(|cleanup| {
+                format!(
+                    "{error}; import journal retained at {}: {cleanup}",
+                    journal.display()
+                )
+            })?;
+        }
+        result
     }
     fn protected(&self, path: &str) -> bool {
         let path = path.to_ascii_lowercase();
@@ -491,6 +552,19 @@ impl AssetWorkspace {
             if self.protected(&path) {
                 continue;
             }
+            // Player export owns this reserved prefix for its unpublished
+            // sibling directories. They can disappear while a scan is running.
+            if item
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".module-engine-game-export-")
+                && item
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+            {
+                continue;
+            }
             let resolved = item.path().canonicalize().map_err(|e| e.to_string())?;
             if !resolved.starts_with(&self.root) {
                 return Err(format!("Asset link leaves project: {path}"));
@@ -504,37 +578,77 @@ impl AssetWorkspace {
         Ok(())
     }
     pub fn usages(&self, document: &GraphDocument, id: &str) -> Result<Vec<AssetUsage>, String> {
+        self.usages_batch(document)?
+            .remove(id)
+            .ok_or_else(|| format!("Unknown asset ID: {id}"))
+    }
+
+    /// Build the complete reverse-reference index with one document walk and
+    /// one include traversal per inline shader. Browser refreshes must use this
+    /// batch instead of serializing the document independently for every tile.
+    pub fn usages_batch(
+        &self,
+        document: &GraphDocument,
+    ) -> Result<BTreeMap<String, Vec<AssetUsage>>, String> {
         let manifest = AssetManifest::from_value(&document.asset_manifest)?;
-        let entry = manifest
+        let paths = manifest
             .assets
-            .get(id)
-            .ok_or_else(|| format!("Unknown asset ID: {id}"))?;
-        let mut result = vec![];
+            .iter()
+            .map(|(id, entry)| {
+                normalize_relative(&entry.path).map(|path| (path.to_ascii_lowercase(), id.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut result: BTreeMap<String, Vec<AssetUsage>> = manifest
+            .assets
+            .keys()
+            .map(|id| (id.clone(), vec![]))
+            .collect();
+        #[cfg(test)]
+        USAGE_DOCUMENT_WALKS.with(|walks| walks.set(walks.get() + 1));
         let value = serde_json::to_value(document).map_err(|e| e.to_string())?;
         visit_values(&value, "", &mut |location, text| {
-            if text == asset_reference(id) || same_path(text, &entry.path) {
-                result.push(AssetUsage {
+            let id = if let Some(id) = text.strip_prefix("asset://") {
+                manifest.assets.contains_key(id).then(|| id.to_owned())
+            } else {
+                normalize_relative(text)
+                    .ok()
+                    .and_then(|path| paths.get(&path.to_ascii_lowercase()).cloned())
+            };
+            if let Some(usages) = id.and_then(|id| result.get_mut(&id)) {
+                usages.push(AssetUsage {
                     location: location.into(),
                     reference: text.into(),
                 });
             }
         });
         for (owner, asset) in &manifest.assets {
-            if owner != id && asset.dependencies.iter().any(|d| d == id) {
-                result.push(AssetUsage {
-                    location: format!("file:{}", asset.path),
-                    reference: entry.path.clone(),
-                });
+            for dependency in asset.dependencies.iter().collect::<BTreeSet<_>>() {
+                if dependency != owner
+                    && let Some(usages) = result.get_mut(dependency)
+                {
+                    usages.push(AssetUsage {
+                        location: format!("file:{}", asset.path),
+                        reference: manifest.assets[dependency].path.clone(),
+                    });
+                }
             }
         }
         for (source_id, source) in &document.shader_sources {
-            if let Ok(links) = hlsl_links(&self.root, "inline.hlsl", source, false)
-                && links.iter().any(|l| same_path(&l.target, &entry.path))
-            {
-                result.push(AssetUsage {
-                    location: format!("shader_source:{source_id}"),
-                    reference: entry.path.clone(),
-                });
+            if let Ok(links) = hlsl_links(&self.root, "inline.hlsl", source, false) {
+                let linked: BTreeSet<_> = links
+                    .into_iter()
+                    .map(|link| link.target.to_ascii_lowercase())
+                    .collect();
+                for path in linked {
+                    if let Some(id) = paths.get(&path)
+                        && let Some(usages) = result.get_mut(id)
+                    {
+                        usages.push(AssetUsage {
+                            location: format!("shader_source:{source_id}"),
+                            reference: manifest.assets[id].path.clone(),
+                        });
+                    }
+                }
             }
         }
         Ok(result)
@@ -1049,12 +1163,9 @@ fn write_current(path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
-        if path.exists()
-            && let Err(error) = fs::remove_file(path)
-        {
-            let _ = fs::remove_file(&temporary);
-            return Err(error.to_string());
-        }
+        // Rust's Windows rename uses replace-existing semantics. Keep the old
+        // directory entry until the flushed candidate replaces it atomically;
+        // unlinking it first created a process-crash window with no live file.
         if let Err(error) = fs::rename(&temporary, path) {
             let _ = fs::remove_file(&temporary);
             return Err(error.to_string());
@@ -1556,6 +1667,146 @@ mod tests {
         fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
         fs::write(root.join(path), bytes).unwrap();
     }
+    #[test]
+    fn batched_usages_walk_document_once_and_keep_all_references() {
+        let (root, workspace, mut doc) = fixture();
+        for index in 0..128 {
+            write(&root, &format!("assets/textures/{index}.bin"), b"asset");
+        }
+        workspace.synchronize(&mut doc).unwrap();
+        let manifest = AssetManifest::from_value(&doc.asset_manifest).unwrap();
+        for (index, (id, entry)) in manifest.assets.iter().enumerate() {
+            doc.properties.active.global.insert(
+                format!("resource-{index}"),
+                json!(if index.is_multiple_of(2) {
+                    asset_reference(id)
+                } else {
+                    entry.path.clone()
+                }),
+            );
+        }
+        USAGE_DOCUMENT_WALKS.with(|walks| walks.set(0));
+        let started = std::time::Instant::now();
+        let batched = workspace.usages_batch(&doc).unwrap();
+        let batched_time = started.elapsed();
+        assert_eq!(USAGE_DOCUMENT_WALKS.with(|walks| walks.get()), 1);
+        assert_eq!(batched.len(), 128);
+        assert!(batched.values().all(|usages| usages.len() == 1));
+        USAGE_DOCUMENT_WALKS.with(|walks| walks.set(0));
+        let started = std::time::Instant::now();
+        for id in manifest.assets.keys() {
+            assert_eq!(workspace.usages(&doc, id).unwrap(), batched[id]);
+        }
+        let repeated_time = started.elapsed();
+        assert_eq!(USAGE_DOCUMENT_WALKS.with(|walks| walks.get()), 128);
+        eprintln!(
+            "128 asset reverse references: one batch {batched_time:?}, per-tile rebuilds {repeated_time:?}; full document walks 1 vs 128"
+        );
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn replacing_asset_file_keeps_the_old_entry_until_publish_and_refuses_bad_target() {
+        let (root, _, _) = fixture();
+        let path = root.join("assets/file.bin");
+        fs::write(&path, b"old").unwrap();
+        write_current(&path, Some(b"new")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let directory = root.join("assets/directory");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("owned.bin"), b"keep").unwrap();
+        assert!(write_current(&directory, Some(b"new")).is_err());
+        assert_eq!(fs::read(directory.join("owned.bin")).unwrap(), b"keep");
+        assert!(!fs::read_dir(root.join("assets")).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".asset-write-")
+        }));
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn failed_import_journal_cleans_only_its_own_partial_snapshots() {
+        let (root, workspace, _) = fixture();
+        write(&root, ".asset-history/other/record.json", b"keep");
+        let error = workspace
+            .with_import_journal("failed-import", || -> Result<(), String> {
+                write_new(
+                    &workspace.checked_target(".asset-history/failed-import/after/0.bin")?,
+                    b"partial snapshot",
+                )?;
+                Err("injected second snapshot failure".into())
+            })
+            .unwrap_err();
+        assert!(error.contains("injected second snapshot failure"));
+        assert!(!root.join(".asset-history/failed-import").exists());
+        assert_eq!(
+            fs::read(root.join(".asset-history/other/record.json")).unwrap(),
+            b"keep"
+        );
+        assert!(
+            workspace
+                .with_import_journal("other", || -> Result<(), String> {
+                    panic!("existing journal must never be adopted")
+                })
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(root.join(".asset-history/other/record.json")).unwrap(),
+            b"keep"
+        );
+        workspace
+            .with_import_journal("successful-import", || {
+                write_new(
+                    &workspace.checked_target(".asset-history/successful-import/record.json")?,
+                    b"saved",
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read(root.join(".asset-history/successful-import/record.json")).unwrap(),
+            b"saved"
+        );
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn asset_scan_ignores_only_reserved_export_staging_directories() {
+        let (root, workspace, mut document) = fixture();
+        write(
+            &root,
+            "assets/.module-engine-game-export-1-2/partial.bin",
+            b"temporary",
+        );
+        write(
+            &root,
+            "assets/.module-engine-game-export-not-a-directory",
+            b"user file",
+        );
+        write(
+            &root,
+            "assets/module-engine-game-export-user/keep.bin",
+            b"user folder",
+        );
+        write(
+            &root,
+            "assets/.other-hidden-folder/keep.bin",
+            b"hidden folder",
+        );
+        let assets = workspace.synchronize(&mut document).unwrap();
+        let paths: BTreeSet<_> = assets.iter().map(|asset| asset.path.as_str()).collect();
+        assert!(!paths.contains("assets/.module-engine-game-export-1-2/partial.bin"));
+        assert!(paths.contains("assets/.module-engine-game-export-not-a-directory"));
+        assert!(paths.contains("assets/module-engine-game-export-user/keep.bin"));
+        assert!(paths.contains("assets/.other-hidden-folder/keep.bin"));
+        fs::remove_file(root.join("assets/.module-engine-game-export-1-2/partial.bin")).unwrap();
+        fs::remove_dir(root.join("assets/.module-engine-game-export-1-2")).unwrap();
+        assert!(workspace.synchronize(&mut document).is_ok());
+        crate::history::remove_test_directory(&root);
+    }
+
     #[test]
     fn stable_ids_refresh_content_protected_files_and_missing_entries_are_explicit() {
         let (root, workspace, mut doc) = fixture();

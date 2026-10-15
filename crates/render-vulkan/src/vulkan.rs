@@ -24,10 +24,53 @@ pub struct RendererPerformance {
     pub prepare_calls: u64,
     pub plan_builds: u64,
     pub plan_cache_hits: u64,
+    pub rejected_cache_hits: u64,
     pub pipeline_creations: u64,
+    pub pipeline_build_attempts: u64,
     pub prepare_ns: u64,
 }
 const INCLUDE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum AllocationFault {
+    BufferHandle,
+    BufferMemory,
+    ImageHandle,
+    ImageMemory,
+    ImageView,
+}
+#[cfg(test)]
+#[derive(Default)]
+struct AllocationCounts {
+    buffers: std::sync::atomic::AtomicUsize,
+    images: std::sync::atomic::AtomicUsize,
+    views: std::sync::atomic::AtomicUsize,
+    memory: std::sync::atomic::AtomicUsize,
+}
+#[cfg(test)]
+impl AllocationCounts {
+    fn snapshot(&self) -> [usize; 4] {
+        use std::sync::atomic::Ordering::Relaxed;
+        [
+            self.buffers.load(Relaxed),
+            self.images.load(Relaxed),
+            self.views.load(Relaxed),
+            self.memory.load(Relaxed),
+        ]
+    }
+}
+struct RejectedPreparation {
+    graph: Graph,
+    sources: BTreeMap<String, String>,
+    signature: Option<Vec<String>>,
+    checked: Instant,
+    error: String,
+}
+impl RejectedPreparation {
+    fn matches(&self, graph: &Graph, sources: &BTreeMap<String, String>) -> bool {
+        self.graph.execution_eq(graph) && &self.sources == sources
+    }
+}
 
 struct Image {
     device: ash::Device,
@@ -39,13 +82,33 @@ struct Image {
     layout: vk::ImageLayout,
     stage: vk::PipelineStageFlags,
     access: vk::AccessFlags,
+    #[cfg(test)]
+    allocations: std::sync::Arc<AllocationCounts>,
 }
 impl Drop for Image {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_image_view(self.view, None);
-            self.device.destroy_image(self.image, None);
-            self.device.free_memory(self.memory, None);
+            if self.view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.view, None);
+                #[cfg(test)]
+                self.allocations
+                    .views
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.image != vk::Image::null() {
+                self.device.destroy_image(self.image, None);
+                #[cfg(test)]
+                self.allocations
+                    .images
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.memory, None);
+                #[cfg(test)]
+                self.allocations
+                    .memory
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 }
@@ -54,12 +117,26 @@ struct Buffer {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     size: u64,
+    #[cfg(test)]
+    allocations: std::sync::Arc<AllocationCounts>,
 }
 impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-            self.device.free_memory(self.memory, None);
+            if self.buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.buffer, None);
+                #[cfg(test)]
+                self.allocations
+                    .buffers
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.memory, None);
+                #[cfg(test)]
+                self.allocations
+                    .memory
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 }
@@ -238,7 +315,12 @@ pub struct VulkanRenderer {
     atlas: Option<AtlasGpu>,
     detailed_stats: bool,
     prepared_inputs: Option<(Graph, BTreeMap<String, String>, Instant)>,
+    rejected_inputs: Option<RejectedPreparation>,
     performance: RendererPerformance,
+    #[cfg(test)]
+    allocation_fault: Option<AllocationFault>,
+    #[cfg(test)]
+    allocations: std::sync::Arc<AllocationCounts>,
 }
 impl VulkanRenderer {
     pub fn new() -> Result<Self, String> {
@@ -368,7 +450,12 @@ impl VulkanRenderer {
                 atlas: None,
                 detailed_stats: true,
                 prepared_inputs: None,
+                rejected_inputs: None,
                 performance: RendererPerformance::default(),
+                #[cfg(test)]
+                allocation_fault: None,
+                #[cfg(test)]
+                allocations: std::sync::Arc::default(),
             })
         }
     }
@@ -393,16 +480,60 @@ impl VulkanRenderer {
         graph: &Graph,
         sources: &BTreeMap<String, String>,
     ) -> Result<(), String> {
+        self.prepare_checked(graph, sources, false)
+    }
+    fn reject_preparation(
+        &mut self,
+        graph: &Graph,
+        sources: &BTreeMap<String, String>,
+        signature: Option<Vec<String>>,
+        error: String,
+    ) -> Result<(), String> {
+        self.diagnostics = vec![error.clone()];
+        self.rejected_inputs = Some(RejectedPreparation {
+            graph: graph.clone(),
+            sources: sources.clone(),
+            signature,
+            checked: Instant::now(),
+            error: error.clone(),
+        });
+        Err(error)
+    }
+    fn prepare_checked(
+        &mut self,
+        graph: &Graph,
+        sources: &BTreeMap<String, String>,
+        reuse_rejection: bool,
+    ) -> Result<(), String> {
         self.performance.prepare_calls += 1;
         self.performance.plan_builds += 1;
         let started = Instant::now();
         let plan = match build_plan_at(graph, sources, &self.resource_root) {
             Ok(plan) => plan,
             Err(error) => {
-                self.diagnostics = vec![error.clone()];
-                return Err(error);
+                return self.reject_preparation(graph, sources, None, error);
             }
         };
+        let signature = plan.passes.iter().map(pipeline_key).collect::<Vec<_>>();
+        if reuse_rejection
+            && let Some(rejected) = &mut self.rejected_inputs
+            && rejected.matches(graph, sources)
+            && rejected.signature.as_ref() == Some(&signature)
+        {
+            rejected.checked = Instant::now();
+            self.performance.rejected_cache_hits += 1;
+            return Err(rejected.error.clone());
+        }
+        if let Err(error) = self.prepare_plan(plan) {
+            return self.reject_preparation(graph, sources, Some(signature), error);
+        }
+        self.prepared_inputs = Some((graph.clone(), sources.clone(), Instant::now()));
+        self.rejected_inputs = None;
+        self.performance.prepare_ns += started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.diagnostics.clear();
+        Ok(())
+    }
+    fn prepare_plan(&mut self, plan: Plan) -> Result<(), String> {
         if let Err(error) = schedule_overrides(&plan, &RenderOverrides::default()) {
             self.diagnostics = vec![error.clone()];
             return Err(error);
@@ -420,8 +551,19 @@ impl VulkanRenderer {
         for pass in &plan.passes {
             let key = pipeline_key(pass);
             if !self.pipelines.contains_key(&key) {
+                self.performance.pipeline_build_attempts += 1;
                 match self.create_pipeline(pass) {
                     Ok(pipeline) => {
+                        if crate::compiler::dependency_fingerprint_at(
+                            &self.resource_root,
+                            &pass.source,
+                        )? != pass.dependency_hash
+                        {
+                            return Err(format!(
+                                "Pass {}: HLSL dependencies changed during pipeline preparation",
+                                pass.id
+                            ));
+                        }
                         self.pipelines.insert(key, pipeline);
                         self.performance.pipeline_creations += 1;
                     }
@@ -433,9 +575,6 @@ impl VulkanRenderer {
             }
         }
         self.prepared = Some(plan);
-        self.prepared_inputs = Some((graph.clone(), sources.clone(), Instant::now()));
-        self.performance.prepare_ns += started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        self.diagnostics.clear();
         Ok(())
     }
     fn prepare_for_render(
@@ -443,6 +582,15 @@ impl VulkanRenderer {
         graph: &Graph,
         sources: &BTreeMap<String, String>,
     ) -> Result<(), String> {
+        if let Some(rejected) = &self.rejected_inputs
+            && rejected.matches(graph, sources)
+        {
+            if rejected.checked.elapsed() < INCLUDE_REFRESH_INTERVAL {
+                self.performance.rejected_cache_hits += 1;
+                return Err(rejected.error.clone());
+            }
+            return self.prepare_checked(graph, sources, true);
+        }
         if self
             .prepared_inputs
             .as_ref()
@@ -455,7 +603,7 @@ impl VulkanRenderer {
             self.performance.plan_cache_hits += 1;
             return Ok(());
         }
-        self.prepare(graph, sources)
+        self.prepare_checked(graph, sources, true)
     }
     fn memory_type(&self, bits: u32, required: vk::MemoryPropertyFlags) -> Result<u32, String> {
         (0..self.memory.memory_type_count)
@@ -480,6 +628,20 @@ impl VulkanRenderer {
                     None,
                 )
                 .map_err(vk_error)?;
+            #[cfg(test)]
+            self.allocations
+                .buffers
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut allocated = Buffer {
+                device: self.device.clone(),
+                buffer,
+                memory: vk::DeviceMemory::null(),
+                size,
+                #[cfg(test)]
+                allocations: self.allocations.clone(),
+            };
+            #[cfg(test)]
+            self.allocation_checkpoint(AllocationFault::BufferHandle)?;
             let requirements = self.device.get_buffer_memory_requirements(buffer);
             let host =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -502,15 +664,17 @@ impl VulkanRenderer {
                 .device
                 .allocate_memory(&allocation, None)
                 .map_err(vk_error)?;
+            allocated.memory = memory;
+            #[cfg(test)]
+            self.allocations
+                .memory
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            self.allocation_checkpoint(AllocationFault::BufferMemory)?;
             self.device
                 .bind_buffer_memory(buffer, memory, 0)
                 .map_err(vk_error)?;
-            Ok(Buffer {
-                device: self.device.clone(),
-                buffer,
-                memory,
-                size,
-            })
+            Ok(allocated)
         }
     }
     fn image(
@@ -564,6 +728,30 @@ impl VulkanRenderer {
                 .usage(usage)
                 .initial_layout(vk::ImageLayout::UNDEFINED);
             let image = self.device.create_image(&info, None).map_err(vk_error)?;
+            #[cfg(test)]
+            self.allocations
+                .images
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let aspect = if depth {
+                vk::ImageAspectFlags::DEPTH
+            } else {
+                vk::ImageAspectFlags::COLOR
+            };
+            let mut allocated = Image {
+                device: self.device.clone(),
+                image,
+                view: vk::ImageView::null(),
+                memory: vk::DeviceMemory::null(),
+                format,
+                aspect,
+                layout: vk::ImageLayout::UNDEFINED,
+                stage: vk::PipelineStageFlags::TOP_OF_PIPE,
+                access: vk::AccessFlags::empty(),
+                #[cfg(test)]
+                allocations: self.allocations.clone(),
+            };
+            #[cfg(test)]
+            self.allocation_checkpoint(AllocationFault::ImageHandle)?;
             let requirements = self.device.get_image_memory_requirements(image);
             let memory = self
                 .device
@@ -577,14 +765,16 @@ impl VulkanRenderer {
                     None,
                 )
                 .map_err(vk_error)?;
+            allocated.memory = memory;
+            #[cfg(test)]
+            self.allocations
+                .memory
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            self.allocation_checkpoint(AllocationFault::ImageMemory)?;
             self.device
                 .bind_image_memory(image, memory, 0)
                 .map_err(vk_error)?;
-            let aspect = if depth {
-                vk::ImageAspectFlags::DEPTH
-            } else {
-                vk::ImageAspectFlags::COLOR
-            };
             let view = self
                 .device
                 .create_image_view(
@@ -596,17 +786,22 @@ impl VulkanRenderer {
                     None,
                 )
                 .map_err(vk_error)?;
-            Ok(Image {
-                device: self.device.clone(),
-                image,
-                view,
-                memory,
-                format,
-                aspect,
-                layout: vk::ImageLayout::UNDEFINED,
-                stage: vk::PipelineStageFlags::TOP_OF_PIPE,
-                access: vk::AccessFlags::empty(),
-            })
+            allocated.view = view;
+            #[cfg(test)]
+            self.allocations
+                .views
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            self.allocation_checkpoint(AllocationFault::ImageView)?;
+            Ok(allocated)
+        }
+    }
+    #[cfg(test)]
+    fn allocation_checkpoint(&self, stage: AllocationFault) -> Result<(), String> {
+        if self.allocation_fault == Some(stage) {
+            Err(format!("Injected Vulkan allocation failure: {stage:?}"))
+        } else {
+            Ok(())
         }
     }
     fn create_pipeline(&self, pass: &Pass) -> Result<Pipeline, String> {
@@ -1921,6 +2116,59 @@ mod tests {
     use super::*;
     use crate::{RenderPath, custom_compute_manifest, default_graph, demo_custom_compute_source};
     use module_engine_core::{ObjectsWorld, WorldProvider, make_edge};
+    #[test]
+    fn failed_partial_native_allocations_release_owned_handles_and_device_recovers() {
+        let mut renderer = VulkanRenderer::new().unwrap();
+        let counts = renderer.allocations.clone();
+        let initial = counts.snapshot();
+        for fault in [
+            AllocationFault::BufferHandle,
+            AllocationFault::BufferMemory,
+            AllocationFault::ImageHandle,
+            AllocationFault::ImageMemory,
+            AllocationFault::ImageView,
+        ] {
+            renderer.allocation_fault = Some(fault);
+            let error = match fault {
+                AllocationFault::BufferHandle | AllocationFault::BufferMemory => renderer
+                    .buffer(4096, vk::BufferUsageFlags::VERTEX_BUFFER)
+                    .err(),
+                _ => renderer
+                    .image(32, 32, vk::Format::R8G8B8A8_UNORM, false)
+                    .err(),
+            }
+            .expect("injected allocation point must reject the partial object");
+            assert!(
+                error.contains("Injected Vulkan allocation failure"),
+                "{error}"
+            );
+            assert_eq!(
+                counts.snapshot(),
+                initial,
+                "no handle or device-memory allocation may survive {fault:?}"
+            );
+        }
+        renderer.allocation_fault = None;
+        let frame = renderer
+            .render(
+                &ObjectsWorld::demo().snapshot(),
+                Camera::default(),
+                96,
+                64,
+                &default_graph(RenderPath::Forward),
+                &BTreeMap::new(),
+                &RenderOverrides::default(),
+            )
+            .unwrap();
+        assert_eq!(frame.rgba.len(), 96 * 64 * 4);
+        assert!(counts.snapshot().into_iter().all(|count| count > 0));
+        drop(renderer);
+        assert_eq!(
+            counts.snapshot(),
+            [0; 4],
+            "successful retained resources also release exactly once"
+        );
+    }
     fn rename_pass(graph: &mut Graph, previous: &str, next: &str) {
         graph
             .nodes
@@ -2640,7 +2888,70 @@ mod include_regression {
                 .unwrap_err()
                 .contains("HLSL compilation failed")
         );
+        let rejected = renderer.performance();
+        for _ in 0..120 {
+            renderer.rejected_inputs.as_mut().unwrap().checked = Instant::now();
+            assert!(
+                renderer
+                    .render(
+                        &scene,
+                        Camera::default(),
+                        160,
+                        120,
+                        &graph,
+                        &sources,
+                        &RenderOverrides::default()
+                    )
+                    .unwrap_err()
+                    .contains("HLSL compilation failed")
+            );
+        }
+        assert_eq!(
+            renderer.performance().prepare_calls,
+            rejected.prepare_calls,
+            "failing hot reload must not compile on every UI frame"
+        );
+        assert_eq!(
+            renderer.performance().pipeline_build_attempts,
+            rejected.pipeline_build_attempts
+        );
+        renderer.rejected_inputs.as_mut().unwrap().checked =
+            Instant::now() - INCLUDE_REFRESH_INTERVAL;
+        assert!(
+            renderer
+                .render(
+                    &scene,
+                    Camera::default(),
+                    160,
+                    120,
+                    &graph,
+                    &sources,
+                    &RenderOverrides::default()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            renderer.performance().pipeline_build_attempts,
+            rejected.pipeline_build_attempts,
+            "unchanged failed include bytes must not invoke DXC again after polling"
+        );
+        assert_eq!(
+            pipeline_key(
+                renderer
+                    .prepared
+                    .as_ref()
+                    .unwrap()
+                    .passes
+                    .iter()
+                    .find(|pass| pass.id == "ao")
+                    .unwrap()
+            ),
+            changed_key,
+            "last good GPU plan survives every rejected reload"
+        );
         std::fs::write(&child, child_source.replace("return 0.2", "return 0.8")).unwrap();
+        renderer.rejected_inputs.as_mut().unwrap().checked =
+            Instant::now() - INCLUDE_REFRESH_INTERVAL;
         assert_eq!(
             renderer
                 .render(
@@ -2657,5 +2968,25 @@ mod include_regression {
             second.rgba,
             "Failed include candidate must retain valid pipeline behavior"
         );
+        assert!(renderer.rejected_inputs.is_none());
+        assert!(renderer.diagnostics().is_empty());
+        std::fs::write(&child, child_source.replace("return 0.2", "return 0.6")).unwrap();
+        renderer.prepared_inputs.as_mut().unwrap().2 = Instant::now() - INCLUDE_REFRESH_INTERVAL;
+        let third = renderer
+            .render(
+                &scene,
+                Camera::default(),
+                160,
+                120,
+                &graph,
+                &sources,
+                &RenderOverrides::default(),
+            )
+            .unwrap();
+        assert_ne!(
+            third.rgba, second.rgba,
+            "disk-only repair/change must reach real pixels without an inline edit"
+        );
+        assert!(renderer.performance().pipeline_build_attempts > rejected.pipeline_build_attempts);
     }
 }

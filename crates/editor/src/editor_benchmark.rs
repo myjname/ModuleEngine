@@ -284,6 +284,15 @@ impl NativeEditorBenchmark {
 
     fn host_identities(&self) -> HostIdentities {
         let mut identities = BTreeMap::new();
+        if let Some(snapshot) = self.editor.game_workbench.game_snapshot() {
+            identities.insert("game/worker".into(), snapshot.actor_id as usize);
+            for instance in &snapshot.custom {
+                identities.insert(
+                    format!("game/{}", instance.instance),
+                    instance.identity as usize,
+                );
+            }
+        }
         for (name, host) in [
             ("game", &self.editor.game_workbench.host),
             ("scene", &self.editor.game_workbench.preview_host),
@@ -302,7 +311,7 @@ impl NativeEditorBenchmark {
             engine_runtime: self.editor.runtime.is_some(),
             engine_background_complete: !self.editor.preview_builder.is_pending(),
             game_scene_background_complete: !self.editor.game_workbench.has_pending_preparation(),
-            game_host: self.editor.game_workbench.host.is_some(),
+            game_host: self.editor.game_workbench.has_game_host(),
             scene_host: self.editor.game_workbench.preview_host.is_some(),
             activities_finished: self
                 .editor
@@ -315,9 +324,8 @@ impl NativeEditorBenchmark {
             game_frame_ready: self
                 .editor
                 .game_workbench
-                .host
-                .as_ref()
-                .is_some_and(|host| host.last_render_ms > 0.),
+                .game_snapshot()
+                .is_some_and(|snapshot| snapshot.frame.is_some() && snapshot.last_render_ms > 0.),
             scene_texture_present: self
                 .editor
                 .engine_panes
@@ -372,12 +380,23 @@ impl NativeEditorBenchmark {
         let project_file_unchanged =
             std::fs::read(&self.project_path).is_ok_and(|bytes| bytes == self.project_bytes);
         let complete = self.measured == [MEASURED_FRAMES; 2] && interrupted.is_none();
+        let play_times: Vec<_> = self
+            .samples
+            .iter()
+            .filter(|sample| sample.phase == "play-pan")
+            .filter_map(|sample| sample.game_time)
+            .collect();
+        let simulation_advanced = play_times
+            .first()
+            .zip(play_times.last())
+            .is_some_and(|(first, last)| last > first);
         let measurements_valid = complete
             && self.errors.is_empty()
             && document_unchanged
             && execution_unchanged
             && project_file_unchanged
             && self.identities_preserved
+            && simulation_advanced
             && self.samples.iter().all(|sample| {
                 sample.visible != Some(false)
                     && sample.game_frame_ready
@@ -410,18 +429,19 @@ impl NativeEditorBenchmark {
             "requested_frames_per_phase":MEASURED_FRAMES,"completed_frames":self.measured,
             "warmup_requested_per_phase":WARMUP_FRAMES,"warmup_completed":self.warmup_completed,
             "total_ui_frames":self.total_ui_frames,"readiness":self.readiness(),
-            "game_frame_evidence":"GameHost.last_render_ms > 0, set only after a successful native Game render; GameWorkbench owns its texture privately",
+            "game_frame_evidence":"Completed worker snapshot contains real Game pixels and last_render_ms > 0; GameWorkbench uploads that snapshot without waiting for simulation",
             "pan_input_attempts":self.drag_attempts,"actual_pan_changes":self.graph_pan_changes,
             "host_custom_slot_arc_identities_preserved":self.identities_preserved,
+            "game_simulation_advanced_during_play_samples":simulation_advanced,
             "host_identity_slots":self.identities.as_ref().map(BTreeMap::len),
-            "host_identity_scope":"Custom slot Arc identities, when present; no claim from a reusable GameHost struct address",
+            "host_identity_scope":"Game worker actor_id and opaque Custom slot Arc identities published by the worker, plus Scene Custom slot Arc identities; UI never locks a live Game Custom slot",
             "layout":{"graph":GRAPH_PANE,"game":GAME_PANE,"scene":SCENE_PANE,"graph_width_ratio":0.56,"game_scene_split":0.5},
             "framebuffer_pixels_final":(self.physical_size)(),"monitor_pixels":self.monitor_pixels,
             "monitor_refresh_millihertz":self.refresh_millihertz,"vsync_requested":true,
-            "vulkan_device":self.editor.game_workbench.host.as_ref().map(|host|host.device.clone()),
+            "vulkan_device":self.editor.game_workbench.game_snapshot().map(|snapshot|snapshot.device.clone()),
             "errors":self.errors,"interrupted":interrupted,"elapsed_seconds":self.started.elapsed().as_secs_f64(),
             "phase_summaries":summaries,"frames":self.samples,
-            "measurement_scope":"editor_handler_ms times the real Editor::ui call including simulation, all open native editor panes, Vulkan/readback and texture enqueue. Frame interval is Editor callback start-to-start, including previous egui/OpenGL upload/draw, swap/vsync and scheduling. framework_cpu_ms is eframe previous-frame CPU, including GL rendering but excluding vsync waiting. No headless/FPS substitute or display scanout timing. Only actual middle-button pointer moves that changed graph pan are sampled; preparation, warmup and drag acquisition are excluded. Last render durations/texture presence are diagnostics, not proof of one fresh GPU render per sample."
+            "measurement_scope":"editor_handler_ms times the real Editor::ui call, all open native editor panes and completed-frame texture enqueue. Game simulation and Game Vulkan rendering run on their persistent worker; the independent authored Scene viewport still renders on demand. Frame interval is Editor callback start-to-start, including previous egui/OpenGL upload/draw, swap/vsync and scheduling. framework_cpu_ms is eframe previous-frame CPU, including GL rendering but excluding vsync waiting. No headless/FPS substitute or display scanout timing. Only actual middle-button pointer moves that changed graph pan are sampled; preparation, warmup and drag acquisition are excluded. Last render durations/texture presence are diagnostics, not proof of one fresh GPU render per sample."
         });
         let result = serde_json::to_vec_pretty(&report).map_err(|error|error.to_string())
             .and_then(|bytes|std::fs::write(self.folder.join("report.json"),bytes).map_err(|error|error.to_string()))
@@ -567,9 +587,8 @@ impl App for NativeEditorBenchmark {
             let game_frame_ready = self
                 .editor
                 .game_workbench
-                .host
-                .as_ref()
-                .is_some_and(|host| host.last_render_ms > 0.);
+                .game_snapshot()
+                .is_some_and(|snapshot| snapshot.frame.is_some() && snapshot.last_render_ms > 0.);
             let scene_texture_present = self
                 .editor
                 .engine_panes
@@ -589,27 +608,23 @@ impl App for NativeEditorBenchmark {
                 game_time: self
                     .editor
                     .game_workbench
-                    .host
-                    .as_ref()
-                    .map(|host| host.session.state().time),
+                    .game_snapshot()
+                    .map(|snapshot| snapshot.state.time),
                 game_status: self
                     .editor
                     .game_workbench
-                    .host
-                    .as_ref()
-                    .map(|host| format!("{:?}", host.session.state().status)),
+                    .game_snapshot()
+                    .map(|snapshot| format!("{:?}", snapshot.state.status)),
                 living_enemies: self
                     .editor
                     .game_workbench
-                    .host
-                    .as_ref()
-                    .map(|host| host.session.state().living_enemies()),
+                    .game_snapshot()
+                    .map(|snapshot| snapshot.state.living_enemies()),
                 game_render_ms_last: self
                     .editor
                     .game_workbench
-                    .host
-                    .as_ref()
-                    .map(|host| host.last_render_ms),
+                    .game_snapshot()
+                    .map(|snapshot| snapshot.last_render_ms),
                 scene_render_ms_last: self
                     .editor
                     .game_workbench

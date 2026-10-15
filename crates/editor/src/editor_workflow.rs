@@ -531,8 +531,7 @@ impl Editor {
                 BrowserAction::Import { folder } => {
                     if protected.iter().any(|path| folder == *path || folder.starts_with(&format!("{path}/"))) { return Err("Installed Engine resources are protected".into()); }
                     let Some(source) = native_dialogs::import_asset(&root)? else { return Ok(Outcome::Report("Импорт отменён".into())); };
-                    let path = import_resource_into(&root, &source, &folder)?;
-                    workspace.adopt_import(&before, &[path])?
+                    import_resource_transaction(&root, &source, &folder, |path| workspace.adopt_import(&before, &[path]))?
                 }
                 _ => return Err("Unsupported asset transaction".into()),
             };
@@ -1109,39 +1108,102 @@ pub(super) fn import_resource(root: &Path, source: &Path) -> Result<String, Stri
     import_resource_into(root, source, "assets/imported/files")
 }
 fn import_resource_into(root: &Path, source: &Path, folder: &str) -> Result<String, String> {
+    import_resource_transaction(root, source, folder, Ok)
+}
+
+/// One import owns one fresh nonce directory. Adoption may still reject links
+/// or fail to persist history; neither failure may leave unindexed source files.
+fn import_resource_transaction<T>(
+    root: &Path,
+    source: &Path,
+    folder: &str,
+    commit: impl FnOnce(String) -> Result<T, String>,
+) -> Result<T, String> {
     let folder = module_engine_project::normalize_relative(folder)?;
     if folder != "assets" && !folder.starts_with("assets/") {
         return Err("Import folder must belong to assets/".into());
     }
-    let bytes = fs::read(source).map_err(|e| format!("Import: {e}"))?;
-    let hash = module_engine_project::hash_bytes(&bytes);
-    let import_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let directory = format!("{folder}/{}-{import_id}", &hash[..16]);
-    let name = source
-        .file_name()
-        .ok_or("Source has no filename")?
-        .to_string_lossy();
+    let bytes = fs::read(source).map_err(|error| format!("Import: {error}"))?;
     let extension = source
         .extension()
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
-    let mut library = module_engine_content::ContentLibrary::new(root)?;
-    match extension.as_str() {
-        "glb" | "gltf" => library.import_model(source, &directory),
-        "png" | "jpg" | "jpeg" => library.import_texture(source, &format!("{directory}/{name}")),
-        "wav" => {
-            if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-                return Err("Expected a RIFF WAV file".into());
-            }
-            let relative = format!("{directory}/{name}");
-            AssetWorkspace::new(root, Vec::<String>::new())?.write_new_file(&relative, &bytes)
-        }
-        _ => Err("Поддержаны glTF/GLB, PNG/JPEG и WAV".into()),
+    if !matches!(
+        extension.as_str(),
+        "glb" | "gltf" | "png" | "jpg" | "jpeg" | "wav"
+    ) {
+        return Err("Поддержаны glTF/GLB, PNG/JPEG и WAV".into());
     }
+    if extension == "wav"
+        && (bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE")
+    {
+        return Err("Expected a RIFF WAV file".into());
+    }
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let parent = root.join(&folder);
+    let mut ancestor = parent.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or("Import folder has no project ancestor")?;
+    }
+    if !ancestor
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .starts_with(&root)
+    {
+        return Err("Import destination leaves project".into());
+    }
+    fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+    let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+    if !parent.starts_with(&root) {
+        return Err("Import destination leaves project".into());
+    }
+    let hash = module_engine_project::hash_bytes(&bytes);
+    let import_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let name = format!("{}-{import_id}", &hash[..16]);
+    let directory = format!("{folder}/{name}");
+    let owned = parent.join(&name);
+    // create_dir is atomic: an occupied directory is never eligible for cleanup.
+    fs::create_dir(&owned).map_err(|error| format!("Reserve import directory: {error}"))?;
+    let result = (|| {
+        let name = source
+            .file_name()
+            .ok_or("Source has no filename")?
+            .to_string_lossy();
+        let mut library = module_engine_content::ContentLibrary::new(&root)?;
+        let imported = match extension.as_str() {
+            "glb" | "gltf" => library.import_model(source, &directory),
+            "png" | "jpg" | "jpeg" => {
+                library.import_texture(source, &format!("{directory}/{name}"))
+            }
+            "wav" => AssetWorkspace::new(&root, Vec::<String>::new())?
+                .write_new_file(&format!("{directory}/{name}"), &bytes),
+            _ => unreachable!(),
+        }?;
+        commit(imported)
+    })();
+    if let Err(error) = result {
+        let cleanup = (|| {
+            let resolved = owned.canonicalize().map_err(|error| error.to_string())?;
+            if resolved != owned || !resolved.starts_with(&root) || resolved == root {
+                return Err("Import cleanup path changed or leaves project".into());
+            }
+            fs::remove_dir_all(&resolved).map_err(|error| error.to_string())
+        })();
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => format!(
+                "{error}; очистка нового импорта: {cleanup}; {}",
+                owned.display()
+            ),
+        });
+    }
+    result
 }
 
 /// Reproduce the editor's project/file services and real menu interaction, then
@@ -1948,5 +2010,104 @@ mod workflow_tests {
             editor.game_workbench.has_graph_draft(),
             "Cancel only dismisses the guard"
         );
+        let library_ctx = egui::Context::default();
+        let library_frame = |editor: &mut Editor, events| {
+            library_ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900., 1800.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| editor.library(ui),
+            )
+        };
+        let output = library_frame(&mut editor, vec![]);
+        let export = text_point(&output, "Экспорт проекта…");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            library_frame(&mut editor, pointer(export, pressed)).drop_without_applying_deltas();
+        }
+        assert!(matches!(
+            editor.workflow.guard,
+            Some(Action::Export(ExportKind::Source))
+        ));
+        assert!(
+            editor.workflow.job.is_none(),
+            "Library must not export synchronously or open a picker before resolving the draft"
+        );
+        editor.resolve_guard(0, &library_ctx);
+        assert!(matches!(
+            editor.workflow.guard,
+            Some(Action::Export(ExportKind::Source))
+        ));
+        assert!(editor.game_workbench.has_graph_draft());
+        assert_eq!(crate::project::read(&fixture.path).unwrap(), original);
+        editor.resolve_guard(2, &library_ctx);
+    }
+
+    #[test]
+    fn failed_import_or_adoption_removes_only_the_fresh_import_directory() {
+        let (fixture, mut editor) = Fixture::new(false);
+        fs::create_dir_all(fixture.root.join("assets")).unwrap();
+        fs::write(fixture.root.join("assets/keep.txt"), b"author bytes").unwrap();
+        let workspace = AssetWorkspace::new(&fixture.root, Vec::<String>::new()).unwrap();
+        workspace.synchronize(&mut editor.document).unwrap();
+        let original = editor.document.clone();
+        let glb = include_bytes!("../../../assets/models/demo_crystal.glb");
+        let length = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let mut json: serde_json::Value = serde_json::from_slice(&glb[20..20 + length]).unwrap();
+        json["extensionsUsed"] = serde_json::json!(["CUSTOM_optional_extension"]);
+        let mut json = serde_json::to_vec(&json).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let binary = &glb[20 + length..];
+        let total = 20 + json.len() + binary.len();
+        let mut encoded = b"glTF".to_vec();
+        encoded.extend(2u32.to_le_bytes());
+        encoded.extend((total as u32).to_le_bytes());
+        encoded.extend((json.len() as u32).to_le_bytes());
+        encoded.extend(b"JSON");
+        encoded.extend(json);
+        encoded.extend(binary);
+        let source = fixture.root.join("optional.glb");
+        fs::write(&source, encoded).unwrap();
+        let Err(error) = import_resource_transaction(&fixture.root, &source, "assets", |path| {
+            assert!(
+                fixture.root.join(&path).is_file(),
+                "the content importer must have succeeded before adoption rejects its extension"
+            );
+            workspace.adopt_import(&original, &[path])
+        }) else {
+            panic!("unsupported relocation semantics must reject adoption");
+        };
+        assert!(error.to_lowercase().contains("extension"), "{error}");
+        let files = || {
+            fs::read_dir(fixture.root.join("assets"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(files(), vec![std::ffi::OsString::from("keep.txt")]);
+        let wav = crate::project::source_root().join("assets/audio/attack.wav");
+        let error = import_resource_transaction::<()>(&fixture.root, &wav, "assets", |_| {
+            Err("Injected persistence failure".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "Injected persistence failure");
+        assert_eq!(files(), vec![std::ffi::OsString::from("keep.txt")]);
+        fs::write(&source, b"not glb").unwrap();
+        assert!(
+            import_resource_transaction::<()>(&fixture.root, &source, "assets", |_| panic!(
+                "invalid content cannot reach adoption"
+            ))
+            .is_err()
+        );
+        assert_eq!(files(), vec![std::ffi::OsString::from("keep.txt")]);
+        assert_eq!(
+            fs::read(fixture.root.join("assets/keep.txt")).unwrap(),
+            b"author bytes"
+        );
+        assert_eq!(editor.document, original);
     }
 }

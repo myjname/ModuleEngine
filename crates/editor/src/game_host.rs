@@ -18,6 +18,38 @@ struct RenderPreparation {
     document: GraphDocument,
     receiver: mpsc::Receiver<Result<VulkanRenderer, String>>,
     progress: BuildProgress,
+    dependencies: ShaderDependencyWatch,
+}
+/// Retry a rejected shader candidate when its external dependencies change,
+/// without rebuilding or walking the filesystem on every UI frame.
+pub struct ShaderDependencyWatch {
+    revision: Result<u64, String>,
+    checked: Instant,
+}
+impl ShaderDependencyWatch {
+    pub fn new(document: &GraphDocument, backend_root: &Path) -> Self {
+        Self {
+            revision: Self::revision(document, backend_root),
+            checked: Instant::now(),
+        }
+    }
+    fn revision(document: &GraphDocument, backend_root: &Path) -> Result<u64, String> {
+        module_engine_vulkan::shader_dependency_revision_at(
+            selected_render_graph(document)?,
+            &document.shader_sources,
+            backend_root,
+        )
+    }
+    pub fn changed(&mut self, document: &GraphDocument, backend_root: &Path) -> bool {
+        if self.checked.elapsed() < Duration::from_millis(250) {
+            return false;
+        }
+        self.checked = Instant::now();
+        let revision = Self::revision(document, backend_root);
+        let changed = self.revision != revision;
+        self.revision = revision;
+        changed
+    }
 }
 
 /// Only Vulkan passes/sources and their exposure/Project controls may change.
@@ -224,7 +256,7 @@ impl ExecutableSystem for RustSystem {
         candidate.apply_commands(&render)?;
         if !render.is_empty() {
             module_engine_vulkan::validate_overrides_at(
-                &render_graph(&document),
+                selected_render_graph(&document)?,
                 &candidate,
                 &self.backend_root,
             )?;
@@ -449,32 +481,44 @@ pub fn backend_root_for(asset_root: &Path, compile_root: Option<&Path>) -> Resul
 }
 
 pub fn render_graph(document: &GraphDocument) -> Graph {
-    let selected = document
+    // Compatibility helper for package metadata. An invalid active route must
+    // fail GPU graph validation, never select an unrelated renderer/default.
+    selected_render_graph(document).cloned().unwrap_or_default()
+}
+fn selected_render_graph(document: &GraphDocument) -> Result<&Graph, String> {
+    let mut outputs = document
         .root
         .nodes
         .iter()
-        .find(|n| n.module == "viewport.output")
-        .and_then(|output| {
-            document
-                .root
-                .edges
-                .iter()
-                .find(|e| e.to_node == output.id && e.to_port == "frame")
-        })
-        .and_then(|e| document.root.nodes.iter().find(|n| n.id == e.from_node));
-    if let Some(node) = selected.filter(|n| n.module == "render.vulkan")
-        && let Some(graph) = node.subgraph.as_deref()
-    {
-        return graph.clone();
+        .filter(|node| node.module == "viewport.output");
+    let output = outputs
+        .next()
+        .ok_or("Game requires exactly one viewport.output")?;
+    if outputs.next().is_some() {
+        return Err("Game requires exactly one viewport.output".into());
     }
-    document
+    let mut edges = document
+        .root
+        .edges
+        .iter()
+        .filter(|edge| edge.to_node == output.id && edge.to_port == "frame");
+    let edge = edges.next().ok_or("Game viewport has no renderer")?;
+    if edges.next().is_some() || edge.from_port != "frame" {
+        return Err("Game viewport needs one renderer frame output".into());
+    }
+    let mut nodes = document
         .root
         .nodes
         .iter()
-        .find(|n| n.module == "render.vulkan")
-        .and_then(|n| n.subgraph.as_deref())
-        .cloned()
-        .unwrap_or_else(|| module_engine_vulkan::default_graph(RenderPath::Forward))
+        .filter(|node| node.id == edge.from_node);
+    let renderer = nodes.next().ok_or("Game renderer is missing")?;
+    if nodes.next().is_some() || renderer.module != "render.vulkan" {
+        return Err("Game viewport requires one installed Vulkan renderer".into());
+    }
+    renderer
+        .subgraph
+        .as_deref()
+        .ok_or_else(|| "Active Vulkan renderer has no GPU graph".into())
 }
 
 pub struct GameHost {
@@ -493,12 +537,14 @@ pub struct GameHost {
     graph: Graph,
     renderer: VulkanRenderer,
     rejected_render: Option<(GraphDocument, String)>,
+    rejected_render_dependencies: Option<ShaderDependencyWatch>,
     overrides: Arc<Mutex<RenderOverrides>>,
     simulation_started: bool,
     pub audio: AudioModule,
     render_preparation: Option<RenderPreparation>,
     render_activity: Option<BuildProgress>,
     rejected_preparation: Option<(GraphDocument, String)>,
+    rejected_preparation_dependencies: Option<ShaderDependencyWatch>,
     presentation_revision: u64,
 }
 fn next_presentation_revision() -> u64 {
@@ -568,7 +614,7 @@ impl GameHost {
         if !errors.is_empty() {
             return Err(errors.join("; "));
         }
-        validate_render_settings_at(&document, &render_graph(&document), &backend_root)?;
+        validate_render_settings_at(&document, selected_render_graph(&document)?, &backend_root)?;
         let outputs = document
             .root
             .nodes
@@ -664,7 +710,7 @@ impl GameHost {
             overrides.clone(),
         )?;
         let session = GameSession::new_with_registry(game.clone(), kind, registry)?;
-        let graph = render_graph(&document);
+        let graph = selected_render_graph(&document)?.clone();
         if let Some(progress) = progress {
             progress.stage("Подготовка Vulkan и шейдеров");
         }
@@ -736,12 +782,14 @@ impl GameHost {
             graph,
             renderer,
             rejected_render: None,
+            rejected_render_dependencies: None,
             overrides,
             simulation_started: false,
             audio,
             render_preparation: None,
             render_activity: None,
             rejected_preparation: None,
+            rejected_preparation_dependencies: None,
             presentation_revision: next_presentation_revision(),
         })
     }
@@ -902,13 +950,38 @@ impl GameHost {
         Ok(())
     }
     pub fn step(&mut self, dt: f64, input: &GameInput) -> Result<usize, String> {
+        self.step_budget(dt, input, 15)
+    }
+    /// Yield to the interactive owner's mailbox after a bounded number of
+    /// actual fixed ticks. The synchronous CLI path keeps its 15-tick budget.
+    pub fn step_budget(
+        &mut self,
+        dt: f64,
+        input: &GameInput,
+        max_ticks: usize,
+    ) -> Result<usize, String> {
+        if input.restart {
+            if !dt.is_finite()
+                || dt < 0.
+                || !input
+                    .movement
+                    .iter()
+                    .chain(&input.aim_world)
+                    .all(|value| value.is_finite())
+            {
+                return Err("Game dt/input must be finite and dt nonnegative".into());
+            }
+            self.simulation_started = true;
+            self.restart()?;
+            return Ok(0);
+        }
         self.simulation_started = true;
         let started = Instant::now();
         self.overrides
             .lock()
             .map_err(|_| "Render controls poisoned")?
             .begin_frame();
-        let ticks = self.session.step(dt, input)?;
+        let ticks = self.session.step_budget(dt, input, max_ticks)?;
         self.presentation_revision = next_presentation_revision();
         self.last_step_ms = started.elapsed().as_secs_f64() * 1000.;
         self.audio.consume(self.session.events())?;
@@ -922,6 +995,43 @@ impl GameHost {
             self.camera.target = player.object.transform.translation;
         }
         Ok(ticks)
+    }
+    /// Restart the whole hosted game, including state held outside GameSession.
+    /// Retain compiled code, GPU resources and personal camera orbit.
+    pub fn restart(&mut self) -> Result<(), String> {
+        let mut slots = self
+            .slots
+            .values()
+            .map(|slot| slot.lock().map_err(|_| "Custom slot poisoned".to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let replacements = slots
+            .iter()
+            .map(|script| script.fork_instance())
+            .collect::<Vec<_>>();
+        let mut controls = self
+            .overrides
+            .lock()
+            .map_err(|_| "Render controls poisoned")?;
+        self.session.restart()?;
+        for (slot, replacement) in slots.iter_mut().zip(replacements) {
+            **slot = replacement;
+        }
+        *controls = RenderOverrides::default();
+        drop(controls);
+        self.audio.reset_playback();
+        if let Some(player) = self
+            .session
+            .state()
+            .entities
+            .values()
+            .find(|entity| entity.components.contains_key("player"))
+        {
+            self.camera.target = player.object.transform.translation;
+        }
+        self.last_step_ms = 0.;
+        self.last_render_ms = 0.;
+        self.presentation_revision = next_presentation_revision();
+        Ok(())
     }
     /// The exact renderer-neutral geometry/materials displayed by Scene and Game.
     /// Imported primitives retain their authored object IDs for picking.
@@ -1037,9 +1147,13 @@ impl GameHost {
         if document.execution_eq(&self.document) {
             return self.accept_document(document);
         }
-        let graph = render_graph(document);
+        let graph = selected_render_graph(document)?.clone();
         if let Some((failed, error)) = &self.rejected_render
             && failed.execution_eq(document)
+            && !self
+                .rejected_render_dependencies
+                .as_mut()
+                .is_some_and(|watch| watch.changed(document, &self.backend_root))
         {
             return Err(error.clone());
         }
@@ -1049,6 +1163,9 @@ impl GameHost {
             .map_err(|_| "Render controls poisoned")?
             .clone();
         let controls = retained_render_controls(&self.graph, &graph, &current);
+        let dependencies = (!graph.execution_eq(&self.graph)
+            || document.shader_sources != self.document.shader_sources)
+            .then(|| ShaderDependencyWatch::new(document, &self.backend_root));
         let result = validate_candidate_controls(
             document,
             &graph,
@@ -1067,11 +1184,16 @@ impl GameHost {
         });
         if let Err(error) = result {
             self.rejected_render = Some((document.clone(), error.clone()));
+            self.rejected_render_dependencies = Some(
+                dependencies
+                    .unwrap_or_else(|| ShaderDependencyWatch::new(document, &self.backend_root)),
+            );
             return Err(error);
         }
         self.accept_render_document(document, controls)?;
         self.graph = graph;
         self.rejected_render = None;
+        self.rejected_render_dependencies = None;
         Ok(())
     }
     pub fn preparation_activity(&self) -> Option<ActivitySnapshot> {
@@ -1098,6 +1220,7 @@ impl GameHost {
             .is_some_and(|(failed, _)| !failed.execution_eq(document))
         {
             self.rejected_preparation = None;
+            self.rejected_preparation_dependencies = None;
             self.render_activity = None;
         }
         self.poll_preparation(document)?;
@@ -1108,7 +1231,7 @@ impl GameHost {
             self.cancel_preparation();
             return self.accept_document(document);
         }
-        let graph = render_graph(document);
+        let graph = selected_render_graph(document)?.clone();
         if graph.execution_eq(&self.graph)
             && document.shader_sources == self.document.shader_sources
         {
@@ -1117,6 +1240,10 @@ impl GameHost {
         }
         if let Some((failed, error)) = &self.rejected_preparation
             && failed.execution_eq(document)
+            && !self
+                .rejected_preparation_dependencies
+                .as_mut()
+                .is_some_and(|watch| watch.changed(document, &self.backend_root))
         {
             return Err(error.clone());
         }
@@ -1136,6 +1263,7 @@ impl GameHost {
         let time = self.session.state().time;
         let progress = BuildProgress::new("Рендер Game / Scene");
         let worker_progress = progress.clone();
+        let dependencies = ShaderDependencyWatch::new(document, &self.backend_root);
         let (send, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             worker_progress.stage("Подготовка Vulkan и шейдеров; текущий рендер работает");
@@ -1153,8 +1281,10 @@ impl GameHost {
             document: candidate,
             receiver,
             progress,
+            dependencies,
         });
         self.rejected_preparation = None;
+        self.rejected_preparation_dependencies = None;
         Ok(())
     }
     pub fn poll_preparation(&mut self, document: &GraphDocument) -> Result<(), String> {
@@ -1164,6 +1294,7 @@ impl GameHost {
             .is_some_and(|(failed, _)| !failed.execution_eq(document))
         {
             self.rejected_preparation = None;
+            self.rejected_preparation_dependencies = None;
             self.render_activity = None;
         }
         let Some(job) = &self.render_preparation else {
@@ -1184,7 +1315,7 @@ impl GameHost {
             return Ok(());
         }
         let candidate = result.and_then(|candidate| {
-            let graph = render_graph(document);
+            let graph = selected_render_graph(document)?.clone();
             let controls = self
                 .overrides
                 .lock()
@@ -1221,7 +1352,9 @@ impl GameHost {
                 let old = std::mem::replace(&mut self.renderer, candidate);
                 self.graph = render_graph(document);
                 self.rejected_render = None;
+                self.rejected_render_dependencies = None;
                 self.rejected_preparation = None;
+                self.rejected_preparation_dependencies = None;
                 job.progress
                     .succeed("Новый рендер применён; игровое состояние сохранено");
                 std::thread::spawn(move || drop(old));
@@ -1230,6 +1363,7 @@ impl GameHost {
             Err(error) => {
                 job.progress.fail(error.clone());
                 self.rejected_preparation = Some((document.clone(), error.clone()));
+                self.rejected_preparation_dependencies = Some(job.dependencies);
                 Err(error)
             }
         }
@@ -1270,19 +1404,66 @@ impl GameHost {
 /// Basic optional single-voice Windows audio endpoint. Scheduling belongs to game.audio.
 pub struct AudioModule {
     cues: BTreeMap<String, Vec<u16>>,
+    endpoint_id: u64,
+    retired: Arc<std::sync::atomic::AtomicBool>,
     pub played: u64,
     pub enabled: bool,
 }
+
+/// PlaySound is process-global. A retired actor may finish after its successor
+/// has started a cue; only the owner of the current voice may stop it. The
+/// short native async call and ownership change share one critical section.
+#[derive(Default)]
+struct AudioEndpoint {
+    owner: Option<u64>,
+}
+impl AudioEndpoint {
+    fn play(&mut self, owner: u64, retired: &std::sync::atomic::AtomicBool, play: impl FnOnce()) {
+        if retired.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        self.owner = Some(owner);
+        play();
+    }
+    fn stop(&mut self, owner: u64, stop: impl FnOnce()) {
+        if self.owner == Some(owner) {
+            stop();
+            self.owner = None;
+        }
+    }
+}
+fn audio_endpoint() -> &'static Mutex<AudioEndpoint> {
+    static ENDPOINT: std::sync::OnceLock<Mutex<AudioEndpoint>> = std::sync::OnceLock::new();
+    ENDPOINT.get_or_init(|| Mutex::new(AudioEndpoint::default()))
+}
+
 impl AudioModule {
+    /// The UI handle can retire late playback using one atomic store while the
+    /// owner is busy inside Custom; it never acquires this module or endpoint.
+    pub(crate) fn retirement_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.retired.clone()
+    }
+    fn stop_voice(&self) {
+        if self.enabled {
+            audio_endpoint()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stop(self.endpoint_id, || {
+                    #[cfg(windows)]
+                    unsafe {
+                        PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0);
+                    }
+                });
+        }
+    }
+    fn reset_playback(&mut self) {
+        self.stop_voice();
+        self.played = 0;
+    }
     /// Retire this owner before its GPU/device is destroyed on another thread.
     /// The process-wide WAV endpoint must not later stop a new host's sound.
     pub fn stop_endpoint(&mut self) {
-        #[cfg(windows)]
-        if self.enabled {
-            unsafe {
-                PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0);
-            }
-        }
+        self.stop_voice();
         self.enabled = false;
     }
     pub fn new(root: &Path, cues: &BTreeMap<String, String>) -> Result<Self, String> {
@@ -1301,8 +1482,11 @@ impl AudioModule {
                     .collect(),
             );
         }
+        static NEXT_ENDPOINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
             cues: paths,
+            endpoint_id: NEXT_ENDPOINT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            retired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             played: 0,
             enabled: true,
         })
@@ -1313,18 +1497,23 @@ impl AudioModule {
                 && let Some(path) = self.cues.get(cue)
             {
                 self.played += 1;
-                #[cfg(windows)]
                 if self.enabled {
-                    unsafe {
-                        PlaySoundW(
-                            path.as_ptr(),
-                            std::ptr::null_mut(),
-                            0x00020000 | 0x0001 | 0x0002,
-                        );
-                    }
+                    audio_endpoint()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .play(self.endpoint_id, &self.retired, || {
+                            #[cfg(windows)]
+                            unsafe {
+                                PlaySoundW(
+                                    path.as_ptr(),
+                                    std::ptr::null_mut(),
+                                    0x00020000 | 0x0001 | 0x0002,
+                                );
+                            }
+                            #[cfg(not(windows))]
+                            let _ = path;
+                        });
                 }
-                #[cfg(not(windows))]
-                let _ = path;
             }
         }
         Ok(())
@@ -1446,6 +1635,408 @@ fn update(ctx: &mut ScriptContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retired_audio_owner_cannot_stop_successor_and_owned_stop_is_idempotent() {
+        let mut endpoint = AudioEndpoint::default();
+        let old_retired = std::sync::atomic::AtomicBool::new(false);
+        let new_retired = std::sync::atomic::AtomicBool::new(false);
+        let mut operations = vec![];
+        endpoint.play(1, &old_retired, || operations.push("old play"));
+        old_retired.store(true, std::sync::atomic::Ordering::Release);
+        endpoint.play(2, &new_retired, || operations.push("new play"));
+        endpoint.play(1, &old_retired, || operations.push("retired late play"));
+        endpoint.stop(1, || operations.push("old stop"));
+        assert_eq!(endpoint.owner, Some(2));
+        assert_eq!(operations, ["old play", "new play"]);
+        endpoint.stop(2, || operations.push("new stop"));
+        endpoint.stop(2, || operations.push("duplicate stop"));
+        assert_eq!(endpoint.owner, None);
+        assert_eq!(operations, ["old play", "new play", "new stop"]);
+    }
+    #[test]
+    fn invalid_active_renderer_route_never_falls_back_to_unused_vulkan() {
+        let original = demo_document();
+        let mut document = original.clone();
+        let mut unused = document
+            .root
+            .nodes
+            .iter()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .clone();
+        unused.id = "unused-renderer".into();
+        document.root.nodes.insert(0, unused);
+        let output = document
+            .root
+            .nodes
+            .iter()
+            .find(|node| node.module == "viewport.output")
+            .unwrap()
+            .id
+            .clone();
+        document.root.edges.retain(|edge| edge.to_node != output);
+        assert!(selected_render_graph(&document).is_err());
+        assert!(render_graph(&document).nodes.is_empty());
+        document = original.clone();
+        document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .subgraph = None;
+        assert!(
+            selected_render_graph(&document)
+                .unwrap_err()
+                .contains("no GPU graph")
+        );
+        document = original.clone();
+        let mut duplicate = document
+            .root
+            .nodes
+            .iter()
+            .find(|node| node.module == "viewport.output")
+            .unwrap()
+            .clone();
+        duplicate.id = "another-view".into();
+        document.root.nodes.push(duplicate);
+        assert!(
+            selected_render_graph(&document)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        document = original.clone();
+        let edge = document
+            .root
+            .edges
+            .iter()
+            .find(|edge| edge.to_node == output && edge.to_port == "frame")
+            .unwrap()
+            .clone();
+        document.root.edges.push(edge);
+        assert!(selected_render_graph(&document).is_err());
+        document = original;
+        document
+            .root
+            .edges
+            .iter_mut()
+            .find(|edge| edge.to_node == output && edge.to_port == "frame")
+            .unwrap()
+            .from_port = "wrong".into();
+        assert!(selected_render_graph(&document).is_err());
+    }
+    #[test]
+    fn game_scene_and_dependency_watch_follow_wired_renderer_across_unused_reordering() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut document = demo_document();
+        let active = selected_render_graph(&document).unwrap().clone();
+        let active_id = document
+            .root
+            .nodes
+            .iter()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .id
+            .clone();
+        let mut alternative = document
+            .root
+            .nodes
+            .iter()
+            .find(|node| node.id == active_id)
+            .unwrap()
+            .clone();
+        alternative.id = "unused-renderer".into();
+        let alternate = alternative.subgraph.as_mut().unwrap();
+        let ao = alternate
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ao")
+            .unwrap();
+        ao.module = "gpu.custom".into();
+        ao.params = json!({"source_id":"unused-render-color", "manifest":module_engine_vulkan::custom_compute_manifest(), "gain":0.2});
+        alternate
+            .edges
+            .retain(|edge| edge.to_node != "ao" || edge.to_port == "color");
+        let alternate_graph = alternate.as_ref().clone();
+        document.shader_sources.insert(
+            "unused-render-color".into(),
+            module_engine_vulkan::demo_custom_compute_source(),
+        );
+        let mut scene_edge = document
+            .root
+            .edges
+            .iter()
+            .find(|edge| edge.to_node == active_id && edge.to_port == "scene")
+            .unwrap()
+            .clone();
+        scene_edge.to_node = alternative.id.clone();
+        document.root.edges.push(scene_edge);
+        document.root.nodes.insert(0, alternative);
+        assert_eq!(render_graph(&document), active);
+        let mut game =
+            GameHost::new(document.clone(), &root, Some(&root), WorldKind::Objects).unwrap();
+        game.audio.enabled = false;
+        let game_pixels = game.render(160, 90).unwrap().rgba;
+        let snapshot = game.author_snapshot().unwrap();
+        let mut alternate_renderer = VulkanRenderer::new_at(root.clone()).unwrap();
+        alternate_renderer.set_detailed_stats(false);
+        let alternative_pixels = alternate_renderer
+            .render(
+                &snapshot,
+                game.camera,
+                160,
+                90,
+                &alternate_graph,
+                &document.shader_sources,
+                &RenderOverrides::default(),
+            )
+            .unwrap()
+            .rgba;
+        assert_ne!(
+            game_pixels, alternative_pixels,
+            "the inactive graph must produce visibly different pixels"
+        );
+        let mut preview_document = document.clone();
+        preview_document.game.as_mut().unwrap().entry_scene = "boss".into();
+        let mut preview = GameHost::new(
+            preview_document.clone(),
+            &root,
+            Some(&root),
+            WorldKind::Objects,
+        )
+        .unwrap();
+        preview.audio.enabled = false;
+        let preview_pixels = preview.render(160, 90).unwrap().rgba;
+        assert_eq!(preview.graph, active);
+        let mut watch = ShaderDependencyWatch::new(&document, &root);
+        document.root.nodes.rotate_left(1); // move the inactive renderer behind the active route
+        game.sync_document(&document).unwrap();
+        assert_eq!(game.render(160, 90).unwrap().rgba, game_pixels);
+        preview_document.root = document.root.clone();
+        preview.sync_document(&preview_document).unwrap();
+        assert_eq!(preview.render(160, 90).unwrap().rgba, preview_pixels);
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(!watch.changed(&document, &root));
+        document.shader_sources.insert(
+            "unused-render-color".into(),
+            "#include \"nonexistent-inactive.hlsli\"\n".into(),
+        );
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(
+            !watch.changed(&document, &root),
+            "inactive shader dependencies must not own the live watch"
+        );
+        assert_eq!(render_graph(&document), active);
+    }
+    #[test]
+    #[ignore = "wall-time diagnostic: explicitly measure slow Custom catchup without imposing a new simulation policy"]
+    fn audit_slow_custom_catchup_wall_time() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut document = demo_document();
+        document.custom_sources.insert("game-controller".into(), r#"// module-engine-state: {"schema":"audit.delay.v1","initial":{"delay_ms":0,"ticks":0}}
+fn update(ctx: &mut ScriptContext) {
+    let delay = ctx.state["delay_ms"].as_u64().unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(delay));
+    ctx.state["ticks"] = serde_json::json!(ctx.state["ticks"].as_u64().unwrap_or(0) + 1);
+}
+"#.into());
+        let mut host = GameHost::new(document, &root, Some(&root), WorldKind::Objects).unwrap();
+        host.audio.enabled = false;
+        host.step(1. / 60., &GameInput::default()).unwrap();
+        let mut samples = Vec::new();
+        for delay in [8_u64, 80] {
+            host.slots["game-controller"]
+                .lock()
+                .unwrap()
+                .migrate_state(json!({"delay_ms":delay,"ticks":0}))
+                .unwrap();
+            host.step(1. / 60., &GameInput::default()).unwrap(); // start the new worker before timing
+            let started = Instant::now();
+            let ticks = host.step(0.25, &GameInput::default()).unwrap();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(ticks, 15);
+            assert!(elapsed_ms >= delay as f64 * ticks as f64);
+            samples.push(json!({"custom_delay_ms":delay,"dt":0.25,"fixed_ticks":ticks,"host_step_ms":elapsed_ms,"per_tick_timeout_ms":150}));
+        }
+        let report = json!({"kind":"synchronous-custom-catchup-diagnostic","samples":samples,"policy":"current fixed-step/catchup semantics retained; no frame-wall-time budget"});
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        std::fs::write(
+            root.join(".work/slow-custom-catchup-audit.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn host_restart_restores_world_script_render_audio_and_camera_without_recompiling() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut host =
+            GameHost::new(demo_document(), &root, Some(&root), WorldKind::Objects).unwrap();
+        host.audio.enabled = false;
+        host.camera.yaw = 0.4;
+        host.camera.pitch = 0.8;
+        host.camera.distance = 17.;
+        host.restart().unwrap();
+        let initial = host.session.state().clone();
+        let camera = host.camera;
+        let pixels = host.render(160, 90).unwrap().rgba;
+        let slot = host.slots["game-controller"].clone();
+        let executable = slot.lock().unwrap().executable().to_path_buf();
+        host.step(
+            1. / 60.,
+            &GameInput {
+                movement: [1., 0.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            slot.lock().unwrap().state().unwrap()["ticks"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        host.camera.target = [12., 0., 8.];
+        host.audio.played = 4;
+        let frame_interface = host
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.module == "interface.output")
+            .unwrap();
+        let frame_edge = host
+            .graph
+            .edges
+            .iter()
+            .find(|edge| edge.to_node == frame_interface.id && edge.to_port == "value")
+            .unwrap();
+        let frame_resource = format!("{}.{}", frame_edge.from_node, frame_edge.from_port);
+        {
+            let mut controls = host.overrides.lock().unwrap();
+            controls.enabled.insert("aa".into(), false);
+            controls.parameters.insert(
+                "tonemap".into(),
+                BTreeMap::from([("exposure".into(), json!(0.2))]),
+            );
+            controls
+                .resource_commands
+                .push(RenderResourceCommand::ClearResource {
+                    name: frame_resource,
+                    value: [0.; 4],
+                });
+        }
+        assert_ne!(host.render(160, 90).unwrap().rgba, pixels);
+        let pipelines = host.renderer_performance().pipeline_creations;
+        let revision = host.presentation_revision();
+        host.restart().unwrap();
+        assert_ne!(host.presentation_revision(), revision);
+        assert_eq!(host.session.state(), &initial);
+        assert_eq!(host.camera, camera);
+        assert_eq!(host.audio.played, 0);
+        assert!(!host.audio.enabled);
+        assert!(Arc::ptr_eq(&slot, &host.slots["game-controller"]));
+        assert_eq!(slot.lock().unwrap().executable(), executable);
+        let (state, declaration) = {
+            let script = slot.lock().unwrap();
+            (
+                script.state().unwrap(),
+                script.state_declaration().initial.clone(),
+            )
+        };
+        assert_eq!(state, declaration);
+        assert!(host.overrides.lock().unwrap().enabled.is_empty());
+        assert!(host.overrides.lock().unwrap().parameters.is_empty());
+        assert!(host.overrides.lock().unwrap().resource_commands.is_empty());
+        assert_eq!(host.render(160, 90).unwrap().rgba, pixels);
+        assert_eq!(host.renderer_performance().pipeline_creations, pipelines);
+        host.overrides
+            .lock()
+            .unwrap()
+            .enabled
+            .insert("aa".into(), false);
+        assert_eq!(
+            host.step(
+                0.,
+                &GameInput {
+                    restart: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            0
+        );
+        assert!(host.overrides.lock().unwrap().enabled.is_empty());
+        assert_eq!(host.session.state(), &initial);
+    }
+    #[test]
+    fn rejected_shader_dependency_watch_tracks_disk_repairs_without_document_edits() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let relative = format!(".work/shader-rejection-watch-{}.hlsli", std::process::id());
+        let header = root.join(&relative);
+        std::fs::write(&header, "float gain() { return 0.2; }\n").unwrap();
+        let mut document = demo_document();
+        let renderer = document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap();
+        let ao = renderer
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ao")
+            .unwrap();
+        ao.module = "gpu.custom".into();
+        ao.params = json!({"source_id":"watch","manifest":module_engine_vulkan::custom_compute_manifest(),"gain":1.0});
+        renderer
+            .edges
+            .retain(|edge| edge.to_node != "ao" || edge.to_port == "color");
+        document.shader_sources.insert(
+            "watch".into(),
+            format!(
+                "#include \"{relative}\"\n{}",
+                module_engine_vulkan::demo_custom_compute_source()
+            ),
+        );
+        let mut watch = ShaderDependencyWatch::new(&document, &root);
+        std::fs::write(&header, "invalid included code\n").unwrap();
+        watch.checked = Instant::now();
+        assert!(
+            !watch.changed(&document, &root),
+            "no filesystem walk on every UI frame"
+        );
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(watch.changed(&document, &root));
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(!watch.changed(&document, &root));
+        std::fs::remove_file(&header).unwrap();
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(
+            watch.changed(&document, &root),
+            "missing include is a distinct dependency state"
+        );
+        std::fs::write(&header, "float gain() { return 0.8; }\n").unwrap();
+        watch.checked = Instant::now() - Duration::from_millis(250);
+        assert!(
+            watch.changed(&document, &root),
+            "repair must permit retry without changing inline code"
+        );
+        std::fs::remove_file(&header).unwrap();
+    }
     fn without_aa(mut document: GraphDocument) -> GraphDocument {
         let renderer = document
             .root

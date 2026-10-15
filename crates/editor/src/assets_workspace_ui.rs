@@ -19,6 +19,20 @@ use std::{
 const THUMBNAIL_EDGE: usize = 192;
 const MAX_CACHED_THUMBNAILS: usize = 256;
 
+struct CatalogScanJob {
+    root: PathBuf,
+    protected: Vec<String>,
+    document: GraphDocument,
+    results: mpsc::Receiver<Result<CatalogScan, String>>,
+}
+struct CatalogScan {
+    manifest: serde_json::Value,
+    tiles: Vec<AssetTile>,
+    folders: Vec<String>,
+    trash: Vec<TrashTile>,
+    service: AssetWorkspace,
+}
+
 #[derive(Default)]
 pub struct AssetsWorkbench {
     browsers: BTreeMap<(String, u64), BrowserState>,
@@ -32,6 +46,7 @@ pub struct AssetsWorkbench {
     texture_order: VecDeque<String>,
     pending_previews: BTreeSet<String>,
     worker: Option<PreviewWorker>,
+    scan: Option<CatalogScanJob>,
     initialized: bool,
     scan_needed: bool,
     usages_dirty: bool,
@@ -44,6 +59,7 @@ impl AssetsWorkbench {
     /// Same-project import/file transactions preserve pane navigation and selection.
     pub fn invalidate(&mut self) {
         self.scan_needed = true;
+        self.scan = None;
         self.worker = None;
         self.pending_previews.clear();
         self.textures.clear();
@@ -71,7 +87,8 @@ impl AssetsWorkbench {
         self.browsers.get(&(workspace.into(), pane_id))
     }
     pub fn needs_synchronization(&self, root: &Path, protected: &[String]) -> bool {
-        self.scan_needed
+        self.scan.is_some()
+            || self.scan_needed
             || !self.initialized
             || self.root.as_deref() != Some(root)
             || self.protected != protected
@@ -100,6 +117,7 @@ impl AssetsWorkbench {
         )?;
         folders.sort();
         let mut tiles = vec![];
+        let mut all_usages = service.usages_batch(&candidate)?;
         for info in infos {
             let kind = ui_kind(&info.kind);
             let mut metadata = vec![];
@@ -121,8 +139,9 @@ impl AssetsWorkbench {
                     Err(error) => metadata.push(("Проверка звука".into(), error)),
                 }
             }
-            let usages = service
-                .usages(&candidate, &info.id)?
+            let usages = all_usages
+                .remove(&info.id)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|usage| usage.location)
                 .collect();
@@ -176,9 +195,11 @@ impl AssetsWorkbench {
     }
     pub fn refresh_usages(&mut self, document: &GraphDocument) -> Result<(), String> {
         if let Some(service) = &self.service {
+            let mut all_usages = service.usages_batch(document)?;
             for tile in &mut self.tiles {
-                tile.usages = service
-                    .usages(document, &tile.id)?
+                tile.usages = all_usages
+                    .remove(&tile.id)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|usage| usage.location)
                     .collect();
@@ -186,6 +207,102 @@ impl AssetsWorkbench {
         }
         self.usages_dirty = false;
         Ok(())
+    }
+
+    /// Hashing/scanning runs outside the native UI. Only metadata from the
+    /// matching project/index request is adopted; concurrent scene edits stay.
+    fn synchronize_in_background(
+        &mut self,
+        document: &GraphDocument,
+        root: &Path,
+        protected: Vec<String>,
+        ctx: &egui::Context,
+    ) -> Result<Option<GraphDocument>, String> {
+        if self
+            .scan
+            .as_ref()
+            .is_some_and(|job| job.root != root || job.protected != protected)
+        {
+            self.scan = None;
+        }
+        if let Some(job) = &self.scan {
+            let result = match job.results.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return Ok(None),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.scan = None;
+                    return Err("Поток индексирования ресурсов завершился без результата".into());
+                }
+            };
+            let job = self.scan.take().unwrap();
+            if document.asset_manifest != job.document.asset_manifest {
+                self.scan_needed = true;
+                return Ok(None);
+            }
+            let mut catalog = result?;
+            let mut candidate = document.clone();
+            candidate.asset_manifest = catalog.manifest;
+            if document != &job.document {
+                let mut usages = catalog.service.usages_batch(&candidate)?;
+                for tile in &mut catalog.tiles {
+                    tile.usages = usages
+                        .remove(&tile.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|usage| usage.location)
+                        .collect();
+                }
+            }
+            if self
+                .root
+                .as_deref()
+                .is_some_and(|previous| previous != root)
+            {
+                self.browsers.clear();
+            }
+            self.invalidate();
+            self.tiles = catalog.tiles;
+            self.folders = catalog.folders;
+            self.trash = catalog.trash;
+            self.root = Some(job.root);
+            self.protected = job.protected;
+            self.service = Some(catalog.service);
+            self.scan_needed = false;
+            self.initialized = true;
+            self.usages_dirty = false;
+            self.error = None;
+            return Ok((candidate != *document).then_some(candidate));
+        }
+        let root = root.to_path_buf();
+        let worker_root = root.clone();
+        let worker_protected = protected.clone();
+        let worker_document = document.clone();
+        let ctx = ctx.clone();
+        let (sender, results) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let mut cache = AssetsWorkbench::default();
+                let candidate = cache
+                    .synchronize_cache(&worker_document, &worker_root, worker_protected)?
+                    .unwrap_or(worker_document);
+                Ok(CatalogScan {
+                    manifest: candidate.asset_manifest,
+                    tiles: cache.tiles,
+                    folders: cache.folders,
+                    trash: cache.trash,
+                    service: cache.service.ok_or("Asset catalog has no service")?,
+                })
+            })();
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+        self.scan = Some(CatalogScanJob {
+            root,
+            protected,
+            document: document.clone(),
+            results,
+        });
+        Ok(None)
     }
     fn queue_preview(&mut self, id: &str, document: &GraphDocument) -> Result<(), String> {
         let Some(tile) = self.tiles.iter_mut().find(|tile| tile.id == id) else {
@@ -347,10 +464,12 @@ impl super::Editor {
             || self.workflow.blocks_document_edits()
             || self.json_dirty;
         if !busy && self.assets.needs_synchronization(&canonical, &protected) {
-            match self
-                .assets
-                .synchronize_cache(&self.document, &root, protected.clone())
-            {
+            match self.assets.synchronize_in_background(
+                &self.document,
+                &canonical,
+                protected.clone(),
+                ui.ctx(),
+            ) {
                 Ok(Some(candidate)) => {
                     self.accept_asset_index(candidate);
                 }
@@ -375,6 +494,12 @@ impl super::Editor {
             self.assets.error = Some(error);
         }
         self.assets.poll_previews(ui.ctx());
+        if self.assets.scan.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Индексирование ресурсов… Редактор остаётся доступен.");
+            });
+        }
         if let Some(error) = &self.assets.error {
             ui.colored_label(egui::Color32::LIGHT_RED, error);
             if ui.button("Повторить загрузку ресурсов").clicked() {
@@ -394,7 +519,7 @@ impl super::Editor {
             &self.assets.tiles,
             &self.assets.folders,
             &self.assets.trash,
-            busy,
+            busy || self.assets.scan.is_some(),
         );
         for action in actions {
             match action {
@@ -513,6 +638,13 @@ fn collect_folders(
             .map_err(|error| error.to_string())?
             .is_dir()
         {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".module-engine-game-export-")
+            {
+                continue;
+            }
             collect_folders(
                 root,
                 &format!("{relative}/{}", entry.file_name().to_string_lossy()),
@@ -809,6 +941,71 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn background_catalog_keeps_latest_scene_edits_and_rejects_an_obsolete_index() {
+        let fixture = Fixture::new();
+        fixture.png("test.png", [10, 20, 30, 255]);
+        let initial = crate::game_host::demo_document();
+        let ctx = egui::Context::default();
+        let mut cache = AssetsWorkbench::default();
+        assert!(
+            cache
+                .synchronize_in_background(&initial, &fixture.root, vec![], &ctx)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache.scan.is_some(),
+            "first UI call submits a job without consuming it"
+        );
+        let mut edited = initial.clone();
+        edited.name = "Scene edited while scan was running".into();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let indexed = loop {
+            if let Some(candidate) = cache
+                .synchronize_in_background(&edited, &fixture.root, vec![], &ctx)
+                .unwrap()
+            {
+                break candidate;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "catalog worker did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        assert_eq!(indexed.name, edited.name);
+        assert_eq!(indexed.game, edited.game);
+        assert_eq!(cache.tiles.len(), 1);
+        let ready_tiles = cache.tiles.clone();
+        cache.invalidate();
+        cache
+            .synchronize_in_background(&indexed, &fixture.root, vec![], &ctx)
+            .unwrap();
+        let job = cache.scan.as_ref().unwrap();
+        // Wait for the background work itself without applying it. Then change
+        // the authoritative index before UI adoption, as a file Undo can do.
+        let prepared = job
+            .results
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (sender, results) = mpsc::channel();
+        sender.send(prepared).unwrap();
+        cache.scan.as_mut().unwrap().results = results;
+        let mut newer = indexed.clone();
+        newer.asset_manifest["assets"][&ready_tiles[0].id]["sha256"] =
+            serde_json::json!("external-update");
+        assert!(
+            cache
+                .synchronize_in_background(&newer, &fixture.root, vec![], &ctx)
+                .unwrap()
+                .is_none()
+        );
+        assert!(cache.scan.is_none());
+        assert!(cache.scan_needed);
+        assert_eq!(cache.tiles[0].id, ready_tiles[0].id);
+    }
+
     #[test]
     fn model_thumbnail_renders_loaded_geometry_instead_of_a_generic_icon() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -539,6 +539,8 @@ impl Editor {
             self.poll_candidates();
             if !self.workflow.blocks_document_edits() {
                 self.tick_simulation(dt);
+            } else {
+                self.game_workbench.suspend_game_execution();
             }
         }
         if !self.can_author_engine() {
@@ -571,6 +573,7 @@ impl Editor {
                 });
         }
         let available = self.available_editors();
+        self.game_workbench.begin_ui_frame();
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -777,6 +780,7 @@ impl Editor {
                     }
                 });
             });
+        self.game_workbench.finish_ui_frame();
         self.draw_workflow_modals(&ctx);
         if self.personal_dirty && now - self.personal_save_time > 1.0 {
             self.personal_save_time = now;
@@ -806,21 +810,30 @@ impl Editor {
                 ui.label(format!("Game submissions: {}", workbench.game_render_calls));
                 ui.label(format!("Cached frames reused: {}", workbench.game_frame_reuses));
             });
-            for (label, host) in [
-                ("Game", self.game_workbench.host.as_ref()),
-                ("Scene", self.game_workbench.preview_host.as_ref()),
+            for (label, counters) in [
+                ("Game", self.game_workbench.game_snapshot().map(|snapshot| snapshot.renderer_performance)
+                    .or_else(|| self.game_workbench.host.as_ref().map(|host| host.renderer_performance()))),
+                ("Scene", self.game_workbench.preview_host.as_ref().map(|host| host.renderer_performance())),
             ] {
-                if let Some(host) = host {
-                    let counters = host.renderer_performance();
+                if let Some(counters) = counters {
                     ui.horizontal_wrapped(|ui| {
                         ui.strong(label);
                         ui.label(format!("Renders: {}", counters.render_calls));
                         ui.label(format!("Prepare calls: {}", counters.prepare_calls));
                         ui.label(format!("Plans built / reused: {} / {}", counters.plan_builds, counters.plan_cache_hits));
                         ui.label(format!("Pipelines created: {}", counters.pipeline_creations));
+                        ui.label(format!("Pipeline build attempts: {}", counters.pipeline_build_attempts));
+                        ui.label(format!("Rejected shader retries avoided: {}", counters.rejected_cache_hits));
                         ui.label(format!("Prepare CPU total: {:.2} ms", counters.prepare_ns as f64 / 1_000_000.));
                     });
                 }
+            }
+            if let Some(snapshot) = self.game_workbench.game_snapshot() {
+                ui.label(format!("Game worker {} · epoch {} · tick {} · queued time {:.3} s · input ack {}",
+                    snapshot.actor_id, snapshot.epoch, snapshot.state.tick, snapshot.backlog_seconds, snapshot.input_ack));
+                ui.small(format!("Last completed simulation {:.2} ms · render {:.2} ms", snapshot.last_step_ms, snapshot.last_render_ms));
+                ui.small(format!("State revision {} · last pixels tick {:?}, revision {:?}",
+                    snapshot.presentation_revision, snapshot.frame_tick, snapshot.frame_revision));
             }
             for (workspace, layout, memories) in [
                 ("Engine", &self.engine_layout, &self.engine_panes),

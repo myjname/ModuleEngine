@@ -4,6 +4,7 @@ mod compiler;
 mod geometry;
 mod graph;
 mod vulkan;
+pub use compiler::shader_dependency_revision_at;
 pub use compiler::{
     ShaderArtifact, ShaderPerformance, compile_hlsl, compile_hlsl_at, dxc_path,
     precompile_graph_at, resource_root, shader_performance,

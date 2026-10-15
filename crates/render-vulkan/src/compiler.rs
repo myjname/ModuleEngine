@@ -33,6 +33,32 @@ pub fn shader_performance() -> ShaderPerformance {
         spirv_cache_hits: SPIRV_CACHE_HITS.load(Ordering::Relaxed),
     }
 }
+/// Content revision of the selected graph's complete literal include closure.
+/// Failed preparations use a rate-limited snapshot of this Result so fixing a
+/// header (including recreating a missing file) can retry without a JSON edit.
+pub fn shader_dependency_revision_at(
+    graph: &module_engine_core::Graph,
+    sources: &BTreeMap<String, String>,
+    root: &Path,
+) -> Result<u64, String> {
+    let plan = crate::graph::build_plan_at(graph, sources, root)?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for pass in plan.passes {
+        pass.id.hash(&mut hash);
+        pass.dependency_hash.hash(&mut hash);
+    }
+    Ok(hash.finish())
+}
+struct TemporaryShaderFiles {
+    input: PathBuf,
+    output: PathBuf,
+}
+impl Drop for TemporaryShaderFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.input);
+        let _ = std::fs::remove_file(&self.output);
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ShaderArtifact {
     pub words: Vec<u32>,
@@ -246,6 +272,10 @@ pub fn compile_hlsl_at(
     );
     let input = cache.join(format!("{name}.hlsl"));
     let output = cache.join(format!("{name}.spv"));
+    let _temporary = TemporaryShaderFiles {
+        input: input.clone(),
+        output: output.clone(),
+    };
     std::fs::write(&input, source).map_err(|e| e.to_string())?;
     let dxc = std::env::var_os("MODULE_ENGINE_DXC")
         .map(PathBuf::from)
@@ -288,6 +318,9 @@ pub fn compile_hlsl_at(
     }
     let bytes = std::fs::read(&output).map_err(|e| e.to_string())?;
     let result = artifact(bytes.clone(), diagnostics)?;
+    if shader_key(root, source, entry, profile)? != key {
+        return Err("HLSL dependencies changed during compilation; retry the current files".into());
+    }
     // Publish a complete artifact, avoiding partial reads by parallel compilation.
     if let Err(error) = std::fs::rename(&output, &stable) {
         if std::fs::read(&stable)

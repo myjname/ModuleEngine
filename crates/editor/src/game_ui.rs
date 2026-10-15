@@ -1,8 +1,10 @@
 //! Authored scenes and staged execution graphs. Play never writes authored data.
+use crate::player::update_render_diagnostic;
 use crate::{
     activity::{ActivitySnapshot, BuildProgress},
     canvas::{self, CanvasAction, CanvasEdge, CanvasNode, CanvasPort, CanvasState},
     game_host::{self, GameHost},
+    game_worker::{CustomApplyMode, GameSnapshot, GameWorker, WorkerCommand},
     player,
 };
 use eframe::egui::{self, Color32, Vec2};
@@ -10,7 +12,7 @@ use module_engine_core::*;
 use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::Duration,
@@ -20,6 +22,7 @@ struct HostPreparation {
     context: PreparationContext,
     receiver: mpsc::Receiver<Result<GameHost, String>>,
     progress: BuildProgress,
+    dependencies: game_host::ShaderDependencyWatch,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct PreparationContext {
@@ -82,25 +85,11 @@ struct GameFrameCache {
     time: Option<f64>,
     next_play_frame: Option<f64>,
 }
-/// A successful frame may retire its own previous error, but must preserve a
-/// newer diagnostic from Custom, authoring or asynchronous preparation.
-fn update_render_diagnostic(
-    error: &mut Option<String>,
-    render_error: &mut Option<String>,
-    result: Result<(), String>,
-) {
-    match result {
-        Err(message) => {
-            *render_error = Some(message.clone());
-            *error = Some(message);
-        }
-        Ok(()) => {
-            if render_error.is_some() && error.as_ref() == render_error.as_ref() {
-                *error = None;
-            }
-            *render_error = None;
-        }
-    }
+
+enum WorkerRequest {
+    Document(Arc<GraphDocument>),
+    Custom(String),
+    Restart,
 }
 impl GameFrameCache {
     fn should_render(&mut self, key: GameFrameKey, frame: u64, now: f64, playing: bool) -> bool {
@@ -168,6 +157,7 @@ pub struct GameWorkbench {
     params: String,
     params_id: Option<String>,
     pending: Option<(String, mpsc::Receiver<Result<CompiledScript, String>>)>,
+    pending_worker_epoch: Option<(u64, u64)>,
     pub rejected: Option<(String, CompiledScript)>,
     migration: String,
     source_selected: String,
@@ -176,13 +166,35 @@ pub struct GameWorkbench {
     world_kind: WorldKind,
     play_session: bool,
     deferred_preparation: bool,
+    // Interactive execution has one persistent owner. Deferred preparation is
+    // intentionally independent so deterministic headless callers keep the
+    // synchronous GameHost contract.
+    background_game: bool,
+    worker: Option<GameWorker>,
+    worker_snapshot: Option<Arc<GameSnapshot>>,
+    worker_commands: VecDeque<WorkerCommand>,
+    worker_inputs: VecDeque<GameInput>,
+    worker_requests: BTreeMap<u64, WorkerRequest>,
+    worker_request: u64,
+    worker_playing: Option<bool>,
+    worker_viewport: Option<[usize; 2]>,
+    worker_view_visible: bool,
+    worker_frame: Option<Arc<Frame>>,
+    worker_rejected_document: Option<Arc<GraphDocument>>,
+    worker_deferred_document: Option<(Arc<GraphDocument>, bool)>,
+    repaint: Option<egui::Context>,
     game_preparation: Option<HostPreparation>,
     preview_preparation: Option<HostPreparation>,
     game_activity: Option<BuildProgress>,
     preview_activity: Option<BuildProgress>,
     custom_activity: Option<BuildProgress>,
+    custom_errors: BTreeMap<String, String>,
+    restart_error: Option<String>,
+    restart_recovered: bool,
     rejected_game: Option<(GraphDocument, PreparationContext, String)>,
     rejected_preview: Option<(GraphDocument, PreparationContext, String)>,
+    rejected_game_dependencies: Option<game_host::ShaderDependencyWatch>,
+    rejected_preview_dependencies: Option<game_host::ShaderDependencyWatch>,
     game_context: Option<PreparationContext>,
     preview_context: Option<PreparationContext>,
     accepted_game_context: Option<PreparationContext>,
@@ -227,6 +239,7 @@ impl Default for GameWorkbench {
             params: String::new(),
             params_id: None,
             pending: None,
+            pending_worker_epoch: None,
             rejected: None,
             migration: "null".into(),
             source_selected: String::new(),
@@ -235,13 +248,32 @@ impl Default for GameWorkbench {
             world_kind: WorldKind::Objects,
             play_session: false,
             deferred_preparation: false,
+            background_game: false,
+            worker: None,
+            worker_snapshot: None,
+            worker_commands: VecDeque::new(),
+            worker_inputs: VecDeque::new(),
+            worker_requests: BTreeMap::new(),
+            worker_request: 0,
+            worker_playing: None,
+            worker_viewport: None,
+            worker_view_visible: false,
+            worker_frame: None,
+            worker_rejected_document: None,
+            worker_deferred_document: None,
+            repaint: None,
             game_preparation: None,
             preview_preparation: None,
             game_activity: None,
             preview_activity: None,
             custom_activity: None,
+            custom_errors: BTreeMap::new(),
+            restart_error: None,
+            restart_recovered: false,
             rejected_game: None,
             rejected_preview: None,
+            rejected_game_dependencies: None,
+            rejected_preview_dependencies: None,
             game_context: None,
             preview_context: None,
             accepted_game_context: None,
@@ -300,6 +332,246 @@ impl GameWorkbench {
     pub fn set_deferred_preparation(&mut self, enabled: bool) {
         self.deferred_preparation = enabled;
     }
+    /// Native Editor execution is asynchronous; headless/CLI callers opt in
+    /// explicitly rather than silently changing their deterministic API.
+    pub fn set_background_game(&mut self, enabled: bool, context: Option<&egui::Context>) {
+        self.background_game = enabled;
+        if enabled {
+            self.deferred_preparation = true;
+        }
+        if let Some(context) = context {
+            self.repaint = Some(context.clone());
+        }
+        if enabled
+            && self.worker.is_none()
+            && let Some(host) = self.host.take()
+        {
+            self.install_worker(host);
+        }
+    }
+    fn install_worker(&mut self, host: GameHost) {
+        self.clear_worker();
+        if self.accepted_game_context.is_none() {
+            self.accepted_game_context = Some(PreparationContext {
+                root: host.root.clone(),
+                backend_root: host.backend_root.clone(),
+                compile_root: self.compile_root.clone(),
+                kind: host.session.world_kind(),
+            });
+        }
+        self.worker = Some(GameWorker::spawn(host, self.repaint.clone()));
+    }
+    fn clear_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            worker.shutdown();
+        }
+        self.worker_snapshot = None;
+        self.worker_commands.clear();
+        self.worker_inputs.clear();
+        self.worker_requests.clear();
+        self.worker_playing = None;
+        self.worker_viewport = None;
+        self.worker_view_visible = false;
+        self.worker_frame = None;
+        self.worker_rejected_document = None;
+        self.worker_deferred_document = None;
+    }
+    pub fn has_game_host(&self) -> bool {
+        self.host.is_some() || self.worker.is_some()
+    }
+    pub fn game_snapshot(&self) -> Option<&Arc<GameSnapshot>> {
+        self.worker_snapshot.as_ref()
+    }
+    pub fn begin_ui_frame(&mut self) {
+        self.worker_view_visible = false;
+    }
+    pub fn finish_ui_frame(&mut self) {
+        if self.worker.is_some()
+            && !self.worker_view_visible
+            && self.worker_viewport != Some([0, 0])
+        {
+            self.worker_viewport = Some([0, 0]);
+            self.queue_worker_command(WorkerCommand::SetViewport {
+                width: 0,
+                height: 0,
+            });
+        }
+    }
+    /// Mirrors a temporarily skipped UI simulation step without waiting for
+    /// the owner. Resume is requested by the next normal tick(playing=true).
+    pub fn suspend_game_execution(&mut self) {
+        self.input = GameInput::default();
+        self.worker_inputs.clear();
+        if self.worker.is_some() && self.worker_playing != Some(false) {
+            self.worker_playing = Some(false);
+            self.queue_worker_command(WorkerCommand::SetPlaying(false));
+        }
+    }
+    pub fn game_world_kind(&self) -> Option<WorldKind> {
+        self.worker_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.world_kind)
+            .or_else(|| self.host.as_ref().map(|host| host.session.world_kind()))
+    }
+    fn next_worker_request(&mut self, request: WorkerRequest) -> u64 {
+        self.worker_request = self.worker_request.wrapping_add(1);
+        self.worker_requests.insert(self.worker_request, request);
+        self.worker_request
+    }
+    fn queue_worker_command(&mut self, command: WorkerCommand) {
+        // Latest-value controls occupy at most one unsent queue slot each.
+        self.worker_commands.retain(|queued| {
+            !matches!(
+                (&command, queued),
+                (WorkerCommand::SetPlaying(_), WorkerCommand::SetPlaying(_))
+                    | (
+                        WorkerCommand::SetViewport { .. },
+                        WorkerCommand::SetViewport { .. }
+                    )
+                    | (
+                        WorkerCommand::InvalidateContent,
+                        WorkerCommand::InvalidateContent
+                    )
+            )
+        });
+        self.worker_commands.push_back(command);
+        self.flush_worker_commands();
+    }
+    fn flush_worker_commands(&mut self) {
+        let Some(worker) = &self.worker else { return };
+        while let Some(command) = self.worker_commands.pop_front() {
+            if let Err(command) = worker.try_command(command) {
+                self.worker_commands.push_front(command);
+                break;
+            }
+        }
+        while let Some(input) = self.worker_inputs.pop_front() {
+            if let Err(input) = worker.submit_input(input) {
+                self.worker_inputs.push_front(input);
+                break;
+            }
+        }
+    }
+    fn queue_worker_document(&mut self, document: &GraphDocument, authoring: bool) {
+        if let Some(inflight) = self.worker_requests.values().find_map(|request| {
+            if let WorkerRequest::Document(candidate) = request {
+                Some(candidate)
+            } else {
+                None
+            }
+        }) {
+            self.worker_deferred_document =
+                (inflight.as_ref() != document).then(|| (Arc::new(document.clone()), authoring));
+            return;
+        }
+        if self.worker_rejected_document.as_deref() == Some(document) {
+            return;
+        }
+        let document = Arc::new(document.clone());
+        let request = self.next_worker_request(WorkerRequest::Document(document.clone()));
+        self.queue_worker_command(WorkerCommand::UpdateDocument {
+            document,
+            authoring,
+            request,
+        });
+    }
+    /// Only tiny owned snapshots/replies cross this boundary. In particular this
+    /// never locks GameHost, Custom slots, waits for a tick or reads GPU state.
+    fn poll_worker(&mut self) {
+        self.flush_worker_commands();
+        let Some(worker) = &mut self.worker else {
+            return;
+        };
+        let Some(snapshot) = worker.latest() else {
+            return;
+        };
+        if self.worker_snapshot.as_ref().is_some_and(|old| {
+            old.actor_id == snapshot.actor_id && old.sequence == snapshot.sequence
+        }) {
+            return;
+        }
+        if self.worker_snapshot.as_ref().is_some_and(|previous| {
+            previous.actor_id == snapshot.actor_id
+                && (previous.epoch != snapshot.epoch || previous.fault.is_some())
+        }) && snapshot.fault.is_none()
+        {
+            let _ = self.note_restart_result(Ok(()));
+        }
+        for reply in &snapshot.results {
+            let Some(request) = self.worker_requests.remove(&reply.request) else {
+                continue;
+            };
+            match request {
+                WorkerRequest::Document(document) => match &reply.result {
+                    Ok(()) => {
+                        self.game_document = Some((*document).clone());
+                        self.worker_rejected_document = None;
+                    }
+                    Err(error) => {
+                        // A newer queued document owns the visible outcome.
+                        if self.worker_deferred_document.is_none()
+                            && !self
+                                .worker_requests
+                                .values()
+                                .any(|request| matches!(request, WorkerRequest::Document(_)))
+                        {
+                            self.worker_rejected_document = Some(document);
+                            self.error = Some(error.clone());
+                            self.last_preparation_error = Some(error.clone());
+                        }
+                    }
+                },
+                WorkerRequest::Restart => {
+                    let _ = self.note_restart_result(reply.result.clone());
+                }
+                WorkerRequest::Custom(id) => match &reply.result {
+                    Ok(()) => {
+                        let previous = self.custom_errors.remove(&id);
+                        if previous.is_some() && self.error == previous {
+                            self.error = None;
+                        }
+                        if let Some(progress) = &self.custom_activity {
+                            progress.succeed("Новая версия Game Rust применена");
+                        }
+                    }
+                    Err(error) => {
+                        self.custom_errors.insert(id, error.clone());
+                        self.error = Some(error.clone());
+                        if let Some(progress) = &self.custom_activity {
+                            progress.fail(error.clone());
+                        }
+                    }
+                },
+            }
+        }
+        // Deferred GPU preparation can recover an external include without a
+        // new UI command. Its accepted snapshot is the authoritative result.
+        if let Some(candidate) = &self.worker_rejected_document
+            && snapshot.accepted_document.execution_eq(candidate)
+            && snapshot.preparation_error.is_none()
+        {
+            self.game_document = Some((**candidate).clone());
+            self.worker_rejected_document = None;
+            if self.error == self.last_preparation_error {
+                self.error = None;
+            }
+            self.last_preparation_error = None;
+        }
+        update_render_diagnostic(
+            &mut self.error,
+            &mut self.render_error,
+            snapshot.render_error.clone().map_or(Ok(()), Err),
+        );
+        self.worker_snapshot = Some(snapshot);
+        if !self
+            .worker_requests
+            .values()
+            .any(|request| matches!(request, WorkerRequest::Document(_)))
+            && let Some((document, authoring)) = self.worker_deferred_document.take()
+        {
+            self.queue_worker_document(&document, authoring);
+        }
+    }
     pub fn activity_snapshots(&self) -> Vec<ActivitySnapshot> {
         let mut activities = [
             &self.game_activity,
@@ -314,11 +586,24 @@ impl GameWorkbench {
                 activities.push(activity);
             }
         }
+        if let Some(snapshot) = &self.worker_snapshot {
+            activities.extend(snapshot.activity.iter().cloned());
+        }
         activities
     }
     pub fn has_pending_preparation(&self) -> bool {
         self.game_preparation.is_some()
             || self.preview_preparation.is_some()
+            || self
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Document(_)))
+            || self.worker_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .activity
+                    .iter()
+                    .any(|activity| activity.state == crate::activity::ActivityState::Running)
+            })
             || self
                 .host
                 .as_ref()
@@ -330,6 +615,7 @@ impl GameWorkbench {
     }
     /// Called once per UI frame, including when the corresponding pane is hidden.
     pub fn poll_preparation(&mut self, document: &GraphDocument) -> Result<(), String> {
+        self.poll_worker();
         if !self.deferred_preparation {
             return Ok(());
         }
@@ -350,6 +636,7 @@ impl GameWorkbench {
             .is_some_and(|(failed, _, _)| !failed.execution_eq(document))
         {
             self.rejected_game = None;
+            self.rejected_game_dependencies = None;
             self.game_activity = None;
         }
         // Hidden, unopened Scene needs neither normalization nor a source clone.
@@ -368,6 +655,7 @@ impl GameWorkbench {
                 .is_some_and(|(failed, _, _)| !failed.execution_eq(&preview))
             {
                 self.rejected_preview = None;
+                self.rejected_preview_dependencies = None;
                 self.preview_activity = None;
             }
             if let Err(error) = self.poll_host_preparation(&preview, kind, true) {
@@ -401,7 +689,11 @@ impl GameWorkbench {
                     .into_iter()
                     .flatten()
                     .filter_map(GameHost::preparation_activity)
-                    .any(|activity| activity.state == crate::activity::ActivityState::Failed);
+                    .any(|activity| activity.state == crate::activity::ActivityState::Failed)
+                || self
+                    .worker_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.preparation_error.is_some());
             if !failed
                 && let Some(error) = self.last_preparation_error.take()
                 && self.error.as_ref() == Some(&error)
@@ -412,6 +704,35 @@ impl GameWorkbench {
         }
     }
     pub fn sync_graphics(&mut self, document: &GraphDocument) -> Result<(), String> {
+        if self.worker.is_some() {
+            if self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_alive())
+            {
+                return Err(
+                    "Игровой исполнитель завершился; нажмите Stop и запустите Play повторно".into(),
+                );
+            }
+            if self.game_preparation.is_none()
+                && (self
+                    .worker_requests
+                    .values()
+                    .any(|request| matches!(request, WorkerRequest::Document(_)))
+                    || self
+                        .game_document
+                        .as_ref()
+                        .is_some_and(|accepted| accepted != document))
+                && (self.play_session
+                    || self.game_document.as_ref().is_some_and(|accepted| {
+                        accepted.execution_eq(document)
+                            || game_host::graphics_only_change(accepted, document)
+                    }))
+            {
+                self.queue_worker_document(document, false);
+            }
+            return Ok(());
+        }
         if self.deferred_preparation {
             if self.game_preparation.is_some() {
                 return Ok(());
@@ -486,12 +807,19 @@ impl GameWorkbench {
                     self.preview_document = Some(document.clone());
                     self.accepted_preview_context = Some(job.context.clone());
                     self.rejected_preview = None;
+                    self.rejected_preview_dependencies = None;
                     self.preview_host.replace(host)
                 } else {
                     self.game_document = Some(document.clone());
                     self.accepted_game_context = Some(job.context.clone());
                     self.rejected_game = None;
-                    self.host.replace(host)
+                    self.rejected_game_dependencies = None;
+                    if self.background_game {
+                        self.install_worker(host);
+                        self.host.take()
+                    } else {
+                        self.host.replace(host)
+                    }
                 };
                 if let Some(mut old) = old {
                     old.audio.stop_endpoint();
@@ -507,11 +835,14 @@ impl GameWorkbench {
             }
             Err(error) => {
                 job.progress.fail(error.clone());
+                let dependencies = job.dependencies;
                 let failed = Some((document.clone(), job.context, error.clone()));
                 if preview {
                     self.rejected_preview = failed;
+                    self.rejected_preview_dependencies = Some(dependencies);
                 } else {
                     self.rejected_game = failed;
+                    self.rejected_game_dependencies = Some(dependencies);
                 }
                 self.error = Some(error.clone());
                 Err(error)
@@ -535,6 +866,13 @@ impl GameWorkbench {
         if let Some((failed, failed_context, error)) = failed
             && failed_context == &context
             && failed.execution_eq(document)
+            && !(if preview {
+                &mut self.rejected_preview_dependencies
+            } else {
+                &mut self.rejected_game_dependencies
+            })
+            .as_mut()
+            .is_some_and(|watch| watch.changed(document, &context.backend_root))
         {
             return Err(error.clone());
         }
@@ -564,6 +902,7 @@ impl GameWorkbench {
             "Подготовка Game"
         });
         let worker_progress = progress.clone();
+        let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
         let (send, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = GameHost::new_at_with_progress(
@@ -585,13 +924,17 @@ impl GameWorkbench {
             context,
             receiver,
             progress: progress.clone(),
+            dependencies,
         });
         if preview {
             self.preview_activity = Some(progress);
             self.rejected_preview = None;
+            self.rejected_preview_dependencies = None;
         } else {
             self.game_activity = Some(progress);
             self.rejected_game = None;
+            self.rejected_game_dependencies = None;
+            self.suspend_game_execution();
         }
         Ok(())
     }
@@ -624,6 +967,38 @@ impl GameWorkbench {
         } else {
             self.game_preparation.is_some()
         } {
+            return Ok(());
+        }
+        if !preview && self.worker.is_some() {
+            if self.accepted_game_context.as_ref() != Some(&context) {
+                return self.request_host_preparation(&candidate, root, compile_root, kind, false);
+            }
+            if self.game_document.as_ref() == Some(candidate.as_ref()) {
+                if self
+                    .worker_requests
+                    .values()
+                    .any(|request| matches!(request, WorkerRequest::Document(_)))
+                    || self.worker_rejected_document.is_some()
+                {
+                    self.queue_worker_document(&candidate, false);
+                }
+                return Ok(());
+            }
+            let structure_changed = self.game_document.as_ref().is_some_and(|previous| {
+                !game_host::engine_structure_eq(&previous.root, &candidate.root)
+                    || previous.game.as_ref().map(|game| &game.execution)
+                        != candidate.game.as_ref().map(|game| &game.execution)
+            });
+            if structure_changed {
+                return self.request_host_preparation(&candidate, root, compile_root, kind, false);
+            }
+            if !self.play_session {
+                let authoring = self.game_document.as_ref().is_some_and(|previous| {
+                    !previous.execution_eq(&candidate)
+                        && !game_host::graphics_only_change(previous, &candidate)
+                });
+                self.queue_worker_document(&candidate, authoring);
+            }
             return Ok(());
         }
         let baseline = if preview {
@@ -781,6 +1156,8 @@ impl GameWorkbench {
             self.preview_context = None;
             self.rejected_game = None;
             self.rejected_preview = None;
+            self.rejected_game_dependencies = None;
+            self.rejected_preview_dependencies = None;
             self.resolved_context = None;
         }
         self.compile_root = compile_root.map(Path::to_path_buf);
@@ -804,6 +1181,9 @@ impl GameWorkbench {
     }
     pub fn invalidate_assets(&mut self) {
         self.invalidate_preview_assets();
+        if !self.play_session && self.worker.is_some() {
+            self.queue_worker_command(WorkerCommand::InvalidateContent);
+        }
         if !self.play_session
             && let Some(host) = &mut self.host
         {
@@ -811,6 +1191,7 @@ impl GameWorkbench {
         }
     }
     pub fn stop(&mut self) {
+        self.clear_worker();
         if let Some(job) = self.game_preparation.take() {
             job.progress.succeed("Подготовка отменена после Stop");
             std::thread::spawn(move || drop(job));
@@ -825,6 +1206,7 @@ impl GameWorkbench {
             self.host = None;
         }
         self.rejected_game = None;
+        self.rejected_game_dependencies = None;
         self.game_context = None;
         self.accepted_game_context = None;
         self.game_document = None;
@@ -836,6 +1218,10 @@ impl GameWorkbench {
         self.field_key = None;
         self.template_key = None;
         self.pending = None;
+        self.pending_worker_epoch = None;
+        self.custom_errors.clear();
+        self.restart_error = None;
+        self.restart_recovered = false;
         if let Some(progress) = &self.custom_activity {
             progress.succeed("Компиляция отменена после Stop; версия не применена");
         }
@@ -920,10 +1306,21 @@ impl GameWorkbench {
     }
     /// Compile edited source in the background; current instances keep running.
     pub fn request_custom(&mut self, id: &str, source: &str, compile_root: &Path) {
-        if self.pending.is_some() {
+        if self.pending.is_some()
+            || self
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Custom(_)))
+        {
             self.error = Some("A Custom compilation is already running".into());
             return;
         }
+        self.rejected = None;
+        self.pending_worker_epoch = self
+            .worker_snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.actor_id, snapshot.epoch));
+        self.custom_errors.remove(id);
         let root = compile_root.to_path_buf();
         let source = source.to_owned();
         let progress = BuildProgress::new(format!("Rust Custom {id}"));
@@ -942,9 +1339,18 @@ impl GameWorkbench {
         self.custom_activity = Some(progress);
     }
     pub fn tick(&mut self, dt: f64, playing: bool) -> Result<(), String> {
+        // Pause discards only input the owner has not accepted. Accepted edge
+        // packets retain the actor's commit/ack contract until Restart/Stop.
+        if !playing {
+            self.worker_inputs.clear();
+        }
+        self.poll_worker();
         // Each viewport contributes to one UI frame. Consuming the full input
         // prevents hidden panes or a newly focused code editor retaining WASD.
         let input = std::mem::take(&mut self.input);
+        if input.restart && !playing && self.has_game_host() {
+            self.restart_game()?;
+        }
         let waiting_for_host = self.deferred_preparation && self.game_preparation.is_some();
         if playing
             && waiting_for_host
@@ -963,9 +1369,40 @@ impl GameWorkbench {
                     self.pending = None;
                     match result {
                         Ok(candidate) => {
-                            if let Some(host) = &mut self.host {
+                            if self.worker.is_some() {
+                                let current = self
+                                    .worker_snapshot
+                                    .as_ref()
+                                    .map(|snapshot| (snapshot.actor_id, snapshot.epoch));
+                                if let (Some((actor, epoch)), Some((current_actor, _))) =
+                                    (self.pending_worker_epoch.take(), current)
+                                    && actor == current_actor
+                                {
+                                    let request =
+                                        self.next_worker_request(WorkerRequest::Custom(id.clone()));
+                                    self.queue_worker_command(WorkerCommand::ApplyCustom {
+                                        id,
+                                        candidate: Box::new(candidate),
+                                        mode: CustomApplyMode::Compatible,
+                                        request,
+                                        epoch,
+                                    });
+                                    if let Some(progress) = &self.custom_activity {
+                                        progress
+                                            .stage("Ожидание применения между игровыми тактами");
+                                    }
+                                } else {
+                                    let error = "Game заменён после начала компиляции; примените Rust повторно".to_owned();
+                                    self.custom_errors.insert(id, error.clone());
+                                    self.error = Some(error.clone());
+                                    if let Some(progress) = &self.custom_activity {
+                                        progress.fail(error);
+                                    }
+                                }
+                            } else if let Some(host) = &mut self.host {
                                 match host.apply_candidate(&id, candidate.clone(), false) {
                                     Ok(()) => {
+                                        self.custom_errors.remove(&id);
                                         self.error = None;
                                         self.rejected = None;
                                         if let Some(progress) = &self.custom_activity {
@@ -973,6 +1410,7 @@ impl GameWorkbench {
                                         }
                                     }
                                     Err(e) => {
+                                        self.custom_errors.insert(id.clone(), e.clone());
                                         if let Some(progress) = &self.custom_activity {
                                             progress.fail(e.clone());
                                         }
@@ -987,10 +1425,12 @@ impl GameWorkbench {
                                 if let Some(progress) = &self.custom_activity {
                                     progress.fail(error.clone());
                                 }
+                                self.custom_errors.insert(id, error.clone());
                                 self.error = Some(error);
                             }
                         }
                         Err(e) => {
+                            self.custom_errors.insert(id, e.clone());
                             if let Some(progress) = &self.custom_activity {
                                 progress.fail(e.clone());
                             }
@@ -999,6 +1439,10 @@ impl GameWorkbench {
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    self.custom_errors.insert(
+                        id.clone(),
+                        "Rust compilation thread ended without a result".into(),
+                    );
                     self.pending = None;
                     self.error = Some("Rust compilation thread ended without a result".into());
                     if let Some(progress) = &self.custom_activity {
@@ -1008,13 +1452,110 @@ impl GameWorkbench {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        if self.worker.is_some() {
+            if self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_alive())
+            {
+                return Err(
+                    "Игровой исполнитель завершился; нажмите Stop и запустите Play повторно".into(),
+                );
+            }
+            let active_playing = playing && !waiting_for_host;
+            if self.worker_playing != Some(active_playing) {
+                self.worker_playing = Some(active_playing);
+                self.queue_worker_command(WorkerCommand::SetPlaying(active_playing));
+            }
+            // Retain every pressed edge until the actor accepts its packet;
+            // held movement is coalesced by the worker independently.
+            if active_playing {
+                let pressed = input.attack || input.interact || input.restart;
+                if input.restart {
+                    self.worker_inputs.clear();
+                    self.worker_inputs.push_front(input);
+                } else if !pressed
+                    && self
+                        .worker_inputs
+                        .back()
+                        .is_some_and(|queued| !queued.attack && !queued.interact && !queued.restart)
+                {
+                    *self.worker_inputs.back_mut().unwrap() = input;
+                } else if self.worker_inputs.len() < 128 {
+                    self.worker_inputs.push_back(input);
+                } else {
+                    self.queue_worker_command(WorkerCommand::SetPlaying(false));
+                    self.worker_playing = Some(false);
+                    return Err("Переполнена очередь ввода Game; Play приостановлен. Дождитесь обработки и повторите действие".into());
+                }
+                self.flush_worker_commands();
+            }
+            if let Some(snapshot) = &self.worker_snapshot {
+                if let Some(error) = &snapshot.fault {
+                    return Err(error.clone());
+                }
+                if let Some(error) = &snapshot.preparation_error {
+                    self.last_preparation_error = Some(error.clone());
+                    self.error = Some(error.clone());
+                }
+            }
+            return Ok(());
+        }
         if playing
             && !waiting_for_host
             && let Some(host) = &mut self.host
         {
             host.step(dt, &input)?;
+            if input.restart {
+                self.note_restart_result(Ok(()))?;
+            }
         }
         Ok(())
+    }
+    pub fn take_restart_recovered(&mut self) -> bool {
+        std::mem::take(&mut self.restart_recovered)
+    }
+    fn note_restart_result(&mut self, result: Result<(), String>) -> Result<(), String> {
+        match &result {
+            Ok(()) => {
+                if self
+                    .restart_error
+                    .as_ref()
+                    .is_some_and(|error| self.error.as_ref() == Some(error))
+                {
+                    self.error = None;
+                }
+                self.restart_error = None;
+                self.restart_recovered = true;
+                self.game_frame = GameFrameCache::default();
+            }
+            Err(error) => {
+                self.error = Some(error.clone());
+                self.restart_error = Some(error.clone());
+            }
+        }
+        result
+    }
+    fn restart_game(&mut self) -> Result<(), String> {
+        if self.worker.is_some() {
+            self.worker_inputs.clear();
+            self.input = GameInput::default();
+            if !self
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Restart))
+            {
+                let request = self.next_worker_request(WorkerRequest::Restart);
+                self.queue_worker_command(WorkerCommand::Restart { request });
+            }
+            return Ok(());
+        }
+        let result = self
+            .host
+            .as_mut()
+            .ok_or("Game ещё не подготовлен".to_owned())
+            .and_then(GameHost::restart);
+        self.note_restart_result(result)
     }
     pub fn selected(&self) -> Option<u64> {
         self.selected
@@ -1137,11 +1678,11 @@ impl GameWorkbench {
                 *playing = false;
                 self.stop();
             }
-            if ui.button("Restart").clicked()
-                && let Some(host) = &mut self.host
-                && let Err(error) = host.session.restart()
+            if ui
+                .add_enabled(self.has_game_host(), egui::Button::new("Restart"))
+                .clicked()
             {
-                self.error = Some(error);
+                let _ = self.restart_game();
             }
             ui.label("WASD · LMB attack · R restart");
         });
@@ -1151,6 +1692,10 @@ impl GameWorkbench {
         self.custom_ui(ui, document, compile_root);
         if let Some(error) = &self.error {
             ui.colored_label(Color32::LIGHT_RED, error);
+        }
+        if self.worker.is_some() {
+            self.worker_scene_ui(ui, *playing);
+            return false;
         }
         if let Some(host) = &mut self.host {
             let size = ui.available_size().max(Vec2::splat(1.));
@@ -1221,13 +1766,94 @@ impl GameWorkbench {
                         Color32::WHITE,
                     );
                 }
-                player::draw_hud(ui, rect, host, aim);
+                if player::draw_hud(ui, rect, host.session.state(), host.camera, aim) {
+                    let _ = self.restart_game();
+                }
             }
         } else if self.game_preparation.is_some() {
             ui.spinner();
             ui.label("Game готовится в фоне. Можно продолжать работать с редактором.");
         }
         false
+    }
+    fn worker_scene_ui(&mut self, ui: &mut egui::Ui, playing: bool) {
+        self.worker_view_visible = true;
+        let Some(snapshot) = self.worker_snapshot.clone() else {
+            ui.spinner();
+            ui.label("Game готовится в фоне. Можно продолжать работать с редактором.");
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            return;
+        };
+        let size = ui.available_size().max(Vec2::splat(1.));
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let input = if playing {
+            player::read_input(ui, &response, rect, snapshot.camera)
+        } else {
+            GameInput::default()
+        };
+        let aim = (playing
+            && response.hovered()
+            && ui.input(|input| input.focused)
+            && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()))
+        .then_some(input.aim_world);
+        merge_view_input(
+            &mut self.input,
+            input,
+            response.hovered() || response.has_focus(),
+        );
+        if rect.width() <= 2. || rect.height() <= 2. {
+            return;
+        }
+        let physical = rect.size() * ui.ctx().pixels_per_point();
+        let fit = (1280. / physical.x).min(720. / physical.y).min(1.);
+        let size = [
+            (physical.x * fit).round().max(1.) as usize,
+            (physical.y * fit).round().max(1.) as usize,
+        ];
+        if self.worker_viewport != Some(size) {
+            self.worker_viewport = Some(size);
+            self.queue_worker_command(WorkerCommand::SetViewport {
+                width: size[0],
+                height: size[1],
+            });
+        }
+        if let Some(frame) = &snapshot.frame {
+            if self
+                .worker_frame
+                .as_ref()
+                .is_none_or(|previous| !Arc::ptr_eq(previous, frame))
+            {
+                player::update_texture(ui, &mut self.texture, frame);
+                self.worker_frame = Some(frame.clone());
+                self.performance.game_render_calls += 1;
+            } else {
+                self.performance.game_frame_reuses += 1;
+            }
+        }
+        if let Some(texture) = &self.texture {
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1., 1.)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Подготовка первого кадра…",
+                egui::FontId::proportional(14.),
+                Color32::LIGHT_GRAY,
+            );
+        }
+        if player::draw_hud(ui, rect, &snapshot.state, snapshot.camera, aim) {
+            let _ = self.restart_game();
+        }
+        ui.ctx().request_repaint_after(if playing {
+            Duration::from_secs_f64(1. / 60.)
+        } else {
+            Duration::from_millis(250)
+        });
     }
     /// Hierarchy and Inspector share authored selection, independently of Game.
     pub fn hierarchy_ui(&mut self, ui: &mut egui::Ui, document: &mut GraphDocument) -> bool {
@@ -1448,15 +2074,290 @@ impl GameWorkbench {
             false
         }
     }
+    /// Shared controls for both the Rust editor and the Game window. Compiled
+    /// instances and rejected state belong to Game, independently of preview Scripts.
+    pub fn custom_editor_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        source: Option<&str>,
+        compile_root: Option<&Path>,
+    ) {
+        let custom_pending = self.pending.is_some()
+            || self
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Custom(_)));
+        let instances = if let Some(snapshot) = &self.worker_snapshot {
+            snapshot
+                .custom
+                .iter()
+                .filter(|instance| instance.source_id == id)
+                .count()
+        } else {
+            self.host.as_ref().map_or(0, |host| {
+                host.script_sources
+                    .values()
+                    .filter(|source| source.as_str() == id)
+                    .count()
+            })
+        };
+        let available = !custom_pending
+            && self.game_preparation.is_none()
+            && instances > 0
+            && compile_root.is_some()
+            && source.is_some();
+        if ui
+            .add_enabled(available, egui::Button::new("Применить Rust"))
+            .clicked()
+            && let (Some(source), Some(root)) = (source, compile_root)
+        {
+            self.request_custom(id, source, root);
+        }
+        if let Some((pending, _)) = &self.pending {
+            ui.horizontal(|ui| { ui.spinner(); ui.label(format!("Game Rust {pending}: компиляция в фоне; дождитесь завершения перед следующим Apply.")); });
+        } else if self
+            .worker_requests
+            .values()
+            .any(|request| matches!(request, WorkerRequest::Custom(_)))
+        {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Game Rust: ожидание применения между игровыми тактами…");
+            });
+        } else if self.game_preparation.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Подготовка Game для применения Rust…");
+            });
+        } else if !self.has_game_host() || instances == 0 {
+            ui.label("Game Custom ещё не подготовлен. Диагностика подготовки показана ниже и в статусе операций.");
+        } else if compile_root.is_none() {
+            ui.colored_label(
+                Color32::LIGHT_RED,
+                "Компилятор Rust недоступен для этого пакета.",
+            );
+        }
+        if let Some(error) = self.custom_errors.get(id) {
+            egui::CollapsingHeader::new("Диагностика Game Rust")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                });
+        }
+        if let Some(snapshot) = &self.worker_snapshot {
+            let mut current = 0;
+            let mut previous = 0;
+            for instance in snapshot
+                .custom
+                .iter()
+                .filter(|instance| instance.source_id == id)
+            {
+                if Some(instance.source.as_str()) == source {
+                    current += 1;
+                } else {
+                    previous += 1;
+                }
+                if let Some(error) = &instance.error {
+                    ui.colored_label(
+                        Color32::LIGHT_RED,
+                        format!("Game instance {}: {error}", instance.instance),
+                    );
+                }
+            }
+            if current + previous > 0 {
+                ui.label(if previous == 0 {
+                    format!("Game: текущий исходник скомпилирован в {current} экземплярах.")
+                } else {
+                    format!("Game: предыдущая скомпилированная версия — {previous} экземпляров, текущая — {current}.")
+                });
+            }
+        } else if let Some(host) = &self.host {
+            let mut current = 0;
+            let mut previous = 0;
+            for (instance, source_id) in &host.script_sources {
+                if source_id != id {
+                    continue;
+                }
+                if let Some(slot) = host.slots.get(instance) {
+                    match slot.lock() {
+                        Ok(active) if Some(active.source()) == source => current += 1,
+                        Ok(_) => previous += 1,
+                        Err(_) => {
+                            ui.colored_label(
+                                Color32::LIGHT_RED,
+                                format!("Game instance {instance}: Custom slot poisoned"),
+                            );
+                        }
+                    }
+                }
+            }
+            if current + previous > 0 {
+                ui.label(if previous == 0 {
+                    format!("Game: текущий исходник скомпилирован в {current} экземплярах.")
+                } else {
+                    format!("Game: предыдущая скомпилированная версия — {previous} экземпляров, текущая — {current}.")
+                });
+            }
+        }
+        let rejected = if let Some(snapshot) = &self.worker_snapshot {
+            snapshot
+                .rejected
+                .get(id)
+                .map(|candidate| (id.to_owned(), candidate.source.clone()))
+        } else {
+            self.rejected
+                .as_ref()
+                .filter(|(rejected_id, _)| rejected_id == id)
+                .map(|(id, candidate)| (id.clone(), candidate.source().to_owned()))
+        };
+        if let Some((rejected_id, candidate_source)) = rejected {
+            if let Some(candidate) = self
+                .worker_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.rejected.get(id))
+            {
+                ui.colored_label(
+                    Color32::LIGHT_RED,
+                    format!(
+                        "Game Rust, запрос #{}: {}",
+                        candidate.request, candidate.error
+                    ),
+                );
+            }
+            let fresh = source == Some(candidate_source.as_str());
+            ui.collapsing(
+                "Несовместимый кандидат Game: сохранённый исходник",
+                |ui| {
+                    ui.code(&candidate_source);
+                },
+            );
+            if !fresh {
+                ui.colored_label(Color32::LIGHT_RED, "Кандидат относится к предыдущему тексту. Примените текущий Rust перед сбросом или миграцией.");
+            }
+            ui.add_enabled_ui(fresh && !custom_pending, |ui| {
+                if ui.button("Применить со сбросом состояния").clicked()
+                {
+                    let _ =
+                        self.apply_rejected_custom(&rejected_id, source.unwrap_or_default(), None);
+                }
+                ui.collapsing(
+                    "Явная миграция состояния Game (JSON)",
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.migration)
+                                .code_editor()
+                                .desired_rows(4),
+                        );
+                        if ui.button("Применить с этим состоянием").clicked()
+                        {
+                            match serde_json::from_str(&self.migration) {
+                                Ok(state) => {
+                                    let _ = self.apply_rejected_custom(
+                                        &rejected_id,
+                                        source.unwrap_or_default(),
+                                        Some(state),
+                                    );
+                                }
+                                Err(error) => {
+                                    self.custom_errors
+                                        .insert(rejected_id.clone(), error.to_string());
+                                }
+                            }
+                        }
+                    },
+                );
+            });
+        }
+    }
+
+    pub fn apply_rejected_custom(
+        &mut self,
+        id: &str,
+        current_source: &str,
+        state: Option<Value>,
+    ) -> Result<(), String> {
+        if self.worker.is_some() {
+            if self.pending.is_some()
+                || self
+                    .worker_requests
+                    .values()
+                    .any(|request| matches!(request, WorkerRequest::Custom(_)))
+            {
+                return Err("Дождитесь завершения применения Game Rust".into());
+            }
+            let snapshot = self
+                .worker_snapshot
+                .as_ref()
+                .ok_or("Game ещё не подготовлен")?;
+            let candidate = snapshot
+                .rejected
+                .get(id)
+                .ok_or("Нет отклонённого кандидата Game Rust")?;
+            if candidate.source != current_source {
+                return Err(
+                    "Кандидат Game Rust устарел; сначала примените текущий исходник".into(),
+                );
+            }
+            let epoch = snapshot.epoch;
+            let mode = state.map_or(CustomApplyMode::Reset, CustomApplyMode::Migrate);
+            let request = self.next_worker_request(WorkerRequest::Custom(id.into()));
+            self.queue_worker_command(WorkerCommand::ApplyRejected {
+                id: id.into(),
+                source: current_source.into(),
+                mode,
+                request,
+                epoch,
+            });
+            let progress = BuildProgress::new(format!("Rust Custom {id}: применение состояния"));
+            progress.stage("Ожидание применения между игровыми тактами");
+            self.custom_activity = Some(progress);
+            return Ok(());
+        }
+        let result = (|| {
+            if self.pending.is_some() {
+                return Err("Дождитесь завершения компиляции Game Rust".into());
+            }
+            let (candidate_id, candidate) = self
+                .rejected
+                .as_ref()
+                .ok_or("Нет отклонённого кандидата Game Rust")?;
+            if candidate_id != id || candidate.source() != current_source {
+                return Err(
+                    "Кандидат Game Rust устарел; сначала примените текущий исходник".into(),
+                );
+            }
+            let host = self.host.as_mut().ok_or("Game ещё не подготовлен")?;
+            if let Some(state) = state {
+                host.apply_candidate_migrated(id, candidate, state)
+            } else {
+                host.apply_candidate(id, candidate.clone(), true)
+            }
+        })();
+        let progress = BuildProgress::new(format!("Rust Custom {id}: применение состояния"));
+        match &result {
+            Ok(()) => {
+                self.rejected = None;
+                self.custom_errors.remove(id);
+                self.error = None;
+                progress.succeed("Game Rust и состояние применены");
+            }
+            Err(error) => {
+                self.custom_errors.insert(id.into(), error.clone());
+                self.error = Some(error.clone());
+                progress.fail(error.clone());
+            }
+        }
+        self.custom_activity = Some(progress);
+        result
+    }
+
     fn custom_ui(
         &mut self,
         ui: &mut egui::Ui,
         document: &GraphDocument,
         compile_root: Option<&Path>,
     ) {
-        if let Some((id, _)) = &self.pending {
-            ui.label(format!("Compiling {id}; active code continues"));
-        }
         let ids = document
             .game
             .as_ref()
@@ -1467,78 +2368,20 @@ impl GameWorkbench {
         if !ids.contains(&self.source_selected) {
             self.source_selected = ids.first().cloned().unwrap_or_default();
         }
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("game-custom-source")
-                .selected_text(&self.source_selected)
-                .show_ui(ui, |ui| {
-                    for id in ids {
-                        ui.selectable_value(&mut self.source_selected, id.clone(), id);
-                    }
-                });
-            if ui
-                .add_enabled(
-                    self.pending.is_none() && compile_root.is_some(),
-                    egui::Button::new("Apply selected game Rust"),
-                )
-                .clicked()
-                && let Some(root) = compile_root
-                && let Some(source) = document.custom_sources.get(&self.source_selected)
-            {
-                let id = self.source_selected.clone();
-                self.request_custom(&id, source, root);
-            }
-        });
-        if let Some((id, candidate)) = self.rejected.clone() {
-            ui.collapsing("Rejected state schema: explicit reset or migration", |ui| {
-                if ui
-                    .button("Apply rejected version + reset its state")
-                    .clicked()
-                    && let Some(host) = &mut self.host
-                {
-                    let progress = BuildProgress::new(format!("Rust {id}: сброс состояния"));
-                    progress.stage("Применение версии с явным сбросом состояния");
-                    match host.apply_candidate(&id, candidate.clone(), true) {
-                        Ok(()) => {
-                            self.rejected = None;
-                            self.error = None;
-                            progress.succeed("Версия применена, состояние сброшено");
-                        }
-                        Err(e) => {
-                            progress.fail(e.clone());
-                            self.error = Some(e);
-                        }
-                    }
-                    self.custom_activity = Some(progress);
-                }
-                ui.label("Replacement state JSON (all instances of this source)");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.migration)
-                        .code_editor()
-                        .desired_rows(4),
-                );
-                if ui.button("Apply version with migrated state").clicked()
-                    && let Some(host) = &mut self.host
-                {
-                    let progress = BuildProgress::new(format!("Rust {id}: миграция состояния"));
-                    progress.stage("Проверка и применение указанного состояния");
-                    match serde_json::from_str(&self.migration)
-                        .map_err(|e| e.to_string())
-                        .and_then(|state| host.apply_candidate_migrated(&id, &candidate, state))
-                    {
-                        Ok(()) => {
-                            self.rejected = None;
-                            self.error = None;
-                            progress.succeed("Версия и миграция применены");
-                        }
-                        Err(e) => {
-                            progress.fail(e.clone());
-                            self.error = Some(e);
-                        }
-                    }
-                    self.custom_activity = Some(progress);
+        egui::ComboBox::from_id_salt("game-custom-source")
+            .selected_text(&self.source_selected)
+            .show_ui(ui, |ui| {
+                for id in ids {
+                    ui.selectable_value(&mut self.source_selected, id.clone(), id);
                 }
             });
-        }
+        let id = self.source_selected.clone();
+        self.custom_editor_ui(
+            ui,
+            &id,
+            document.custom_sources.get(&id).map(String::as_str),
+            compile_root,
+        );
     }
     fn asset_ui(
         &mut self,
@@ -2543,6 +3386,423 @@ fn edit_value(ui: &mut egui::Ui, value: &mut Value) {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "latency acceptance: run explicitly without competing Rust/GPU setup"]
+    fn interactive_game_ui_keeps_drawing_and_applying_rust_during_slow_ticks() {
+        fn diagnostic(workbench: &GameWorkbench, expected_source: &str) -> String {
+            let requests: Vec<_> = workbench
+                .worker_requests
+                .iter()
+                .map(|(id, request)| {
+                    let kind = match request {
+                        WorkerRequest::Document(_) => "document",
+                        WorkerRequest::Custom(_) => "custom",
+                        WorkerRequest::Restart => "restart",
+                    };
+                    (*id, kind)
+                })
+                .collect();
+            let snapshot = workbench.game_snapshot().map(|snapshot| {
+                (
+                    snapshot.actor_id,
+                    snapshot.epoch,
+                    snapshot.sequence,
+                    snapshot.state.tick,
+                    snapshot.playing,
+                    snapshot.fault.clone(),
+                    snapshot.preparation_error.clone(),
+                    snapshot
+                        .custom
+                        .iter()
+                        .map(|instance| {
+                            (
+                                instance.instance.clone(),
+                                instance.source_id.clone(),
+                                instance.source == expected_source,
+                                instance.source.len(),
+                                instance.state.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            format!(
+                "pending={:?}, custom_errors={:?}, requests={requests:?}, queued_commands={}, queued_inputs={}, error={:?}, snapshot(actor,epoch,sequence,tick,playing,fault,preparation,instances)={snapshot:?}",
+                workbench.pending.as_ref().map(|(id, _)| id),
+                workbench.custom_errors,
+                workbench.worker_commands.len(),
+                workbench.worker_inputs.len(),
+                workbench.error
+            )
+        }
+        let root = crate::project::source_root();
+        let id = "game-controller";
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker = root.join(format!(
+            ".work/game-ui-worker-{}-{nonce}.marker",
+            std::process::id()
+        ));
+        let source = format!(
+            "// module-engine-state: {{\"schema\":\"async.ui\",\"initial\":{{\"ticks\":0}}}}\nfn update(ctx: &mut ScriptContext) {{ std::fs::write({:?}, b\"tick\").unwrap(); std::thread::sleep(std::time::Duration::from_millis(80)); ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap()+1); }}",
+            marker.to_string_lossy()
+        );
+        let mut document = game_host::demo_document();
+        document.custom_sources.insert(id.into(), source.clone());
+        let ctx = egui::Context::default();
+        let mut workbench = GameWorkbench::default();
+        workbench.set_background_game(true, Some(&ctx));
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        while workbench.game_snapshot().is_none() {
+            workbench.poll_preparation(&document).unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real async Game did not prepare: {}",
+                diagnostic(&workbench, &source)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            workbench.host.is_none(),
+            "interactive UI must not retain the live host"
+        );
+        let actor = workbench.game_snapshot().unwrap().actor_id;
+        let identity = workbench.game_snapshot().unwrap().custom[0].identity;
+        let frame = |workbench: &mut GameWorkbench,
+                     document: &mut GraphDocument,
+                     playing: bool,
+                     phase: &str| {
+            workbench
+                .poll_preparation(document)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{phase}: preparation {error}; {}",
+                        diagnostic(workbench, &document.custom_sources[id])
+                    )
+                });
+            // This used to synchronously catch up 15 ticks (~1.2 seconds).
+            workbench.tick(0.25, playing).unwrap_or_else(|error| {
+                panic!(
+                    "{phase}: tick {error}; {}",
+                    diagnostic(workbench, &document.custom_sources[id])
+                )
+            });
+            let mut playing = playing;
+            workbench.begin_ui_frame();
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(640., 480.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    workbench.scene_ui(
+                        ui,
+                        document,
+                        &root,
+                        Some(&root),
+                        WorldKind::Objects,
+                        &mut playing,
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+            workbench.finish_ui_frame();
+        };
+        frame(&mut workbench, &mut document, false, "warmup");
+        workbench.tick(0., true).unwrap();
+        let marker_deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !marker.exists() {
+            workbench.poll_preparation(&document).unwrap();
+            assert!(
+                std::time::Instant::now() < marker_deadline,
+                "slow Custom never entered its real worker: {}",
+                diagnostic(&workbench, &source)
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..8 {
+            frame(&mut workbench, &mut document, true, "slow-tick UI latency");
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "UI waited for slow tick/catch-up: {:?}",
+            started.elapsed()
+        );
+        let edited = format!("{source}\n// compatible live edit\n");
+        document.custom_sources.insert(id.into(), edited.clone());
+        workbench.request_custom(id, &edited, &root);
+        assert!(workbench.pending.is_some());
+        let apply_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        while !workbench
+            .game_snapshot()
+            .unwrap()
+            .custom
+            .iter()
+            .any(|instance| instance.source == edited)
+        {
+            frame(&mut workbench, &mut document, true, "compile/apply");
+            assert!(
+                std::time::Instant::now() < apply_deadline,
+                "compiled Game candidate did not reach its actor: {}",
+                diagnostic(&workbench, &edited)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let snapshot = workbench.game_snapshot().unwrap();
+        assert_eq!(snapshot.actor_id, actor);
+        assert_eq!(snapshot.custom[0].identity, identity);
+        assert!(snapshot.state.tick > 0);
+        assert!(snapshot.custom[0].state["ticks"].as_u64().unwrap() > 0);
+        assert!(workbench.custom_errors.is_empty());
+        assert!(workbench.pending.is_none());
+        assert!(
+            !workbench
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Custom(_)))
+        );
+        let stopped = std::time::Instant::now();
+        workbench.stop();
+        assert!(
+            stopped.elapsed() < Duration::from_millis(200),
+            "Stop waited for worker destruction"
+        );
+        assert!(!workbench.has_game_host());
+        assert!(workbench.game_snapshot().is_none());
+        assert!(workbench.worker_commands.is_empty());
+        assert!(workbench.worker_requests.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = std::fs::remove_file(marker);
+    }
+    #[test]
+    fn pending_worker_document_coalesces_to_one_latest_candidate() {
+        let document = game_host::demo_document();
+        let mut workbench = GameWorkbench::default();
+        workbench.next_worker_request(WorkerRequest::Document(Arc::new(document.clone())));
+        let mut latest = document.clone();
+        for index in 0..200 {
+            latest.name = format!("latest {index}");
+            workbench.queue_worker_document(&latest, false);
+        }
+        assert_eq!(workbench.worker_requests.len(), 1);
+        assert!(workbench.worker_commands.is_empty());
+        assert_eq!(
+            workbench
+                .worker_deferred_document
+                .as_ref()
+                .unwrap()
+                .0
+                .as_ref(),
+            &latest
+        );
+        // Returning to the in-flight version cancels a previously queued edit.
+        workbench.queue_worker_document(&document, false);
+        assert!(workbench.worker_deferred_document.is_none());
+    }
+    #[test]
+    fn interactive_undo_reverts_failed_gpu_target_and_paused_restart_bypasses_input_backlog() {
+        let root = crate::project::source_root();
+        let document = game_host::demo_document();
+        let mut workbench = GameWorkbench::default();
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .unwrap();
+        workbench.set_background_game(true, None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while workbench.game_snapshot().is_none() {
+            workbench.poll_preparation(&document).unwrap();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let actor = workbench.game_snapshot().unwrap().actor_id;
+        let mut invalid = document.clone();
+        let aa = invalid
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap()
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "gpu.fxaa")
+            .unwrap();
+        aa.module = "gpu.custom".into();
+        aa.params = json!({"source_id":"invalid-worker-aa", "manifest":module_engine_vulkan::builtin_manifest("gpu.fxaa").unwrap()});
+        invalid.shader_sources.insert(
+            "invalid-worker-aa".into(),
+            "#error failed_ui_worker_target\n".into(),
+        );
+        workbench.sync_graphics(&invalid).unwrap();
+        while workbench.worker_rejected_document.is_none() {
+            workbench.poll_preparation(&invalid).unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "failed GPU target did not report"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            workbench
+                .game_snapshot()
+                .unwrap()
+                .preparation_error
+                .is_some()
+        );
+        // Undo returns exactly to game_document. That equality must not skip
+        // delivery of the cancellation/revert to an autonomous owner.
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .unwrap();
+        assert!(
+            workbench
+                .worker_requests
+                .values()
+                .any(|request| matches!(request, WorkerRequest::Document(_)))
+        );
+        while workbench
+            .game_snapshot()
+            .unwrap()
+            .preparation_error
+            .is_some()
+            || !workbench.worker_requests.is_empty()
+        {
+            workbench.poll_preparation(&document).unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Undo did not restore accepted target"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(workbench.game_snapshot().unwrap().actor_id, actor);
+        assert!(
+            workbench
+                .game_snapshot()
+                .unwrap()
+                .accepted_document
+                .execution_eq(&document)
+        );
+        workbench.worker_inputs = (0..128)
+            .map(|_| GameInput {
+                attack: true,
+                ..Default::default()
+            })
+            .collect();
+        workbench.tick(0., false).unwrap();
+        assert!(
+            workbench.worker_inputs.is_empty(),
+            "Pause must discard only unsent UI input before polling"
+        );
+        let epoch = workbench.game_snapshot().unwrap().epoch;
+        workbench.worker_inputs = (0..128)
+            .map(|_| GameInput {
+                attack: true,
+                ..Default::default()
+            })
+            .collect();
+        workbench.input.restart = true;
+        workbench.tick(0., false).unwrap();
+        assert!(
+            workbench.worker_inputs.is_empty(),
+            "R must cancel local pending attacks"
+        );
+        while workbench.game_snapshot().unwrap().epoch == epoch {
+            workbench.tick(0., false).unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "paused R never reached real actor"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(workbench.take_restart_recovered());
+        assert_eq!(workbench.game_snapshot().unwrap().state.tick, 0);
+        workbench.stop();
+    }
+    #[test]
+    fn rejected_full_host_retries_disk_header_repair_without_inline_edit() {
+        let (mut workbench, mut document, root, context) = preparation_fixture();
+        let relative = format!(".work/full-host-retry-{}.hlsli", std::process::id());
+        let header = root.join(&relative);
+        std::fs::write(&header, "float external_gain() { return 0.2; }\n").unwrap();
+        let graph = document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap();
+        let ao = graph.nodes.iter_mut().find(|node| node.id == "ao").unwrap();
+        ao.module = "gpu.custom".into();
+        ao.params = json!({"source_id":"full-host-retry", "manifest":module_engine_vulkan::custom_compute_manifest(), "gain":1.0});
+        graph
+            .edges
+            .retain(|edge| edge.to_node != "ao" || edge.to_port == "color");
+        document.shader_sources.insert(
+            "full-host-retry".into(),
+            format!(
+                "#include \"{relative}\"\n{}",
+                module_engine_vulkan::demo_custom_compute_source()
+                    .replace("c.rgb*values[0].x", "c.rgb*values[0].x*external_gain()")
+            ),
+        );
+        let unchanged_document = document.clone();
+        let (send, _) = fake_host_job(&mut workbench, &document, context);
+        // The file is repaired while the worker is returning its older error.
+        std::fs::write(&header, "float external_gain() { return 0.8; }\n").unwrap();
+        assert!(
+            send.send(Err("simulated earlier include failure".into()))
+                .is_ok()
+        );
+        assert!(
+            workbench
+                .ensure(&document, &root, Some(&root), WorldKind::Objects)
+                .is_err()
+        );
+        assert!(!workbench.has_pending_preparation());
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .unwrap();
+        assert!(workbench.has_pending_preparation());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while workbench.has_pending_preparation() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "repaired host did not complete"
+            );
+            workbench.poll_preparation(&document).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let host = workbench.host.as_mut().unwrap();
+        host.audio.enabled = false;
+        let frame = host.render(96, 64).unwrap();
+        assert_eq!(frame.rgba.len(), 96 * 64 * 4);
+        assert!(
+            frame
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .windows(2)
+                .any(|pixels| pixels[0] != pixels[1])
+        );
+        assert_eq!(document, unchanged_document);
+        assert!(workbench.rejected_game.is_none());
+        drop(workbench);
+        std::fs::remove_file(header).unwrap();
+    }
+    #[test]
     fn recovered_game_frame_clears_only_its_owned_render_error() {
         let mut error = None;
         let mut render_error = None;
@@ -2714,11 +3974,13 @@ mod tests {
         let (send, receiver) = mpsc::channel();
         let progress = BuildProgress::new("Test host candidate");
         workbench.game_activity = Some(progress.clone());
+        let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
         workbench.game_preparation = Some(HostPreparation {
             document: document.clone(),
             context,
             receiver,
             progress: progress.clone(),
+            dependencies,
         });
         (send, progress)
     }
@@ -2989,6 +4251,184 @@ mod tests {
         assert!(!active_components(&graph, &registry, false).contains("inventory"));
     }
     use super::*;
+
+    #[test]
+    fn game_rust_editor_shows_its_own_errors_and_applies_reset_and_migration_to_game_slots() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let id = "game-controller";
+        let first = "// module-engine-state: {\"schema\":\"ui.a\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap() + 1); }";
+        let second = first.replace("ui.a", "ui.b");
+        let third = first.replace("ui.a", "ui.c");
+        let mut document = game_host::demo_document();
+        document.custom_sources.insert(id.into(), first.into());
+        let mut workbench = GameWorkbench::default();
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .unwrap();
+        workbench.tick(1. / 60., true).unwrap();
+        let old_state = workbench.host.as_ref().unwrap().slots[id]
+            .lock()
+            .unwrap()
+            .state()
+            .unwrap();
+        let compiler = ScriptCompiler::new(root.clone(), root.join(".work/game-ui-custom-state"));
+        let candidate = compiler.compile_kind(&second, ScriptKind::Update).unwrap();
+        let (send, receiver) = mpsc::channel();
+        send.send(Ok(candidate)).unwrap();
+        workbench.pending = Some((id.into(), receiver));
+        workbench.tick(0., false).unwrap();
+        assert!(workbench.rejected.is_some());
+        assert_eq!(
+            workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .state()
+                .unwrap(),
+            old_state
+        );
+        assert!(
+            workbench
+                .apply_rejected_custom(id, &third, None)
+                .unwrap_err()
+                .contains("устарел")
+        );
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.);
+        let frame = |workbench: &mut GameWorkbench, source: &str, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1100., 900.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| workbench.custom_editor_ui(ui, id, Some(source), Some(&root)),
+            )
+        };
+        let output = frame(&mut workbench, &second, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("предыдущая скомпилированная версия"))));
+        let point = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text() == "Применить со сбросом состояния" =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("Game reset is available in the shared Rust UI");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            frame(
+                &mut workbench,
+                &second,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(workbench.rejected.is_none());
+        assert_eq!(
+            workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .source(),
+            second
+        );
+        assert_eq!(
+            workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .state()
+                .unwrap(),
+            json!({"ticks":0})
+        );
+        workbench.rejected = Some((
+            id.into(),
+            compiler.compile_kind(&third, ScriptKind::Update).unwrap(),
+        ));
+        assert!(
+            workbench
+                .apply_rejected_custom(id, &third, Some(json!({"ticks":"wrong"})))
+                .is_err()
+        );
+        assert_eq!(
+            workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .source(),
+            second
+        );
+        workbench
+            .apply_rejected_custom(id, &third, Some(json!({"ticks":37})))
+            .unwrap();
+        assert_eq!(
+            workbench.host.as_ref().unwrap().slots[id]
+                .lock()
+                .unwrap()
+                .state()
+                .unwrap(),
+            json!({"ticks":37})
+        );
+        let (send, receiver) = mpsc::channel();
+        send.send(Err("Game compiler diagnostic from its own backend".into()))
+            .unwrap();
+        workbench.pending = Some((id.into(), receiver));
+        workbench.tick(0., false).unwrap();
+        let output = frame(&mut workbench, &third, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Game compiler diagnostic from its own backend")));
+        output.drop_without_applying_deltas();
+        let (_send, receiver) = mpsc::channel();
+        workbench.pending = Some((id.into(), receiver));
+        let previous_error = workbench.error.clone();
+        let output = frame(&mut workbench, &third, vec![]);
+        let apply = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Применить Rust" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .unwrap();
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            frame(
+                &mut workbench,
+                &third,
+                vec![
+                    egui::Event::PointerMoved(apply),
+                    egui::Event::PointerButton {
+                        pos: apply,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(workbench.pending.is_some());
+        assert_eq!(
+            workbench.error, previous_error,
+            "disabled Apply must not submit or overwrite the pending operation"
+        );
+    }
     #[test]
     fn scene_copy_template_creation_and_instance_fields_survive_save_and_template_edits() {
         let mut game = GameProject::demo();

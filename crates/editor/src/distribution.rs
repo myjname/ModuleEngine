@@ -751,6 +751,8 @@ const NATIVE_FILES: &[&str] = &[
     "crates/editor/src/ui_capture.rs",
     "crates/editor/src/combat_visuals.rs",
     "crates/editor/src/game_host.rs",
+    "crates/editor/src/game_worker.rs",
+    "crates/editor/src/game_worker_verification.rs",
     "crates/editor/src/game_ui.rs",
     "crates/editor/src/game_package.rs",
     "crates/editor/src/game_verification.rs",

@@ -703,6 +703,7 @@ fn run_bounded(
 mod tests {
     use super::*;
     use module_engine_core::{EcsWorld, ObjectsWorld, RenderOverrides, WorldProvider};
+    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -763,11 +764,52 @@ fn update(ctx: &mut ScriptContext) {
             compiler_root.clone(),
             compiler_root.join(".work/asset-route-workers"),
         );
+        // Exercise the default compiler, not just target-path construction:
+        // compiling a real worker must leave the outer Cargo/rustdoc inputs
+        // byte/metadata-identical in its native dependency directory.
+        let native_target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| compiler_root.join("target"));
+        let native_target = if native_target.is_absolute() {
+            native_target
+        } else {
+            compiler_root.join(native_target)
+        };
+        let native_artifacts = || {
+            fs::read_dir(native_target.join("debug/deps"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("libmodule_engine_core-") && name.ends_with(".rlib")
+                })
+                .map(|entry| {
+                    let metadata = entry.metadata().unwrap();
+                    (entry.path(), (metadata.len(), metadata.modified().unwrap()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = native_artifacts();
+        assert!(
+            !before.is_empty(),
+            "the outer build must have actual core artifacts"
+        );
         let active = compiler
             .compile_kind(source, ScriptKind::Update)
             .unwrap()
             .with_asset_root(&first_root)
             .unwrap();
+        assert!(
+            active
+                .executable
+                .starts_with(compiler.target_dir.as_ref().unwrap())
+        );
+        assert_eq!(
+            native_artifacts(),
+            before,
+            "worker compilation replaced outer Cargo artifacts"
+        );
         let context = ScriptContext::new(0., 1. / 60., vec![]);
         let tick = active.tick(&context, Duration::from_secs(2)).unwrap();
         assert_eq!(tick.state["asset"], "first project");

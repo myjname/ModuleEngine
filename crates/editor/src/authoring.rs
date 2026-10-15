@@ -1,9 +1,17 @@
 //! Background candidates and authoring state, separate from simulation state.
 
 use crate::activity::{ActivitySnapshot, BuildProgress};
+use crate::game_host::ShaderDependencyWatch;
 use module_engine_core::{ControlCommand, GraphDocument, ModuleRegistry, Runtime, ScriptContext};
 use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind, ScriptTick};
-use std::{cell::RefCell, collections::BTreeMap, sync::mpsc, thread, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 struct ScriptJob {
     source: String,
@@ -425,7 +433,15 @@ impl Scripts {
 
 struct PreviewJob {
     document: GraphDocument,
+    backend_root: PathBuf,
+    dependencies: ShaderDependencyWatch,
     receiver: mpsc::Receiver<Result<Runtime, String>>,
+}
+
+struct PreviewAttempt {
+    document: GraphDocument,
+    backend_root: PathBuf,
+    dependencies: ShaderDependencyWatch,
 }
 
 pub struct PreviewBuilder {
@@ -433,6 +449,8 @@ pub struct PreviewBuilder {
     latest: Option<GraphDocument>,
     pub error: Option<String>,
     progress: Option<BuildProgress>,
+    awaiting_acceptance: Option<PreviewAttempt>,
+    rejected: Option<PreviewAttempt>,
 }
 
 impl PreviewBuilder {
@@ -442,6 +460,8 @@ impl PreviewBuilder {
             latest: None,
             error: None,
             progress: None,
+            awaiting_acceptance: None,
+            rejected: None,
         }
     }
     pub fn is_pending(&self) -> bool {
@@ -450,22 +470,41 @@ impl PreviewBuilder {
     pub fn activity_snapshot(&self) -> Option<ActivitySnapshot> {
         self.progress.as_ref().map(BuildProgress::snapshot)
     }
-    pub fn applied(&self) {
+    pub fn applied(&mut self) {
         if let Some(progress) = &self.progress {
             progress.succeed("Конфигурация рендера применена");
         }
+        self.awaiting_acceptance = None;
+        self.rejected = None;
+        self.error = None;
     }
-    pub fn failed_apply(&self, error: &str) {
+    pub fn failed_apply(&mut self, error: &str) {
         if let Some(progress) = &self.progress {
             progress.fail(error);
         }
+        if let Some(attempt) = self.awaiting_acceptance.take() {
+            self.rejected = Some(attempt);
+        }
+        self.error = Some(error.into());
     }
+    #[allow(dead_code)] // Compatibility wrapper for callers without an explicit backend binding.
     pub fn request(&mut self, document: &GraphDocument, registry: &ModuleRegistry) {
+        self.request_at(document, registry, &module_engine_vulkan::resource_root());
+    }
+    pub fn request_at(
+        &mut self,
+        document: &GraphDocument,
+        registry: &ModuleRegistry,
+        backend_root: &Path,
+    ) {
         if self.pending.is_some() {
             self.latest = Some(document.clone());
             return;
         }
         let candidate = document.clone();
+        // Capture before the worker starts: an include may be fixed before a
+        // failed worker result reaches the UI. Capturing after failure misses it.
+        let dependencies = ShaderDependencyWatch::new(document, backend_root);
         let registry = registry.clone();
         let progress = BuildProgress::new("Предпросмотр Engine");
         progress.stage("Проверка графа, подготовка Vulkan и шейдеров");
@@ -486,12 +525,35 @@ impl PreviewBuilder {
         });
         self.pending = Some(PreviewJob {
             document: document.clone(),
+            backend_root: backend_root.to_path_buf(),
+            dependencies,
             receiver,
         });
+        self.awaiting_acceptance = None;
+        self.rejected = None;
         self.error = None;
     }
 
+    #[allow(dead_code)] // Compatibility wrapper for callers without an explicit backend binding.
     pub fn poll(&mut self, document: &GraphDocument, registry: &ModuleRegistry) -> Option<Runtime> {
+        self.poll_at(document, registry, &module_engine_vulkan::resource_root())
+    }
+    pub fn poll_at(
+        &mut self,
+        document: &GraphDocument,
+        registry: &ModuleRegistry,
+        backend_root: &Path,
+    ) -> Option<Runtime> {
+        if self.pending.is_none() {
+            if self.rejected.as_mut().is_some_and(|attempt| {
+                attempt.backend_root != backend_root
+                    || !attempt.document.execution_eq(document)
+                    || attempt.dependencies.changed(document, backend_root)
+            }) {
+                self.request_at(document, registry, backend_root);
+            }
+            return None;
+        }
         let job = self.pending.as_ref()?;
         let result = match job.receiver.try_recv() {
             Ok(result) => result,
@@ -499,20 +561,25 @@ impl PreviewBuilder {
             Err(_) => Err("Поток сборки рендера завершился без результата".into()),
         };
         let candidate = self.pending.take().unwrap();
-        if !candidate.document.execution_eq(document) {
+        if !candidate.document.execution_eq(document) || candidate.backend_root != backend_root {
             self.latest = None;
-            self.request(document, registry);
+            self.request_at(document, registry, backend_root);
             return None;
         }
         self.latest = None;
+        self.awaiting_acceptance = Some(PreviewAttempt {
+            document: candidate.document,
+            backend_root: candidate.backend_root,
+            dependencies: candidate.dependencies,
+        });
         match result {
             Ok(runtime) => {
+                self.rejected = None;
                 self.error = None;
                 Some(runtime)
             }
             Err(error) => {
                 self.failed_apply(&error);
-                self.error = Some(error);
                 None
             }
         }
@@ -539,6 +606,11 @@ mod tests {
         builder.progress = Some(progress);
         builder.pending = Some(PreviewJob {
             document: document.clone(),
+            backend_root: module_engine_vulkan::resource_root(),
+            dependencies: ShaderDependencyWatch::new(
+                &document,
+                &module_engine_vulkan::resource_root(),
+            ),
             receiver,
         });
         assert!(builder.poll(&document, &registry).is_some());
@@ -588,6 +660,11 @@ mod tests {
             let mut builder = PreviewBuilder::new();
             builder.pending = Some(PreviewJob {
                 document: document.clone(),
+                backend_root: module_engine_vulkan::resource_root(),
+                dependencies: ShaderDependencyWatch::new(
+                    &document,
+                    &module_engine_vulkan::resource_root(),
+                ),
                 receiver,
             });
             let mut edited = document;
@@ -600,6 +677,87 @@ mod tests {
             assert_eq!(builder.poll(&edited, &registry).is_some(), layout_only);
             assert_eq!(builder.is_pending(), !layout_only);
         }
+    }
+
+    #[test]
+    fn failed_preview_retries_repaired_external_include_without_json_edit() {
+        let root = std::env::temp_dir().join(format!(
+            "preview-include-repair-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("assets/gpu")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let header = root.join("assets/gpu/repair.hlsli");
+        let mut document = crate::game_host::demo_document();
+        let renderer = document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "render.vulkan")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap();
+        let ao = renderer
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ao")
+            .unwrap();
+        ao.module = "gpu.custom".into();
+        ao.params = serde_json::json!({"source_id":"repair","manifest":module_engine_vulkan::custom_compute_manifest(),"gain":1.0});
+        renderer
+            .edges
+            .retain(|edge| edge.to_node != "ao" || edge.to_port == "color");
+        document.shader_sources.insert(
+            "repair".into(),
+            format!(
+                "#include \"repair.hlsli\"\n{}",
+                module_engine_vulkan::demo_custom_compute_source()
+            ),
+        );
+        let original = document.clone();
+        // Use the builtin registry to make the worker fail immediately without
+        // a GPU/DXC dependency. The production request still captures the real
+        // literal include revision at job start, before this result is polled.
+        let registry = ModuleRegistry::builtin();
+        for repair_before_failure_is_polled in [false, true] {
+            std::fs::write(&header, "invalid included HLSL\n").unwrap();
+            let mut builder = PreviewBuilder::new();
+            builder.request_at(&document, &registry, &root);
+            if repair_before_failure_is_polled {
+                std::fs::write(&header, "float repaired() { return 0.4; }\n").unwrap();
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while builder.is_pending() {
+                builder.poll_at(&document, &registry, &root);
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(builder.error.is_some());
+            if !repair_before_failure_is_polled {
+                builder.poll_at(&document, &registry, &root);
+                assert!(
+                    !builder.is_pending(),
+                    "unchanged failure must not retry each frame"
+                );
+                std::fs::write(&header, "float repaired() { return 0.4; }\n").unwrap();
+            }
+            thread::sleep(Duration::from_millis(260));
+            builder.poll_at(&document, &registry, &root);
+            assert!(
+                builder.is_pending(),
+                "disk repair must retry without a document change"
+            );
+            assert!(builder.error.is_none());
+            assert_eq!(document, original);
+        }
+        let temporary = std::env::temp_dir().canonicalize().unwrap();
+        assert!(root.starts_with(&temporary) && root != temporary);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn nongame_custom_resolves_asset_ids_in_selected_project_and_retains_state_on_relocation() {

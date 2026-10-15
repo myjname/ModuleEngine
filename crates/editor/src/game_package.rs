@@ -27,6 +27,134 @@ pub fn export(
     compile_root: &Path,
     destination: &Path,
 ) -> Result<PathBuf, String> {
+    let absolute = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .join(destination)
+    };
+    let parent = absolute
+        .parent()
+        .ok_or("Player destination has no parent")?;
+    let name = absolute
+        .file_name()
+        .ok_or("Player destination has no filename")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+    let destination = parent.join(name);
+    let existing_empty = if destination.exists() {
+        if fs::symlink_metadata(&destination)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+            || !destination.is_dir()
+            || fs::read_dir(&destination)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_some()
+        {
+            return Err("Game export needs a new or empty directory".into());
+        }
+        true
+    } else {
+        false
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let stage = parent.join(format!(
+        ".module-engine-game-export-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&stage).map_err(|error| error.to_string())?;
+    let stage = stage.canonicalize().map_err(|error| error.to_string())?;
+    let result = export_into_staging(document, asset_root, backend_root, compile_root, &stage)
+        .and_then(|_| {
+            if existing_empty {
+                // remove_dir refuses a racing writer's nonempty directory. It
+                // never recursively removes a selected destination.
+                fs::remove_dir(&destination).map_err(|error| {
+                    format!("Player destination changed before publication: {error}")
+                })?;
+            }
+            publish_new_directory(&stage, &destination)?;
+            Ok(destination.clone())
+        });
+    // Only this operation's freshly created sibling stage may be cleaned up.
+    // A failed export never leaves compiled workers/resources at the final path.
+    if stage.exists() {
+        if stage.parent() != Some(parent.as_path())
+            || stage.canonicalize().ok().as_ref() != Some(&stage)
+            || !stage.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".module-engine-game-export-")
+            })
+        {
+            return Err("Player staging cleanup path failed ownership check".into());
+        }
+        if let Err(error) = fs::remove_dir_all(&stage) {
+            return Err(format!(
+                "{}; staging retained at {}: {error}",
+                result
+                    .as_ref()
+                    .err()
+                    .map_or("Player export cleanup failed", String::as_str),
+                stage.display()
+            ));
+        }
+    }
+    if result.is_err() && existing_empty && !destination.exists() {
+        // Restore an explicitly selected empty folder when publication failed;
+        // create_dir does not replace a racing file or directory.
+        let _ = fs::create_dir(&destination);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, destination: *const u16, flags: u32) -> i32;
+    }
+    let source: Vec<_> = stage
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target: Vec<_> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Same-volume rename, write-through, and deliberately NO replace-existing.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0x0000_0008) } == 0 {
+        return Err(format!(
+            "Player destination was not published: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        return Err("Player destination appeared during export".into());
+    }
+    fs::rename(stage, destination).map_err(|error| error.to_string())
+}
+
+fn export_into_staging(
+    document: &GraphDocument,
+    asset_root: &Path,
+    backend_root: &Path,
+    compile_root: &Path,
+    destination: &Path,
+) -> Result<PathBuf, String> {
     let mut prepared = document.clone();
     let registry = crate::game_host::game_registry(
         document,
@@ -395,6 +523,98 @@ mod tests {
             }
         }
         document
+    }
+
+    #[test]
+    fn player_failed_compilation_leaves_destination_retryable() {
+        let backend = backend_root();
+        let folder = fixture();
+        let assets = folder.join("resources");
+        fs::create_dir_all(assets.join("assets/data")).unwrap();
+        fs::write(
+            assets.join("assets/data/project.txt"),
+            b"selected project data",
+        )
+        .unwrap();
+        let mut document = no_resource_document();
+        let mut manifest = AssetManifest::default();
+        manifest
+            .register("project-data", "assets/data/project.txt", &assets)
+            .unwrap();
+        document.asset_manifest = serde_json::to_value(manifest).unwrap();
+        let mut invalid = document.clone();
+        invalid.custom_sources.insert(
+            "game-controller".into(),
+            "fn update(ctx: &mut ScriptContext) { let broken = ; }".into(),
+        );
+        let destination = folder.join("player");
+        fs::create_dir(&destination).unwrap();
+        let error = export(&invalid, &assets, &backend, &backend, &destination).unwrap_err();
+        assert!(
+            error.contains("error") || error.contains("compil"),
+            "{error}"
+        );
+        assert!(destination.is_dir());
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+        assert!(!fs::read_dir(&folder).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".module-engine-game-export-")
+        }));
+        assert_eq!(
+            fs::read(assets.join("assets/data/project.txt")).unwrap(),
+            b"selected project data"
+        );
+
+        let exported = export(&document, &assets, &backend, &backend, &destination).unwrap();
+        assert_eq!(exported, destination.canonicalize().unwrap());
+        validate_package(&exported).unwrap();
+        assert!(
+            exported
+                .join("scripts/game-controller/worker.exe")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(exported.join("assets/data/project.txt")).unwrap(),
+            b"selected project data"
+        );
+    }
+
+    #[test]
+    fn player_publication_never_replaces_a_racing_destination() {
+        let folder = fixture();
+        let stage = folder.join("stage");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("new.txt"), "new package").unwrap();
+        for filename in ["racing-file", "racing-directory"] {
+            let destination = folder.join(filename);
+            if filename.ends_with("directory") {
+                fs::create_dir(&destination).unwrap();
+                fs::write(destination.join("existing.txt"), "other writer").unwrap();
+            } else {
+                fs::write(&destination, "other writer").unwrap();
+            }
+            assert!(publish_new_directory(&stage, &destination).is_err());
+            assert_eq!(
+                fs::read_to_string(stage.join("new.txt")).unwrap(),
+                "new package"
+            );
+            let existing = if destination.is_dir() {
+                destination.join("existing.txt")
+            } else {
+                destination
+            };
+            assert_eq!(fs::read_to_string(existing).unwrap(), "other writer");
+        }
+        let destination = folder.join("ready");
+        publish_new_directory(&stage, &destination).unwrap();
+        assert!(!stage.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("new.txt")).unwrap(),
+            "new package"
+        );
     }
     #[test]
     fn player_plan_resolves_model_texture_audio_ids_to_owned_physical_paths() {

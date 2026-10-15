@@ -400,6 +400,17 @@ impl GameSession {
     /// capped to 15 ticks per call; excess wall time is discarded explicitly.
     /// Pressed edges are retained across a frame shorter than one fixed tick.
     pub fn step(&mut self, dt: f64, input: &GameInput) -> Result<usize, String> {
+        self.step_budget(dt, input, 15)
+    }
+    /// Interactive owners can yield between fixed ticks without discarding
+    /// the remaining accumulator. The existing 0.25 s wall-time cap still
+    /// applies; this changes scheduling, not the duration of a simulation tick.
+    pub fn step_budget(
+        &mut self,
+        dt: f64,
+        input: &GameInput,
+        max_ticks: usize,
+    ) -> Result<usize, String> {
         if !dt.is_finite()
             || dt < 0.
             || !input
@@ -422,7 +433,7 @@ impl GameSession {
         self.pending_interact |= input.interact;
         self.accumulator = (self.accumulator + dt).min(0.25);
         let mut ticks = 0;
-        while self.accumulator + 1e-12 >= 1. / 60. {
+        while ticks < max_ticks && self.accumulator + 1e-12 >= 1. / 60. {
             let mut fixed_input = input.clone();
             fixed_input.attack = self.pending_attack;
             fixed_input.interact = self.pending_interact;
@@ -470,6 +481,10 @@ impl GameSession {
             }
         }
         Ok(ticks)
+    }
+    /// Unprocessed fixed time, useful for honest interactive-worker status.
+    pub fn pending_time(&self) -> f64 {
+        self.accumulator
     }
     /// Explicit scene transition reloads scene-owned state, preserving entities
     /// marked persistent. Destination-authored positions/references remain local.
@@ -1357,6 +1372,31 @@ mod tests {
         assert_eq!(a.world_objects(), b.world_objects());
         assert_eq!(a.snapshot(), b.snapshot());
         assert_eq!(a.state.tick, 30);
+    }
+    #[test]
+    fn budgeted_fixed_ticks_retain_catchup_time_and_match_synchronous_state() {
+        let project = GameProject::demo();
+        let mut synchronous = GameSession::new(project.clone(), WorldKind::Objects).unwrap();
+        let mut yielding = GameSession::new(project, WorldKind::Objects).unwrap();
+        let pressed = GameInput {
+            attack: true,
+            movement: [0.5, 0.],
+            aim_world: [0., 0., -4.],
+            ..GameInput::default()
+        };
+        assert_eq!(synchronous.step(0.25, &pressed).unwrap(), 15);
+        assert_eq!(yielding.step_budget(0.25, &pressed, 1).unwrap(), 1);
+        assert!((yielding.pending_time() - 14. / 60.).abs() < 1e-10);
+        let held = GameInput {
+            attack: false,
+            ..pressed
+        };
+        for _ in 0..14 {
+            assert_eq!(yielding.step_budget(0., &held, 1).unwrap(), 1);
+        }
+        assert!(yielding.pending_time().abs() < 1e-10);
+        assert_eq!(yielding.state(), synchronous.state());
+        assert_eq!(yielding.snapshot(), synchronous.snapshot());
     }
     #[test]
     fn collision_blocks_walls_and_restart_restores_authored_scene() {

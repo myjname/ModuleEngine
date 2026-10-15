@@ -268,6 +268,7 @@ pub fn export_with_package_root(
         "Cargo.toml",
         "Cargo.lock",
         ".gitignore",
+        ".gitattributes",
         "README.md",
         "LICENSE",
         "run.ps1",
