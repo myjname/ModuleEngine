@@ -261,10 +261,10 @@ impl AssetFields {
 }
 fn owner_matches(document: &GraphDocument, composition: &CompositionContext, owner: &str) -> bool {
     composition.module_version(owner).is_some_and(|installed| {
-        document
-            .module_versions
-            .get(owner)
-            .is_none_or(|saved| saved == installed)
+        match document.module_versions.get(owner) {
+            Some(saved) => saved == installed,
+            None => document.engine_lock.is_none(),
+        }
     })
 }
 fn schema_matches(document: &GraphDocument, schema: &ComponentSchema) -> bool {

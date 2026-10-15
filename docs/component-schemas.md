@@ -31,6 +31,9 @@ Inspector Apply/Inherit/Remove and resource mutation use the same
 uses all inherited and local attachments before removal, including unavailable
 schemas. Editing `foo` therefore preserves `foo.bar.value` when `foo.bar` is
 attached; its visibility or activation does not transfer ownership to `foo`.
+When an unregistered nested aggregate field in `foo` has that same spelling,
+Apply retains it in the local `foo` payload instead of generating a dot override
+that would address `foo.bar`.
 Aggregate defaults preserve nested object/array structure and must agree with
 each field default. Resolution fills missing values in attached active components
 without changing authored records or overwriting present values. Prefab values,

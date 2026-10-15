@@ -2046,6 +2046,10 @@ impl GameWorkbench {
         }
     }
     pub fn inspector_ui(&mut self, ui: &mut egui::Ui, document: &mut GraphDocument) -> bool {
+        if document.game.is_none() {
+            ui.label("No authored scene");
+            return false;
+        }
         let composition = match crate::host::composition_at(
             self.backend_root.as_deref().unwrap_or(Path::new(".")),
         ) {
@@ -3351,6 +3355,8 @@ fn put_field(value: &mut Value, path: &str, new: Value) {
     }
 }
 fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &str, value: Value) {
+    let mut attachments = component_attachments(object, prefab);
+    attachments.insert(name.into());
     reset_component(object, prefab, name);
     let Some(base) = prefab.and_then(|p| p.components.get(name)) else {
         object.components.insert(name.into(), value);
@@ -3362,9 +3368,14 @@ fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &
     value_leaves(&value, "", &mut edited);
     let mut local = json!({});
     for (field, value) in edited {
-        if let Some(default) = defaults.get(&field) {
+        let path = format!("{name}.{field}");
+        if component_override_owner(&path, attachments.iter().map(String::as_str)) != Some(name) {
+            // An opaque aggregate field can share another attachment's namespace.
+            // A dot override would edit that component, so retain it locally.
+            put_field(&mut local, &field, value);
+        } else if let Some(default) = defaults.get(&field) {
             if &value != default {
-                object.overrides.insert(format!("{name}.{field}"), value);
+                object.overrides.insert(path, value);
             }
         } else {
             put_field(&mut local, &field, value);
@@ -5026,7 +5037,10 @@ mod tests {
                         .collect();
                     let mut prefab = Prefab {
                         color: [255; 4],
-                        components: BTreeMap::from([("foo".into(), json!({"value":1.}))]),
+                        components: BTreeMap::from([(
+                            "foo".into(),
+                            json!({"value":1.,"bar":{"value":2.}}),
+                        )]),
                     };
                     if location != "local" {
                         prefab
@@ -5036,7 +5050,9 @@ mod tests {
                     game.prefabs.insert("prefix".into(), prefab);
                     let object = &mut game.scenes.get_mut("empty").unwrap().objects[0];
                     object.prefab = Some("prefix".into());
-                    object.components.insert("foo".into(), json!({"value":4.}));
+                    object
+                        .components
+                        .insert("foo".into(), json!({"value":4.,"bar":{"value":3.}}));
                     if location != "prefab" {
                         object
                             .components
@@ -5050,9 +5066,32 @@ mod tests {
                     let sibling_local = object.components.get("foo.bar").cloned();
                     assert_eq!(
                         component_value(object, game.prefabs.get("prefix"), "foo"),
-                        json!({"value":5.}),
+                        json!({"value":5.,"bar":{"value":3.}}),
                         "the longer override must not leak into the shorter draft"
                     );
+                    let profile = crate::engine_profiles::from_blueprint(
+                        &document,
+                        &composition,
+                        crate::engine_profiles::ProfileKind::Neutral,
+                    )
+                    .unwrap();
+                    crate::engine_profiles::attach(&mut document, &composition, &profile).unwrap();
+                    let validate = |document: &GraphDocument| {
+                        profile
+                            .validate_with_sdk(
+                                document,
+                                &composition,
+                                Some(&SdkIdentity::current()),
+                            )
+                            .unwrap();
+                        let errors: Vec<_> = composition
+                            .validate_document(document)
+                            .into_iter()
+                            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                            .collect();
+                        assert!(errors.is_empty(), "{errors:?}");
+                    };
+                    validate(&document);
                     composition.validate_game(&document).unwrap();
                     let mut workbench = GameWorkbench::default();
                     workbench.scene = "empty".into();
@@ -5107,12 +5146,14 @@ mod tests {
                         .drop_without_applying_deltas();
                     }
                     composition.validate_game(&document).unwrap();
+                    validate(&document);
                     let path = artifacts
                         .path()
                         .join(format!("{availability}-{location}-{action}.json"));
                     module_engine_project::save_document_with_backup(&path, &document).unwrap();
                     let reopened = module_engine_project::read_document_strict(&path).unwrap();
                     composition.validate_game(&reopened).unwrap();
+                    validate(&reopened);
                     let game = reopened.game.as_ref().unwrap();
                     let object = &game.scenes["empty"].objects[0];
                     assert_eq!(
@@ -5124,6 +5165,10 @@ mod tests {
                     assert_eq!(object.components.get("foo.bar"), sibling_local.as_ref());
                     let entity = game.resolve_scene("empty").unwrap().remove(0);
                     assert_eq!(entity.components["foo.bar"]["value"], json!(9.));
+                    assert_eq!(
+                        entity.components["foo"]["bar"]["value"],
+                        json!(if action == "Apply fields" { 3. } else { 2. })
+                    );
                     assert_eq!(
                         entity.components["foo"]["value"],
                         json!(if action == "Apply fields" { 3. } else { 1. })

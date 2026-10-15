@@ -1832,13 +1832,22 @@ mod tests {
         doc.engine
             .enabled_modules
             .insert("fixture.resources".into());
-        let workspace = workspace.with_composition(
-            module_engine_core::CompositionContext::new(
-                registry,
-                module_engine_core::SystemRegistry::builtin(),
+        let composition = module_engine_core::CompositionContext::new(
+            registry,
+            module_engine_core::SystemRegistry::builtin(),
+        )
+        .unwrap();
+        // Enabling a newly installed source contribution also requires its
+        // exact implementation pin in this already locked author document.
+        composition
+            .capture_lock(
+                &doc,
+                doc.engine_lock.as_ref().unwrap().profile.clone(),
+                Some(module_engine_core::SdkIdentity::current()),
             )
-            .unwrap(),
-        );
+            .unwrap()
+            .apply_to(&mut doc);
+        let workspace = workspace.with_composition(composition);
         USAGE_DOCUMENT_WALKS.with(|walks| walks.set(0));
         let started = std::time::Instant::now();
         let batched = workspace.usages_batch(&doc).unwrap();
@@ -2099,6 +2108,77 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn source_api_preserves_missing_or_stale_implementation_pins_and_keeps_legacy_compatibility() {
+        for pin in ["missing", "stale", "legacy-unpinned"] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", b"a");
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            doc.game
+                .as_mut()
+                .unwrap()
+                .scenes
+                .get_mut("arena")
+                .unwrap()
+                .objects[0]
+                .components
+                .insert("audit.links".into(), json!({"id":"assets/textures/a.png"}));
+            let workspace = typed_links_workspace(workspace, &mut doc);
+            // The installed schema pin remains exact. The independent module
+            // implementation pin must still be present in a locked document.
+            let schema = workspace
+                .composition
+                .as_ref()
+                .unwrap()
+                .systems
+                .components()
+                .schema("audit.links")
+                .unwrap();
+            assert_eq!(
+                doc.engine_lock.as_ref().unwrap().component_schemas["audit.links"],
+                module_engine_core::SchemaPin::capture(schema).unwrap()
+            );
+            if pin == "stale" {
+                doc.module_versions
+                    .insert("audit.links.owner".into(), "archived-implementation".into());
+            } else {
+                doc.module_versions.remove("audit.links.owner");
+            }
+            if pin == "legacy-unpinned" {
+                doc.engine_lock = None;
+            }
+            // The caller's game-only preflight deliberately does not validate
+            // implementation pins; AssetWorkspace must protect the payload.
+            workspace.validate_candidate(&doc).unwrap();
+            let moved = workspace
+                .move_asset(&doc, &asset, "assets/textures/new.png")
+                .unwrap();
+            let expected = if pin == "legacy-unpinned" {
+                "assets/textures/new.png"
+            } else {
+                "assets/textures/a.png"
+            };
+            assert_eq!(
+                moved.document.game.as_ref().unwrap().scenes["arena"].objects[0].components["audit.links"]
+                    ["id"],
+                expected,
+                "{pin}"
+            );
+            assert_eq!(
+                moved.diagnostics.len(),
+                usize::from(pin != "legacy-unpinned")
+            );
+            crate::save_document_with_backup(&root.join("project.json"), &moved.document).unwrap();
+            assert_eq!(
+                crate::read_document_strict(&root.join("project.json")).unwrap(),
+                moved.document
+            );
+            assert_eq!(moved.record.undo(&root, &moved.document).unwrap(), doc);
             crate::history::remove_test_directory(&root);
         }
     }
