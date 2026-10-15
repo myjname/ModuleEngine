@@ -99,11 +99,13 @@ impl ScriptCompiler {
             std::env::var_os("CARGO_HOME").map(PathBuf::from),
         );
         Self {
-            target_dir: Some(
-                std::env::var_os("CARGO_TARGET_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| tool_root.join("target")),
-            ),
+            // Workers are a separate Cargo workspace. Sharing the editor's
+            // build directory can replace dependency artifacts between its
+            // unit tests and rustdoc, or contend with a running editor build.
+            target_dir: Some(worker_target_dir(
+                &tool_root,
+                std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+            )),
             cargo_home,
             cargo_binary: resolve_tool_program(&tool_root, "cargo", explicit_cargo),
             rustc_binary: resolve_tool_program(&tool_root, "rustc", explicit_rustc),
@@ -304,8 +306,15 @@ impl ScriptCompiler {
     }
 }
 
-/// Prefer caches physically belonging to the project over an inherited cache
-/// from another checkout. None delegates to Cargo's normal user-home cache.
+/// Keep worker artifacts apart from the outer workspace's native build, even
+/// when its target base is explicitly selected through the environment.
+fn worker_target_dir(tool_root: &Path, inherited: Option<PathBuf>) -> PathBuf {
+    inherited
+        .unwrap_or_else(|| tool_root.join("target"))
+        .join("custom-workers")
+}
+
+/// A Team SDK uses its containing installation's tools and caches.
 fn compiler_tool_root(project_root: &Path) -> PathBuf {
     if project_root.file_name().is_some_and(|name| name == ".sdk")
         && !project_root.join("crates/editor/src/main.rs").is_file()
@@ -1098,6 +1107,20 @@ fn update(ctx: &mut ScriptContext) {
             vec![("serde_json".into(), "1.0.100".into())]
         );
     }
+    #[test]
+    fn worker_builds_use_a_separate_target_under_both_default_and_explicit_bases() {
+        let root = Path::new("engine");
+        assert_eq!(
+            worker_target_dir(root, None),
+            root.join("target/custom-workers")
+        );
+        let explicit = PathBuf::from("external-build-cache");
+        assert_eq!(
+            worker_target_dir(root, Some(explicit.clone())),
+            explicit.join("custom-workers")
+        );
+    }
+
     #[test]
     fn cache_selection_follows_project_then_sibling_then_portable_then_environment() {
         let directory = std::env::temp_dir().join(format!(
