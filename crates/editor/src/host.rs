@@ -1,8 +1,7 @@
 //! One composition root used by the editor, CLI and project exporter.
 
 use module_engine_core::{
-    CompositionContext, GraphDocument, ModuleRegistry, ResourceAccess, SystemDescriptor,
-    SystemPort, SystemRegistry, WorldKind, demo_document,
+    CompositionContext, GraphDocument, ModuleRegistry, WorldKind, demo_document,
 };
 use module_engine_vulkan::RenderPath;
 use std::collections::BTreeMap;
@@ -20,15 +19,7 @@ pub fn registry_at(resource_root: &std::path::Path) -> Result<ModuleRegistry, St
 /// runtime preparation and exporters. Host-bound adapters only replace factories
 /// of these same contracts; they do not construct a separate builtin catalog.
 pub fn composition_at(resource_root: &std::path::Path) -> Result<CompositionContext, String> {
-    let modules = module_registry_at(resource_root)?;
-    let mut systems = SystemRegistry::builtin();
-    module_engine_arpg::install(&mut systems)?;
-    module_engine_project_puzzle::install(&mut systems)?;
-    crate::source_modules::install(&mut systems)?;
-    systems.register(custom_system_descriptor(), |_| {
-        Err("Rust Custom requires a host-bound compiled instance".into())
-    })?;
-    CompositionContext::new(modules, systems)
+    module_engine_player::composition_at(resource_root)
 }
 
 pub fn validate_document_at(
@@ -150,38 +141,6 @@ pub fn active_game_entities_at(
     Ok(result)
 }
 
-fn custom_system_descriptor() -> SystemDescriptor {
-    SystemDescriptor {
-        id: "custom.rust.update".into(),
-        state_schema: "owned-rust-state-v1".into(),
-        ports: vec![
-            SystemPort {
-                name: "world".into(),
-                data_type: "GameWorld".into(),
-                access: ResourceAccess::ReadWrite,
-            },
-            SystemPort {
-                name: "input".into(),
-                data_type: "GameInput".into(),
-                access: ResourceAccess::Read,
-            },
-            SystemPort {
-                name: "events".into(),
-                data_type: "GameEvents".into(),
-                access: ResourceAccess::ReadWrite,
-            },
-        ],
-        requires: vec![],
-        components: vec![],
-    }
-}
-
-fn module_registry_at(resource_root: &std::path::Path) -> Result<ModuleRegistry, String> {
-    let mut registry = ModuleRegistry::builtin();
-    module_engine_vulkan::install(&mut registry, resource_root)?;
-    Ok(registry)
-}
-
 pub fn gpu_document(kind: WorldKind, path: RenderPath) -> GraphDocument {
     let mut document = demo_document(kind);
     document.name = format!("{:?} / {:?} / Vulkan", kind, path);
@@ -194,6 +153,12 @@ pub fn gpu_document(kind: WorldKind, path: RenderPath) -> GraphDocument {
     renderer.module = "render.vulkan".into();
     renderer.label = "Vulkan renderer".into();
     renderer.subgraph = Some(Box::new(module_engine_vulkan::default_graph(path)));
+    crate::engine_profiles::finish_template(
+        &mut document,
+        crate::engine_profiles::ProfileKind::Neutral,
+        &module_engine_vulkan::resource_root(),
+    )
+    .expect("Valid explicit neutral GPU template");
     document
 }
 
@@ -267,5 +232,11 @@ pub fn settings_demo_document(kind: WorldKind) -> GraphDocument {
         "renderer",
         "commands",
     ));
+    crate::engine_profiles::finish_template(
+        &mut document,
+        crate::engine_profiles::ProfileKind::Neutral,
+        &module_engine_vulkan::resource_root(),
+    )
+    .expect("Valid explicit neutral settings template");
     document
 }

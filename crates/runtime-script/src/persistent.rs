@@ -2,22 +2,23 @@
 
 use super::{
     CompiledScript, MAX_PACKET, NEXT_WORKER, PACKET_MARKER, ScriptError, ScriptKind, ScriptTick,
+    validate_sdk_match, validate_supported_sdk,
 };
-use module_engine_core::ScriptContext;
+use module_engine_core::{ScriptContext, SdkIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{Arc, Mutex, atomic::Ordering, mpsc},
     thread,
     time::Duration,
 };
 
 const STATE_PREFIX: &str = "// module-engine-state:";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MAX_MANIFEST: u64 = (MAX_PACKET * 8) as u64;
 
 /// Source-declared state schema and defaults. A schema name/version and the
@@ -164,6 +165,7 @@ struct PrecompiledManifest {
     kind: ScriptKind,
     state: StateDeclaration,
     dependency_versions: Vec<(String, String)>,
+    sdk: SdkIdentity,
 }
 
 impl CompiledScript {
@@ -187,6 +189,8 @@ impl CompiledScript {
     /// Retain state when installing a compatible candidate. The caller keeps
     /// the old CompiledScript installed if this returns an incompatibility.
     pub fn inherit_state_from(&self, previous: &Self) -> Result<(), ScriptError> {
+        validate_supported_sdk(&self.sdk_identity)?;
+        validate_sdk_match(previous.sdk_identity(), self.sdk_identity())?;
         if Arc::ptr_eq(&self.instance, &previous.instance) {
             return Ok(());
         }
@@ -283,6 +287,7 @@ impl CompiledScript {
         context: &ScriptContext,
         timeout: Duration,
     ) -> Result<ScriptTick, ScriptError> {
+        validate_supported_sdk(&self.sdk_identity)?;
         if !context.time.is_finite()
             || !context.dt.is_finite()
             || context.dt < 0.0
@@ -305,8 +310,9 @@ impl CompiledScript {
             .worker
             .as_mut()
             .unwrap()
-            .exchange(&context, timeout)
+            .exchange(&context, &self.sdk_identity, timeout)
             .and_then(|value| {
+                validate_packet_sdk(&value, &self.sdk_identity)?;
                 let commands = serde_json::from_value(
                     value
                         .get("commands")
@@ -348,7 +354,8 @@ impl CompiledScript {
                 }
                 Ok(tick)
             });
-        if result.is_err() {
+        if let Err(error) = &result {
+            self.retain_diagnostics(&error.to_string());
             instance.worker = None;
         }
         result
@@ -363,6 +370,7 @@ impl CompiledScript {
     /// Export one standalone worker and a relocatable manifest. No SDK, Cargo,
     /// Rust compiler or source compilation is involved when loading this file.
     pub fn export_precompiled(&self, directory: &Path) -> Result<PathBuf, ScriptError> {
+        validate_supported_sdk(&self.sdk_identity)?;
         fs::create_dir_all(directory).map_err(|e| ScriptError::Setup(e.to_string()))?;
         let executable = format!("worker{}", std::env::consts::EXE_SUFFIX);
         fs::copy(&self.executable, directory.join(&executable))
@@ -374,6 +382,7 @@ impl CompiledScript {
             kind: self.kind,
             state: self.state_declaration.clone(),
             dependency_versions: self.dependency_versions.clone(),
+            sdk: self.sdk_identity.clone(),
         };
         let path = directory.join("script.json");
         fs::write(
@@ -390,6 +399,17 @@ impl CompiledScript {
         manifest_path: &Path,
         package_root: &Path,
     ) -> Result<Self, ScriptError> {
+        Self::load_precompiled_with_sdk(manifest_path, package_root, &SdkIdentity::current())
+    }
+
+    /// Validate the exact portable API against this Player's supported identity;
+    /// native loading does not inspect or require physical SDK source files.
+    pub fn load_precompiled_with_sdk(
+        manifest_path: &Path,
+        package_root: &Path,
+        expected_sdk: &SdkIdentity,
+    ) -> Result<Self, ScriptError> {
+        validate_supported_sdk(expected_sdk)?;
         let mut bytes = Vec::new();
         fs::File::open(manifest_path)
             .map_err(|e| ScriptError::Setup(e.to_string()))?
@@ -401,8 +421,16 @@ impl CompiledScript {
                 "precompiled manifest exceeds 8 MiB".into(),
             ));
         }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| ScriptError::Setup(error.to_string()))?;
+        if value.get("protocol_version").and_then(Value::as_u64)
+            != Some(u64::from(PROTOCOL_VERSION))
+        {
+            return Err(ScriptError::Setup("Unsupported precompiled script protocol; protocol 2 requires an exact SDK identity".into()));
+        }
         let manifest: PrecompiledManifest =
-            serde_json::from_slice(&bytes).map_err(|e| ScriptError::Setup(e.to_string()))?;
+            serde_json::from_value(value).map_err(|e| ScriptError::Setup(e.to_string()))?;
+        validate_sdk_match(&manifest.sdk, expected_sdk)?;
         if manifest.protocol_version != PROTOCOL_VERSION || manifest.source.len() > MAX_PACKET {
             return Err(ScriptError::Setup(
                 "unsupported precompiled script protocol/source size".into(),
@@ -440,6 +468,13 @@ impl CompiledScript {
         let working_dir = package_root
             .canonicalize()
             .map_err(|e| ScriptError::Setup(e.to_string()))?;
+        let retained_scopes = [
+            super::cleanup::fixture_for(manifest_path),
+            super::cleanup::fixture_for(&working_dir),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         Ok(Self {
             source: manifest.source,
             kind: manifest.kind,
@@ -449,13 +484,27 @@ impl CompiledScript {
             dependency_versions: manifest.dependency_versions,
             instance: new_instance(&manifest.state),
             state_declaration: manifest.state,
+            sdk_identity: manifest.sdk,
+            _artifacts: None,
+            _retained_scopes: retained_scopes,
         })
     }
 }
 
+fn validate_packet_sdk(packet: &Value, expected: &SdkIdentity) -> Result<(), ScriptError> {
+    let sdk: SdkIdentity = serde_json::from_value(
+        packet
+            .get("sdk")
+            .cloned()
+            .ok_or_else(|| ScriptError::Packet("Missing worker SDK identity".into()))?,
+    )
+    .map_err(|error| ScriptError::Packet(format!("Worker SDK identity: {error}")))?;
+    validate_sdk_match(&sdk, expected).map_err(|error| ScriptError::Packet(error.to_string()))
+}
+
 #[derive(Debug)]
 struct Worker {
-    child: Child,
+    child: super::OwnedChild,
     input: mpsc::SyncSender<Vec<u8>>,
     output: mpsc::Receiver<Result<Value, ScriptError>>,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -475,9 +524,11 @@ impl Worker {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|e| ScriptError::Worker(e.to_string()))?;
+        let mut child = super::OwnedChild::new(
+            command
+                .spawn()
+                .map_err(|e| ScriptError::Worker(e.to_string()))?,
+        )?;
         let mut stdin = child.stdin.take().unwrap();
         let (input, requests) = mpsc::sync_channel::<Vec<u8>>(1);
         thread::spawn(move || {
@@ -568,12 +619,14 @@ impl Worker {
     fn exchange(
         &mut self,
         context: &ScriptContext,
+        sdk: &SdkIdentity,
         timeout: Duration,
     ) -> Result<Value, ScriptError> {
         self.sequence = self.sequence.wrapping_add(1);
-        let mut bytes =
-            serde_json::to_vec(&serde_json::json!({"request_id":self.sequence,"context":context}))
-                .map_err(|e| ScriptError::Packet(e.to_string()))?;
+        let mut bytes = serde_json::to_vec(
+            &serde_json::json!({"request_id":self.sequence,"sdk":sdk,"context":context}),
+        )
+        .map_err(|e| ScriptError::Packet(e.to_string()))?;
         if bytes.len() > MAX_PACKET {
             return Err(ScriptError::Packet("input exceeds 1 MiB".into()));
         }
@@ -614,14 +667,82 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.stop();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_packets_require_exact_sdk_before_any_payload_is_accepted() {
+        let current = SdkIdentity::current();
+        validate_packet_sdk(&serde_json::json!({"sdk":current}), &current).unwrap();
+        for sdk in [
+            Value::Null,
+            serde_json::json!({"version":"old","data_api_fingerprint":"module-engine-data-api/v2"}),
+            serde_json::json!({"version":current.version,"data_api_fingerprint":"module-engine-data-api/v1"}),
+        ] {
+            assert!(matches!(
+                validate_packet_sdk(
+                    &serde_json::json!({"sdk":sdk,"state":{"count":99},"commands":[]}),
+                    &current
+                ),
+                Err(ScriptError::Packet(_))
+            ));
+        }
+        assert!(validate_packet_sdk(&serde_json::json!({"state":{"count":99}}), &current).is_err());
+    }
+
+    #[test]
+    fn precompiled_identity_is_exact_without_a_physical_sdk_or_worker_start() {
+        let artifacts =
+            super::super::TestArtifactGuard::new(&std::env::temp_dir(), "module-precompiled-sdk")
+                .unwrap();
+        let root = artifacts.path().to_path_buf();
+        fs::write(
+            root.join("not-started.exe"),
+            b"not an executable; loading metadata must not run it",
+        )
+        .unwrap();
+        let source = "fn update(_: &mut ScriptContext) {}";
+        let manifest = PrecompiledManifest {
+            protocol_version: PROTOCOL_VERSION,
+            executable: "not-started.exe".into(),
+            source: source.into(),
+            kind: ScriptKind::Update,
+            state: StateDeclaration::default(),
+            dependency_versions: vec![],
+            sdk: SdkIdentity::current(),
+        };
+        let path = root.join("script.json");
+        let value = serde_json::to_value(manifest).unwrap();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let loaded = CompiledScript::load_precompiled(&path, &root).unwrap();
+        assert_eq!(loaded.sdk_identity(), &SdkIdentity::current());
+        assert_eq!(loaded.worker_process_id().unwrap(), None);
+        assert_eq!(loaded.state().unwrap(), Value::Null);
+        assert!(!root.join("engine-sdk.json").exists());
+        for edit in 0..4 {
+            let mut wrong = value.clone();
+            match edit {
+                0 => wrong["sdk"]["version"] = serde_json::json!("other"),
+                1 => {
+                    wrong["sdk"]["data_api_fingerprint"] =
+                        serde_json::json!("module-engine-data-api/v1")
+                }
+                2 => {
+                    wrong.as_object_mut().unwrap().remove("sdk");
+                }
+                _ => wrong["protocol_version"] = serde_json::json!(1),
+            }
+            fs::write(&path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+            assert!(CompiledScript::load_precompiled(&path, &root).is_err());
+            assert_eq!(loaded.worker_process_id().unwrap(), None);
+            assert_eq!(loaded.state().unwrap(), Value::Null);
+        }
+    }
 
     #[test]
     fn state_schema_checks_structure_types_version_and_explicit_array_items() {

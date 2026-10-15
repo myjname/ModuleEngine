@@ -16,6 +16,7 @@ use std::{
 pub enum ProjectTemplate {
     Empty,
     TwoArenas,
+    Puzzle,
 }
 #[derive(Clone, Debug)]
 pub struct SavedProject {
@@ -23,62 +24,244 @@ pub struct SavedProject {
     pub document: GraphDocument,
 }
 
+/// Explicitly migrate into another project. Preparation validates all contracts,
+/// resources and active Rust candidates before publication can create output.
+pub fn migrate_copy(
+    source_path: &Path,
+    destination_path: &Path,
+    kind: crate::engine_profiles::ProfileKind,
+) -> Result<(SavedProject, module_engine_project::MigrationReport), String> {
+    let source = absolute_path(source_path)?;
+    let destination = absolute_path(destination_path)?;
+    if source
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&destination.to_string_lossy())
+    {
+        return Err(
+            "Migration writes a separate copy; source filename cannot be its destination".into(),
+        );
+    }
+    let raw = fs::read(&source).map_err(|e| e.to_string())?;
+    let legacy = module_engine_project::inspect_legacy_document(&raw)?;
+    let distribution = crate::distribution::detect(&source, &legacy, None)?;
+    let candidate =
+        crate::engine_profiles::migration_candidate(&raw, kind, &distribution.package_root)?;
+    distribution.validate_document(&candidate.document)?;
+    crate::host::validate_document_at(&candidate.document, &distribution.package_root)?;
+    let asset_root = source.parent().ok_or("Source project folder missing")?;
+    AssetManifest::from_value(&candidate.document.asset_manifest)?.verify(asset_root)?;
+    // This checks actual referenced model/texture dependencies as well as the
+    // complete author resource set, with no world/simulation construction.
+    let files = collect_resources(&candidate.document, asset_root, &distribution.package_root)?;
+    let mut scripts = BTreeMap::new();
+    fn root_scripts(
+        graph: &module_engine_core::Graph,
+        scripts: &mut BTreeMap<String, module_engine_script::ScriptKind>,
+    ) {
+        for node in &graph.nodes {
+            if matches!(node.module.as_str(), "custom.rust" | "custom.rust.update")
+                && let Some(id) = node
+                    .params
+                    .get("source_id")
+                    .and_then(serde_json::Value::as_str)
+            {
+                scripts.insert(
+                    id.into(),
+                    if node.module == "custom.rust" {
+                        module_engine_script::ScriptKind::Speed
+                    } else {
+                        module_engine_script::ScriptKind::Update
+                    },
+                );
+            }
+            if let Some(inner) = &node.subgraph {
+                root_scripts(inner, scripts);
+            }
+        }
+    }
+    root_scripts(&candidate.document.root, &mut scripts);
+    if let Some(game) = &candidate.document.game {
+        for id in crate::game_host::script_ids(game) {
+            scripts.insert(id, module_engine_script::ScriptKind::Update);
+        }
+    }
+    if !scripts.is_empty() {
+        let compiler_root = distribution.compile_root()?;
+        let compiler = module_engine_script::ScriptCompiler::new(
+            compiler_root.clone(),
+            compiler_root.join(".work/migration-scripts"),
+        );
+        for (id, kind) in scripts {
+            let text = candidate
+                .document
+                .custom_sources
+                .get(&id)
+                .ok_or_else(|| format!("Missing migration Custom '{id}'"))?;
+            compiler
+                .compile_kind(text, kind)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    if fs::read(&source).map_err(|e| e.to_string())? != raw {
+        return Err("Source changed during migration preparation".into());
+    }
+    check_roots(
+        asset_root,
+        destination
+            .parent()
+            .ok_or("Migration destination folder missing")?,
+        &files,
+    )?;
+    let saved = publish(destination, candidate.document, files, &distribution, false)?;
+    Ok((saved, candidate.report))
+}
+
 /// Build game content around the selected Engine, retaining its graph, source
 /// identifiers, shader text, version pins and execution contracts exactly.
+#[cfg(test)]
 pub fn template_document(
     current: &GraphDocument,
     template: ProjectTemplate,
     distribution: &Distribution,
 ) -> Result<GraphDocument, String> {
+    template_document_with_choice(
+        current,
+        template,
+        distribution,
+        crate::engine_profiles::EngineChoice::InheritCurrent,
+    )
+}
+pub fn template_document_with_choice(
+    current: &GraphDocument,
+    template: ProjectTemplate,
+    distribution: &Distribution,
+    choice: crate::engine_profiles::EngineChoice,
+) -> Result<GraphDocument, String> {
+    use crate::engine_profiles::EngineChoice;
+    use module_engine_project::EngineProfile;
     distribution.validate_document(current)?;
+    let composition = crate::host::composition_at(&distribution.package_root)?;
+    let current_profile = EngineProfile::from_document(current)?;
+    let profile = match choice {
+        EngineChoice::InheritCurrent => current_profile.clone(),
+        EngineChoice::Selected(kind) => {
+            let selected = crate::engine_profiles::select(kind, &distribution.package_root)?;
+            if !distribution.can_author_engine() && selected.identity != current_profile.identity {
+                return Err("Team can inherit its checked Engine; selecting another profile requires Full sources".into());
+            }
+            selected
+        }
+    };
     let mut document = current.clone();
-    let mut game = match template {
-        ProjectTemplate::Empty => GameProject {
-            entry_scene: "scene".into(),
-            scenes: BTreeMap::from([(
+    if distribution.can_author_engine() {
+        document.module_versions.clear();
+        document.engine_lock = None;
+    }
+    document.legacy_archive.clear();
+    if matches!(choice, EngineChoice::Selected(_)) {
+        document.root = profile.blueprint.root.clone();
+        document.engine = profile.blueprint.engine.clone();
+        document.shader_sources = profile.blueprint.shader_sources.clone();
+    }
+    let engine_sources = if distribution.can_author_engine() {
+        crate::engine_profiles::engine_sources(&document)
+    } else {
+        let project_ids = current
+            .game
+            .as_ref()
+            .map(crate::game_host::script_ids)
+            .unwrap_or_default();
+        current
+            .custom_sources
+            .iter()
+            .filter(|(id, _)| !project_ids.contains(*id))
+            .map(|(id, source)| (id.clone(), source.clone()))
+            .collect()
+    };
+    document.custom_sources = engine_sources;
+    for (id, source) in &mut document.custom_sources {
+        if distribution.can_edit_custom_source(id, current) {
+            *source = "fn update(_ctx: &mut ScriptContext) {}\n".into();
+        }
+    }
+    document.asset_manifest = serde_json::Value::Null;
+    document.project = Default::default();
+    document.game = Some(match template {
+        ProjectTemplate::Empty => {
+            let mut game = GameProject::empty();
+            game.entry_scene = "scene".into();
+            game.scenes = BTreeMap::from([(
                 "scene".into(),
                 AuthoredScene {
                     name: "Scene".into(),
                     objects: vec![],
                 },
-            )]),
-            prefabs: BTreeMap::new(),
-            execution: current
-                .game
-                .as_ref()
-                .map(|g| g.execution.clone())
-                .unwrap_or_else(module_engine_arpg::gameplay_schedule),
-            audio_cues: BTreeMap::new(),
-        },
-        ProjectTemplate::TwoArenas => module_engine_two_arenas::demo_project(),
-    };
-    if let Some(existing) = &current.game {
-        game.execution = existing.execution.clone();
-        // No template may introduce audio files absent from the selected project.
-        game.audio_cues = existing.audio_cues.clone();
-    } else {
-        game.audio_cues.clear();
-    }
-    document.game = Some(game);
+            )]);
+            game.execution = profile.blueprint.default_execution.clone();
+            if !distribution.can_author_engine()
+                && let Some(existing) = &current.game
+            {
+                // A Team installation explicitly freezes its execution contract.
+                // Reuse that contract with fresh project code, not old logic.
+                game.execution = existing.execution.clone();
+                for id in crate::game_host::script_ids(&game) {
+                    document
+                        .custom_sources
+                        .insert(id, "fn update(_ctx: &mut ScriptContext) {}\n".into());
+                }
+            }
+            game
+        }
+        ProjectTemplate::TwoArenas => {
+            let content = module_engine_two_arenas::document(document.clone());
+            for (id, source) in content.custom_sources {
+                if document.custom_sources.contains_key(&id)
+                    && !distribution.can_edit_custom_source(&id, current)
+                {
+                    return Err(format!(
+                        "Project source '{id}' conflicts with an Engine-owned source"
+                    ));
+                }
+                document.custom_sources.insert(id, source);
+            }
+            content.game.unwrap()
+        }
+        ProjectTemplate::Puzzle => module_engine_project_puzzle::project(),
+    });
     document.name = match template {
         ProjectTemplate::Empty => "New project",
         ProjectTemplate::TwoArenas => "Two arenas",
+        ProjectTemplate::Puzzle => "Crate puzzle",
     }
     .into();
-    for (id, text) in &mut document.custom_sources {
-        if distribution.can_edit_custom_source(id, current) {
-            *text = "fn update(_ctx: &mut ScriptContext) {\n}\n".into();
-        }
-    }
-    // These IDs belonged to the previous game's authored objects. Module/global
-    // settings and inactive module values remain available in the new project.
     document.properties.active.objects.clear();
     document.properties.active.components.clear();
     document.properties.inactive.objects.clear();
     document.properties.inactive.components.clear();
     document.properties.detached_components.clear();
+    if distribution.can_author_engine() {
+        crate::engine_profiles::attach(&mut document, &composition, &profile)?;
+    } else if let Some(game) = &document.game {
+        for id in crate::game_host::script_ids(game) {
+            document
+                .custom_sources
+                .insert(id, "fn update(_ctx: &mut ScriptContext) {}\n".into());
+        }
+        profile.validate_with_sdk(
+            &document,
+            &composition,
+            Some(&module_engine_core::SdkIdentity::current()),
+        )?;
+    }
     distribution.validate_document(&document)?;
     validate_document(&document, distribution)?;
+    composition.validate_game(&document).map_err(|error| {
+        if distribution.can_author_engine() {
+            format!("New Project violates the selected Engine contract: {error}")
+        } else {
+            format!("New Project cannot satisfy the frozen Engine contract: {error}")
+        }
+    })?;
     Ok(document)
 }
 
@@ -115,6 +298,7 @@ fn save_as_impl(
     overwrite_confirmed: bool,
 ) -> Result<SavedProject, String> {
     distribution.validate_document(document)?;
+    crate::engine_profiles::validate(document, &distribution.package_root)?;
     // Like Save, Save As can retain a graph that is still being edited. Engine
     // policy and resource ownership are checked; Tools validates executability.
     let source = absolute_path(source_path)?;
@@ -131,7 +315,7 @@ fn save_as_impl(
     let files = if destination_root == source_root {
         BTreeMap::new()
     } else {
-        collect_resources(document, &source_root)?
+        collect_resources(document, &source_root, &distribution.package_root)?
     };
     check_roots(&source_root, destination_root, &files)?;
     publish(
@@ -151,7 +335,24 @@ pub fn new_project(
     distribution: &Distribution,
     template: ProjectTemplate,
 ) -> Result<SavedProject, String> {
-    let document = template_document(current, template, distribution)?;
+    new_project_with_choice(
+        source_path,
+        destination_folder,
+        current,
+        distribution,
+        template,
+        crate::engine_profiles::EngineChoice::InheritCurrent,
+    )
+}
+pub fn new_project_with_choice(
+    source_path: &Path,
+    destination_folder: &Path,
+    current: &GraphDocument,
+    distribution: &Distribution,
+    template: ProjectTemplate,
+    choice: crate::engine_profiles::EngineChoice,
+) -> Result<SavedProject, String> {
+    let document = template_document_with_choice(current, template, distribution, choice)?;
     let source = absolute_path(source_path)?;
     let source_root = source
         .parent()
@@ -168,8 +369,20 @@ pub fn new_project(
     {
         return Err("New Project requires a new or empty folder".into());
     }
-    let files = collect_resources(&document, &source_root)?;
-    check_roots(&source_root, &folder, &files)?;
+    let resource_root = if template == ProjectTemplate::TwoArenas {
+        distribution
+            .package_root
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+    } else {
+        source_root.clone()
+    };
+    let files = if template == ProjectTemplate::TwoArenas {
+        collect_resources(&document, &resource_root, &distribution.package_root)?
+    } else {
+        BTreeMap::new()
+    };
+    check_roots(&resource_root, &folder, &files)?;
     publish(
         folder.join("project.json"),
         document,
@@ -180,6 +393,7 @@ pub fn new_project(
 }
 
 fn validate_document(document: &GraphDocument, distribution: &Distribution) -> Result<(), String> {
+    crate::engine_profiles::validate(document, &distribution.package_root)?;
     let registry = crate::host::registry_at(&distribution.package_root)?;
     let errors = module_engine_core::validate_graph(document, &registry)
         .into_iter()
@@ -295,40 +509,134 @@ fn collect_tree(
     }
     Ok(())
 }
-fn component_resources(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            if let Some(path) = fields
-                .get("mesh")
-                .and_then(|mesh| mesh.get("path"))
-                .and_then(serde_json::Value::as_str)
-            {
-                paths.insert(path.into());
+fn resource_owner_is_known(
+    document: &GraphDocument,
+    composition: &module_engine_core::CompositionContext,
+    owner: &str,
+) -> bool {
+    composition.module_version(owner).is_some_and(|installed| {
+        document
+            .module_versions
+            .get(owner)
+            .is_none_or(|saved| saved == installed)
+    })
+}
+fn resource_component_schema<'a>(
+    document: &GraphDocument,
+    composition: &'a module_engine_core::CompositionContext,
+    component: &str,
+) -> Option<&'a module_engine_core::ComponentSchema> {
+    let schema = composition.systems.components().schema(component)?;
+    if !resource_owner_is_known(document, composition, &schema.owner_module) {
+        return None;
+    }
+    if let Some(saved) = document
+        .engine_lock
+        .as_ref()
+        .and_then(|lock| lock.component_schemas.get(component))
+        && module_engine_core::SchemaPin::capture(schema).ok().as_ref() != Some(saved)
+    {
+        // An inactive archived contract is opaque even if an installed schema
+        // happens to reuse its component ID.
+        return None;
+    }
+    Some(schema)
+}
+fn add_resource_value(value: Option<&serde_json::Value>, paths: &mut BTreeSet<String>) {
+    if let Some(reference) = value.and_then(serde_json::Value::as_str) {
+        paths.insert(reference.into());
+    }
+}
+fn component_resources(
+    components: &BTreeMap<String, serde_json::Value>,
+    document: &GraphDocument,
+    composition: &module_engine_core::CompositionContext,
+    paths: &mut BTreeSet<String>,
+) {
+    for (id, value) in components {
+        let Some(schema) = resource_component_schema(document, composition, id) else {
+            continue;
+        };
+        for field in &schema.fields {
+            if matches!(
+                field.value_type,
+                module_engine_core::PropertyType::AssetReference { .. }
+            ) {
+                add_resource_value(
+                    schema
+                        .field_path(field)
+                        .and_then(|path| module_engine_core::component_field(value, path)),
+                    paths,
+                );
             }
-            for key in [
-                "base_color_texture",
-                "mesh.path",
-                "material.base_color_texture",
-            ] {
-                if let Some(path) = fields.get(key).and_then(serde_json::Value::as_str) {
-                    paths.insert(path.into());
+        }
+    }
+}
+fn property_resources(
+    data: &module_engine_core::PropertyData,
+    document: &GraphDocument,
+    composition: &module_engine_core::CompositionContext,
+    paths: &mut BTreeSet<String>,
+) {
+    use module_engine_core::{PropertyScope, PropertyType};
+    for module in composition.modules.descriptors() {
+        if !resource_owner_is_known(document, composition, &module.id) {
+            continue;
+        }
+        for field in &module.properties {
+            if !matches!(field.value_type, PropertyType::AssetReference { .. }) {
+                continue;
+            }
+            match &field.scope {
+                PropertyScope::Global => add_resource_value(data.global.get(&field.id), paths),
+                PropertyScope::Module => add_resource_value(
+                    data.modules
+                        .get(&module.id)
+                        .and_then(|values| values.get(&field.id)),
+                    paths,
+                ),
+                PropertyScope::Object => {
+                    for values in data.objects.values() {
+                        add_resource_value(values.get(&field.id), paths);
+                    }
+                }
+                PropertyScope::Component { component } => {
+                    for values in data.components.values() {
+                        add_resource_value(
+                            values
+                                .get(component)
+                                .and_then(|values| values.get(&field.id)),
+                            paths,
+                        );
+                    }
                 }
             }
-            for field in fields.values() {
-                component_resources(field, paths);
+        }
+    }
+    // Older property-store component records use flat field IDs rather than
+    // the authored scene's aggregate JSON. Retain their known asset fields too.
+    for components in data.components.values() {
+        for (id, values) in components {
+            let Some(schema) = resource_component_schema(document, composition, id) else {
+                continue;
+            };
+            for field in &schema.fields {
+                if matches!(field.value_type, PropertyType::AssetReference { .. }) {
+                    add_resource_value(
+                        values
+                            .get(&field.id)
+                            .or_else(|| schema.field_path(field).and_then(|path| values.get(path))),
+                        paths,
+                    );
+                }
             }
         }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                component_resources(value, paths);
-            }
-        }
-        _ => {}
     }
 }
 fn collect_resources(
     document: &GraphDocument,
     root: &Path,
+    backend: &Path,
 ) -> Result<BTreeMap<String, PathBuf>, String> {
     // shader_sources contains Engine-owned inline code. Its #include lookup,
     // compiler and cache remain in the selected installed package through the
@@ -356,17 +664,58 @@ fn collect_resources(
             paths.insert(path.clone());
         }
     }
-    // Source IDs and source text are opaque keys/bytes, not resource fields.
-    // Scan only scene/prefab/property records, including archived components.
-    component_resources(
-        &serde_json::to_value(&document.properties).map_err(|e| e.to_string())?,
+    // Only registered asset fields have reference semantics. Unknown/inactive
+    // payloads can contain identical-looking keys with an unrelated meaning.
+    // The complete manifest and physical assets tree remain author content.
+    let composition = crate::host::composition_at(backend)?;
+    property_resources(
+        &document.properties.active,
+        document,
+        &composition,
+        &mut paths,
+    );
+    property_resources(
+        &document.properties.inactive,
+        document,
+        &composition,
         &mut paths,
     );
     if let Some(game) = &document.game {
-        component_resources(
-            &serde_json::to_value(game).map_err(|e| e.to_string())?,
-            &mut paths,
-        );
+        for prefab in game.prefabs.values() {
+            component_resources(&prefab.components, document, &composition, &mut paths);
+        }
+        for object in game.scenes.values().flat_map(|scene| &scene.objects) {
+            component_resources(&object.components, document, &composition, &mut paths);
+            let inherited = object.prefab.as_ref().and_then(|id| game.prefabs.get(id));
+            for (field, value) in &object.overrides {
+                let owner = object
+                    .components
+                    .keys()
+                    .chain(
+                        inherited
+                            .into_iter()
+                            .flat_map(|prefab| prefab.components.keys()),
+                    )
+                    .filter(|id| {
+                        field
+                            .strip_prefix(id.as_str())
+                            .is_some_and(|tail| tail.starts_with('.'))
+                    })
+                    .max_by_key(|id| id.len());
+                if let Some(schema) =
+                    owner.and_then(|id| resource_component_schema(document, &composition, id))
+                    && schema.fields.iter().any(|registered| {
+                        registered.id == *field
+                            && matches!(
+                                registered.value_type,
+                                module_engine_core::PropertyType::AssetReference { .. }
+                            )
+                    })
+                {
+                    add_resource_value(Some(value), &mut paths);
+                }
+            }
+        }
         paths.extend(game.audio_cues.values().cloned());
     }
     let mut library = module_engine_content::ContentLibrary::new(root)?;
@@ -593,7 +942,14 @@ fn publish(
             return Err(format!("Destination resource leaves project: {relative}"));
         }
     }
-    let parent = root.parent().ok_or("Destination folder has no parent")?;
+    // An existing writable project does not imply access to its parent (e.g.
+    // a workspace mounted directly below a protected drive root). Only fresh
+    // directory publication needs a sibling staging directory for atomic rename.
+    let parent = if root.is_dir() {
+        root
+    } else {
+        root.parent().ok_or("Destination folder has no parent")?
+    };
     let stage = parent.join(format!(".module-engine-save-{}", nonce()?));
     let mut parent_directories = vec![];
     if let Err(error) = create_directories(parent, &mut parent_directories)
@@ -791,6 +1147,184 @@ mod tests {
         )
         .unwrap();
     }
+    fn opaque_resource_keys() -> serde_json::Value {
+        serde_json::json!({
+            "base_color_texture":"opaque-token",
+            "mesh.path":"asset://not-a-declared-asset",
+            "material.base_color_texture":"../opaque-value",
+            "mesh":{"path":"C:\\opaque\\not-a-resource.glb"},
+            "nested":[{"material":{"base_color_texture":"also-opaque"}}]
+        })
+    }
+    #[test]
+    fn save_as_preserves_unknown_inactive_resource_like_keys_without_interpreting_them() {
+        let root = fixture();
+        let source = root.join("source");
+        fs::create_dir_all(source.join("assets/unassigned")).unwrap();
+        fs::write(source.join("assets/unassigned/notes.txt"), b"author file").unwrap();
+        let mut document = document();
+        let opaque = opaque_resource_keys();
+        document
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("future.opaque".into(), opaque.clone());
+        document.game.as_mut().unwrap().prefabs.insert(
+            "unused future".into(),
+            module_engine_core::Prefab {
+                color: [1, 2, 3, 255],
+                components: BTreeMap::from([("future.opaque".into(), opaque.clone())]),
+            },
+        );
+        document
+            .properties
+            .inactive
+            .global
+            .insert("future.global".into(), opaque.clone());
+        document.properties.inactive.components.insert(
+            99,
+            BTreeMap::from([(
+                "future.opaque".into(),
+                BTreeMap::from([("base_color_texture".into(), serde_json::json!("not-a-file"))]),
+            )]),
+        );
+        document
+            .legacy_archive
+            .insert("/unknown_record".into(), opaque);
+        let json = source.join("project.json");
+        let original = serde_json::to_vec_pretty(&document).unwrap();
+        fs::write(&json, &original).unwrap();
+        for (name, profile) in [
+            ("full", DistributionProfile::Full),
+            ("team", DistributionProfile::Team),
+        ] {
+            let capability = distribution(&document, profile);
+            let saved = save_as(
+                &json,
+                &root.join(name).join("project.json"),
+                &document,
+                &capability,
+            )
+            .unwrap();
+            assert_eq!(saved.document, document);
+            assert_eq!(crate::project::read(&saved.path).unwrap(), document);
+            assert_eq!(fs::read(&json).unwrap(), original);
+            assert_eq!(
+                fs::read(
+                    saved
+                        .path
+                        .parent()
+                        .unwrap()
+                        .join("assets/unassigned/notes.txt")
+                )
+                .unwrap(),
+                b"author file"
+            );
+            assert!(!saved.path.parent().unwrap().join("opaque-token").exists());
+        }
+        cleanup(&root);
+    }
+    #[test]
+    fn explicit_migration_and_followup_save_as_preserve_unknown_payloads_and_source_bytes() {
+        let root = fixture();
+        let source = root.join("legacy");
+        fs::create_dir_all(source.join("assets/unassigned")).unwrap();
+        fs::write(
+            source.join("assets/unassigned/notes.txt"),
+            b"legacy author file",
+        )
+        .unwrap();
+        let mut document = crate::game_templates::puzzle_document();
+        let capability = distribution(&document, DistributionProfile::Full);
+        document.schema_version = 3;
+        document.engine_lock = None;
+        document.engine_profile = None;
+        document.legacy_archive.clear();
+        let opaque = opaque_resource_keys();
+        document
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .values_mut()
+            .next()
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("future.opaque".into(), opaque.clone());
+        document
+            .properties
+            .inactive
+            .global
+            .insert("future.global".into(), opaque.clone());
+        let mut value = serde_json::to_value(&document).unwrap();
+        value["unknown_source_record"] = opaque.clone();
+        let mut original = vec![0xef, 0xbb, 0xbf];
+        original.extend(serde_json::to_vec_pretty(&value).unwrap());
+        original.extend(b"\r\n");
+        let json = source.join("project.json");
+        fs::write(&json, &original).unwrap();
+        let binding = project_binding_path(&json).unwrap();
+        let original_binding = serde_json::to_vec_pretty(
+            &ProjectEngineBinding::from_distribution(&capability).unwrap(),
+        )
+        .unwrap();
+        fs::write(&binding, &original_binding).unwrap();
+        let (migrated, report) = migrate_copy(
+            &json,
+            &root.join("migrated/project.json"),
+            crate::engine_profiles::ProfileKind::Puzzle,
+        )
+        .unwrap();
+        assert_eq!(report.source_schema, 3);
+        assert_eq!(
+            report.source_sha256,
+            module_engine_project::hash_bytes(&original)
+        );
+        assert_eq!(
+            migrated.document.legacy_archive["/unknown_source_record"],
+            opaque
+        );
+        let game = migrated.document.game.as_ref().unwrap();
+        assert_eq!(
+            game.scenes.values().next().unwrap().objects[0].components["future.opaque"],
+            opaque
+        );
+        assert_eq!(
+            migrated.document.properties.inactive.global["future.global"],
+            opaque
+        );
+        assert_eq!(
+            crate::project::read(&migrated.path).unwrap(),
+            migrated.document
+        );
+        let rebound = distribution::detect(&migrated.path, &migrated.document, None).unwrap();
+        let saved = save_as(
+            &migrated.path,
+            &root.join("saved-again/project.json"),
+            &migrated.document,
+            &rebound,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::project::read(&saved.path).unwrap(),
+            migrated.document
+        );
+        assert_eq!(fs::read(&json).unwrap(), original);
+        assert_eq!(fs::read(&binding).unwrap(), original_binding);
+        for target in [&migrated.path, &saved.path] {
+            assert_eq!(
+                fs::read(target.parent().unwrap().join("assets/unassigned/notes.txt")).unwrap(),
+                b"legacy author file"
+            );
+        }
+        cleanup(&root);
+    }
     #[test]
     fn save_as_preserves_author_archive_unused_files_and_transitive_prefab_assets() {
         let root = fixture();
@@ -984,9 +1518,8 @@ mod tests {
         .unwrap();
         assert!(saved.path.is_file());
         assert!(
-            installation
-                .join("projects/new-game/assets/unassigned/notes.txt")
-                .is_file()
+            !installation.join("projects/new-game/assets").exists(),
+            "Empty does not inherit previous project resources"
         );
         assert_eq!(fs::read(&source).unwrap(), original_bytes);
         let copy = save_as(
@@ -1280,6 +1813,164 @@ mod tests {
         assert_eq!(saved.document.game.unwrap().scenes.len(), 2);
         cleanup(&root);
     }
+
+    #[test]
+    fn new_empty_resets_connected_root_project_logic_and_preserves_team_lock_and_engine_sources() {
+        let mut current = document();
+        current.root.nodes.push(module_engine_core::make_node(
+            "root-project-controller",
+            "custom.rust.update",
+            "Project update",
+            [0., 0.],
+            serde_json::json!({"source_id":"root-project-controller"}),
+        ));
+        current.root.edges.push(module_engine_core::make_edge(
+            "root-project-controller",
+            "world",
+            "world",
+            "commands",
+        ));
+        let project_text = "fn update(ctx: &mut ScriptContext) { ctx.set_color(1, [9,8,7,255]); }";
+        current
+            .custom_sources
+            .insert("root-project-controller".into(), project_text.into());
+        current.custom_sources.insert(
+            "protected-unused-engine-source".into(),
+            "// Engine-owned authoring source, retained even without a connected node".into(),
+        );
+        let profile = module_engine_project::EngineProfile::from_document(&current)
+            .unwrap()
+            .identity;
+        for kind in [DistributionProfile::Full, DistributionProfile::Team] {
+            let capability = distribution(&current, kind);
+            assert!(capability.can_edit_custom_source("root-project-controller", &current));
+            assert!(!capability.can_edit_custom_source("protected-unused-engine-source", &current));
+            let fresh = template_document(&current, ProjectTemplate::Empty, &capability).unwrap();
+            assert_eq!(fresh.root, current.root);
+            assert_eq!(
+                fresh.custom_sources["root-project-controller"],
+                "fn update(_ctx: &mut ScriptContext) {}\n"
+            );
+            assert_ne!(
+                fresh.custom_sources["root-project-controller"],
+                project_text
+            );
+            assert_eq!(
+                module_engine_project::EngineProfile::from_document(&fresh)
+                    .unwrap()
+                    .identity,
+                profile
+            );
+            if kind == DistributionProfile::Team {
+                assert_eq!(fresh.module_versions, current.module_versions);
+                assert_eq!(fresh.engine_lock, current.engine_lock);
+                assert_eq!(
+                    fresh.custom_sources.keys().collect::<Vec<_>>(),
+                    current.custom_sources.keys().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    fresh.custom_sources["protected-unused-engine-source"],
+                    current.custom_sources["protected-unused-engine-source"]
+                );
+                assert_eq!(
+                    fresh.game.as_ref().unwrap().execution,
+                    current.game.as_ref().unwrap().execution
+                );
+                capability.validate_document(&fresh).unwrap();
+            } else {
+                assert!(fresh.game.as_ref().unwrap().execution.stages.is_empty());
+                assert!(!fresh.custom_sources.contains_key("game-controller"));
+            }
+        }
+        assert_eq!(
+            current.custom_sources["root-project-controller"],
+            project_text
+        );
+    }
+
+    #[test]
+    fn two_arenas_can_replace_project_controller_referenced_by_root_but_rejects_engine_owned_id() {
+        let mut shared = document();
+        shared.root.nodes.push(module_engine_core::make_node(
+            "root-project-controller",
+            "custom.rust.update",
+            "Project update",
+            [0., 0.],
+            serde_json::json!({"source_id":"game-controller"}),
+        ));
+        shared.root.edges.push(module_engine_core::make_edge(
+            "root-project-controller",
+            "world",
+            "world",
+            "commands",
+        ));
+        shared.custom_sources.insert(
+            "game-controller".into(),
+            "fn update(ctx: &mut ScriptContext) { ctx.set_color(1,[9,8,7,255]); }".into(),
+        );
+        let full = distribution(&shared, DistributionProfile::Full);
+        assert!(full.can_edit_custom_source("game-controller", &shared));
+        let fresh = template_document(&shared, ProjectTemplate::TwoArenas, &full).unwrap();
+        assert_eq!(fresh.root, shared.root);
+        assert!(fresh.custom_sources["game-controller"].contains("game.counter.v1"));
+        assert_ne!(
+            fresh.custom_sources["game-controller"],
+            shared.custom_sources["game-controller"]
+        );
+
+        let mut protected = document();
+        protected
+            .game
+            .as_mut()
+            .unwrap()
+            .execution
+            .stages
+            .retain(|stage| {
+                stage
+                    .nodes
+                    .iter()
+                    .all(|node| node.module != "custom.rust.update")
+            });
+        protected.root.nodes.push(module_engine_core::make_node(
+            "engine-speed",
+            "custom.rust",
+            "Engine speed",
+            [0., 0.],
+            serde_json::json!({"source_id":"game-controller"}),
+        ));
+        protected.root.edges.push(module_engine_core::make_edge(
+            "engine-speed",
+            "value",
+            "world",
+            "speed",
+        ));
+        protected.custom_sources.insert(
+            "game-controller".into(),
+            "fn speed(_time:f64,base:f64)->f64 { base }".into(),
+        );
+        let composition =
+            crate::host::composition_at(&module_engine_vulkan::resource_root()).unwrap();
+        let identity = module_engine_project::EngineProfile::from_document(&protected)
+            .unwrap()
+            .identity;
+        composition
+            .capture_lock(
+                &protected,
+                identity,
+                Some(module_engine_core::SdkIdentity::current()),
+            )
+            .unwrap()
+            .apply_to(&mut protected);
+        let full = distribution(&protected, DistributionProfile::Full);
+        assert!(!full.can_edit_custom_source("game-controller", &protected));
+        let before = protected.clone();
+        assert!(
+            template_document(&protected, ProjectTemplate::TwoArenas, &full)
+                .unwrap_err()
+                .contains("Engine-owned source")
+        );
+        assert_eq!(protected, before);
+    }
     #[test]
     fn save_as_full_and_team_preserve_ids_and_physical_resources_from_archived_values() {
         let root = fixture();
@@ -1361,5 +2052,78 @@ mod tests {
             );
         }
         cleanup(&root);
+    }
+
+    #[test]
+    fn team_puzzle_new_empty_rejects_before_publication_and_preserves_existing_project() {
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/test-temp"),
+            "team-puzzle-new-empty",
+        )
+        .unwrap();
+        let source = artifacts.path().join("existing-team");
+        fs::create_dir_all(&source).unwrap();
+        let document = crate::game_host::puzzle_document();
+        let before = document.clone();
+        let team = distribution(&document, DistributionProfile::Team);
+        let path = source.join("project.json");
+        let raw = serde_json::to_vec_pretty(&document).unwrap();
+        fs::write(&path, &raw).unwrap();
+        let binding_path = project_binding_path(&path).unwrap();
+        let binding =
+            serde_json::to_vec_pretty(&ProjectEngineBinding::from_distribution(&team).unwrap())
+                .unwrap();
+        fs::write(&binding_path, &binding).unwrap();
+        let composition = crate::host::composition_at(&team.package_root).unwrap();
+        composition.validate_game(&document).unwrap();
+
+        // Both a new folder and an already-created empty folder must stay
+        // unpublished when the frozen schedule requires Puzzle scene content.
+        for existing_folder in [false, true] {
+            let destination = artifacts.path().join(if existing_folder {
+                "empty-destination"
+            } else {
+                "absent-destination"
+            });
+            if existing_folder {
+                fs::create_dir(&destination).unwrap();
+            }
+            let error = new_project(
+                &path,
+                &destination,
+                &document,
+                &team,
+                ProjectTemplate::Empty,
+            )
+            .unwrap_err();
+            assert!(error.contains("frozen Engine contract"), "{error}");
+            assert!(
+                error.contains("Puzzle scene needs exactly one board"),
+                "{error}"
+            );
+            assert!(!destination.join("project.json").exists());
+            assert!(
+                !project_binding_path(&destination.join("project.json"))
+                    .unwrap()
+                    .exists()
+            );
+            if existing_folder {
+                assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+            } else {
+                assert!(!destination.exists());
+            }
+        }
+
+        assert_eq!(document, before);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        assert_eq!(fs::read(&binding_path).unwrap(), binding);
+        team.validate_document(&document).unwrap();
+        composition.validate_game(&document).unwrap();
+        assert_eq!(
+            distribution::detect(&path, &document, None)
+                .unwrap()
+                .profile,
+            DistributionProfile::Team
+        );
     }
 }

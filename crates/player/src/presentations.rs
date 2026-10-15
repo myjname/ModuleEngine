@@ -43,6 +43,7 @@ fn installed() -> &'static UiRegistry {
         let mut registry = UiRegistry::default();
         // This is the UI composition root. Each installed package supplies its
         // callbacks; the Player dispatch paths below contain no game rules.
+        #[cfg(feature = "arpg")]
         registry
             .register(UiContribution {
                 id: "arpg.presentation",
@@ -53,6 +54,7 @@ fn installed() -> &'static UiRegistry {
                 capture_input: Some(module_engine_arpg::ui::capture_input),
             })
             .expect("Unique installed UI contribution");
+        #[cfg(feature = "puzzle")]
         registry
             .register(UiContribution {
                 id: "puzzle.presentation",
@@ -63,6 +65,8 @@ fn installed() -> &'static UiRegistry {
                 capture_input: None,
             })
             .expect("Unique installed puzzle UI contribution");
+        #[cfg(not(any(feature = "arpg", feature = "puzzle")))]
+        let _ = &mut registry;
         registry
     })
 }

@@ -9,12 +9,16 @@ use crate::activity::{ActivitySnapshot, BuildProgress};
 use module_engine_content::ContentLibrary;
 use module_engine_core::*;
 use module_engine_host_services::{HostServiceContext, HostServiceRegistry, HostServices};
-use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind, ScriptTick};
+use module_engine_script::{CompiledScript, JobLease, ScriptCompiler, ScriptKind, ScriptTick};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -35,15 +39,85 @@ pub struct HostOptions {
     pub services: HostServiceRegistry,
     pub services_enabled: bool,
 }
+
+fn validate_host_contracts(
+    composition: &CompositionContext,
+    document: &GraphDocument,
+    render: &RenderMode,
+) -> Result<(), String> {
+    let sdk = SdkIdentity::current();
+    if document.engine_profile.is_some() {
+        module_engine_project::EngineProfile::from_document(document)?.validate_with_sdk(
+            document,
+            composition,
+            Some(&sdk),
+        )?;
+    } else {
+        composition.validate_lock(document, Some(&sdk))?;
+    }
+    if let RenderMode::Headless { world_node } = render {
+        let world = composition.modules.world_node(document, world_node)?;
+        let activity = composition.activity(document)?;
+        if !activity.modules.contains(&world.module) {
+            return Err(format!(
+                "Headless selected world '{}' must be active in the document; declare '{}' in engine.enabled_modules",
+                world.id, world.module,
+            ));
+        }
+        let installed = composition
+            .modules
+            .module_version(&world.module)
+            .ok_or("Headless selected world is not installed")?;
+        if document
+            .module_versions
+            .get(&world.module)
+            .map(String::as_str)
+            != Some(installed)
+        {
+            return Err(format!(
+                "Headless selected world '{}' requires an exact implementation pin",
+                world.module
+            ));
+        }
+    }
+    Ok(())
+}
 pub type ScriptSlot = Arc<Mutex<CompiledScript>>;
 struct RenderPreparation {
     document: GraphDocument,
     receiver: mpsc::Receiver<Result<Box<dyn FrameRenderer>, String>>,
     progress: BuildProgress,
     dependencies: RendererDependencyWatch,
+    _job: Option<JobLease>,
+}
+impl RenderPreparation {
+    fn retire(mut self) {
+        self._job.take();
+        retire_in_background(self);
+    }
+}
+impl Drop for RenderPreparation {
+    fn drop(&mut self) {
+        self._job.take();
+        let receiver = std::mem::replace(&mut self.receiver, mpsc::channel().1);
+        retire_in_background(receiver);
+    }
+}
+
+fn retire_in_background(value: impl Send + 'static) {
+    let _ = module_engine_script::spawn_job(move |_| drop(value));
+}
+
+fn check_preparation_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("Game preparation cancelled".into())
+    } else {
+        Ok(())
+    }
 }
 
 /// A bounded-frequency adapter dependency watch also retains failed states.
+#[derive(Clone)]
 pub struct RendererDependencyWatch {
     revision: Result<u64, String>,
     checked: Instant,
@@ -565,6 +639,25 @@ impl GameHost {
         options: HostOptions,
         progress: Option<&BuildProgress>,
     ) -> Result<Self, String> {
+        Self::build_cancellable(
+            document,
+            composition,
+            options,
+            progress,
+            &AtomicBool::new(false),
+        )
+    }
+    /// Background owners signal cancellation without joining on the UI thread.
+    /// Native renderer creation finishes on its registered owner before exit.
+    pub fn build_cancellable(
+        document: GraphDocument,
+        composition: CompositionContext,
+        options: HostOptions,
+        progress: Option<&BuildProgress>,
+        cancelled: &AtomicBool,
+    ) -> Result<Self, String> {
+        check_preparation_cancelled(cancelled)?;
+        validate_host_contracts(&composition, &document, &options.render)?;
         let root = options
             .asset_root
             .canonicalize()
@@ -616,6 +709,7 @@ impl GameHost {
             progress.stage("Подготовка Rust Custom");
         }
         for id in script_ids(&game) {
+            check_preparation_cancelled(cancelled)?;
             if sources.contains_key(&id) {
                 continue;
             }
@@ -628,7 +722,7 @@ impl GameHost {
                     compile_root.to_path_buf(),
                     compile_root.join(".work/game-scripts"),
                 )
-                .compile_kind(source, ScriptKind::Update)
+                .compile_kind_cancellable(source, ScriptKind::Update, cancelled)
                 .map_err(|e| e.to_string())?
             } else {
                 if id.is_empty()
@@ -708,6 +802,7 @@ impl GameHost {
             .map_or_else(Camera::default, |contribution| {
                 (contribution.initial_camera)(&game)
             });
+        check_preparation_cancelled(cancelled)?;
         let mut renderer = match options.render {
             RenderMode::Graph => {
                 if let Some(progress) = progress {
@@ -722,6 +817,7 @@ impl GameHost {
             }
             RenderMode::Headless { .. } => None,
         };
+        check_preparation_cancelled(cancelled)?;
         if let Some(renderer) = &mut renderer {
             renderer.set_detailed_stats(false);
         }
@@ -736,6 +832,7 @@ impl GameHost {
         content.set_asset_paths(assets.asset_paths());
         if renderer.is_some() {
             for scene in game.scenes.keys() {
+                check_preparation_cancelled(cancelled)?;
                 let resolved = game.resolve_scene_with_context(scene, &registry, &context)?;
                 for e in resolved {
                     if let Some(path) = e
@@ -750,6 +847,7 @@ impl GameHost {
             }
         }
         let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        check_preparation_cancelled(cancelled)?;
         let requests = service_requests(&contributions, &game)?;
         let services = options.services.build(
             &requests,
@@ -800,6 +898,7 @@ impl GameHost {
     /// path. A scene/resource validation error keeps the last accepted session
     /// and document; loading a candidate may merely warm the content cache.
     pub fn refresh_author_preview(&mut self, document: &GraphDocument) -> Result<(), String> {
+        validate_host_contracts(&self.composition, document, &self.options.render)?;
         if self.simulation_started
             || self.session.state().tick != 0
             || self.session.state().time != 0.
@@ -1150,10 +1249,35 @@ impl GameHost {
     pub fn graphics_only_change(&self, document: &GraphDocument) -> bool {
         graphics_only_change(&self.composition.modules, &self.document, document)
     }
+    fn validate_session_compatibility(&self, document: &GraphDocument) -> Result<(), String> {
+        if document.game.as_ref().map(|game| &game.execution)
+            != self.document.game.as_ref().map(|game| &game.execution)
+        {
+            return Err("Game execution changed; replace the complete host explicitly".into());
+        }
+        let world = |document: &GraphDocument| -> Result<(String, String, Value), String> {
+            let node = match &self.options.render {
+                RenderMode::Graph => self.composition.modules.render_route(document)?.world,
+                RenderMode::Headless { world_node } => {
+                    self.composition.modules.world_node(document, world_node)?
+                }
+            };
+            Ok((node.id.clone(), node.module.clone(), node.params.clone()))
+        };
+        if world(document)? != world(&self.document)? {
+            return Err(
+                "Selected world route or parameters changed; replace the complete host explicitly"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
     pub fn sync_document(&mut self, document: &GraphDocument) -> Result<(), String> {
         if document == &self.document {
             return Ok(());
         }
+        validate_host_contracts(&self.composition, document, &self.options.render)?;
+        self.validate_session_compatibility(document)?;
         if document.execution_eq(&self.document) {
             return self.accept_document(document);
         }
@@ -1247,10 +1371,12 @@ impl GameHost {
         if let Some(job) = self.render_preparation.take() {
             job.progress
                 .succeed("Запрос заменён; текущий рендер сохранён");
-            std::thread::spawn(move || drop(job));
+            job.retire();
         }
     }
     pub fn sync_document_deferred(&mut self, document: &GraphDocument) -> Result<(), String> {
+        validate_host_contracts(&self.composition, document, &self.options.render)?;
+        self.validate_session_compatibility(document)?;
         if self
             .rejected_preparation
             .as_ref()
@@ -1300,17 +1426,17 @@ impl GameHost {
         let progress = BuildProgress::new("Рендер Game / Scene");
         let worker_progress = progress.clone();
         let dependencies = RendererDependencyWatch::new(document, &modules);
-        let (send, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
+        let (receiver, job) = module_engine_script::spawn_job(move |cancelled| {
             worker_progress.stage("Подготовка выбранного рендера; текущий кадр доступен");
-            let result = (|| {
+            (|| {
+                check_preparation_cancelled(cancelled)?;
                 validate_candidate_controls(&modules, &worker_document, &controls, time)?;
                 let node = modules.render_route(&worker_document)?.renderer;
                 let mut renderer = modules.create_renderer(node, &worker_document)?;
+                check_preparation_cancelled(cancelled)?;
                 renderer.set_detailed_stats(false);
                 Ok(renderer)
-            })();
-            let _ = send.send(result);
+            })()
         });
         self.render_activity = Some(progress.clone());
         self.render_preparation = Some(RenderPreparation {
@@ -1318,12 +1444,15 @@ impl GameHost {
             receiver,
             progress,
             dependencies,
+            _job: Some(job),
         });
         self.rejected_preparation = None;
         self.rejected_preparation_dependencies = None;
         Ok(())
     }
     pub fn poll_preparation(&mut self, document: &GraphDocument) -> Result<(), String> {
+        validate_host_contracts(&self.composition, document, &self.options.render)?;
+        self.validate_session_compatibility(document)?;
         if self
             .rejected_preparation
             .as_ref()
@@ -1347,7 +1476,7 @@ impl GameHost {
         if !job.document.execution_eq(document) {
             job.progress
                 .succeed("Устаревший запрос заменён; текущий рендер сохранён");
-            std::thread::spawn(move || drop(result));
+            retire_in_background(result);
             return Ok(());
         }
         let candidate = result.and_then(|candidate| {
@@ -1372,7 +1501,7 @@ impl GameHost {
                 self.accept_render_document(document, controls)
             })();
             if let Err(error) = validation {
-                std::thread::spawn(move || drop(candidate));
+                retire_in_background(candidate);
                 return Err(error);
             }
             Ok(candidate)
@@ -1387,13 +1516,13 @@ impl GameHost {
                 self.rejected_preparation_dependencies = None;
                 job.progress
                     .succeed("Новый рендер применён; игровое состояние сохранено");
-                std::thread::spawn(move || drop(old));
+                retire_in_background(old);
                 Ok(())
             }
             Err(error) => {
                 job.progress.fail(error.clone());
                 self.rejected_preparation = Some((document.clone(), error.clone()));
-                self.rejected_preparation_dependencies = Some(job.dependencies);
+                self.rejected_preparation_dependencies = Some(job.dependencies.clone());
                 Err(error)
             }
         }

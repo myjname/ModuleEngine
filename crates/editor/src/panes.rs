@@ -1198,6 +1198,12 @@ mod authored_object_regression {
         let mut document = module_engine_core::demo_document(WorldKind::Objects);
         host::ensure_authoring_configuration(&mut document);
         document.engine.enabled_modules.insert("game.motion".into());
+        crate::engine_profiles::finish_template(
+            &mut document,
+            crate::engine_profiles::ProfileKind::Neutral,
+            &crate::project::source_root(),
+        )
+        .unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json");
         let mut editor = Editor::new(document, path);
         editor

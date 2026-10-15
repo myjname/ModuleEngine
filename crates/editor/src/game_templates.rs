@@ -9,7 +9,14 @@ fn starter_engine() -> GraphDocument {
 }
 
 pub fn demo_document() -> GraphDocument {
-    module_engine_two_arenas::document(starter_engine())
+    let mut document = module_engine_two_arenas::document(starter_engine());
+    crate::engine_profiles::finish_template(
+        &mut document,
+        crate::engine_profiles::ProfileKind::Arpg,
+        &module_engine_vulkan::resource_root(),
+    )
+    .expect("Installed ARPG template contracts");
+    document
 }
 
 pub fn puzzle_document() -> GraphDocument {
@@ -34,5 +41,11 @@ pub fn puzzle_document() -> GraphDocument {
     document.custom_sources.clear();
     document.name = "ModuleEngine / Crate puzzle".into();
     document.game = Some(module_engine_project_puzzle::project());
+    crate::engine_profiles::finish_template(
+        &mut document,
+        crate::engine_profiles::ProfileKind::Puzzle,
+        &module_engine_vulkan::resource_root(),
+    )
+    .expect("Installed Puzzle template contracts");
     document
 }

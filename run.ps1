@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 Push-Location $PSScriptRoot
 try {
     if ([string]::IsNullOrWhiteSpace($Project)) {
-        $Project = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-project.json')) { 'game-project.json' } else { 'project.json' }
+        $Project = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-project-v4.json')) { 'game-project-v4.json' } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-project.json')) { 'game-project.json' } else { 'project.json' }
     }
     $localEnvironment=Join-Path $PSScriptRoot '.tools/env.ps1'
     if (Test-Path -LiteralPath $localEnvironment) { . $localEnvironment }

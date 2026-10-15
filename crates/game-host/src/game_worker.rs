@@ -21,6 +21,10 @@ const EDGE_CAPACITY: usize = 128;
 const REPLY_CAPACITY: usize = 64;
 const FIXED_DT: f64 = 1. / 60.;
 
+fn tick_wait(pending_seconds: f64, elapsed_seconds: f64) -> Duration {
+    Duration::from_secs_f64((FIXED_DT - pending_seconds - elapsed_seconds).clamp(0., FIXED_DT))
+}
+
 #[derive(Clone, Debug)]
 pub enum CustomApplyMode {
     Compatible,
@@ -165,7 +169,10 @@ pub fn finish_after_ui() -> Result<(), String> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::mem::take(&mut *registry)
     };
-    finish_registered(workers)
+    let owners = finish_registered(workers);
+    let background = module_engine_script::finish_background_jobs();
+    let artifacts = module_engine_script::finish_artifact_cleanup(Duration::from_secs(10));
+    owners.and(background).and(artifacts)
 }
 fn finish_registered(workers: Vec<RegisteredWorker>) -> Result<(), String> {
     for worker in &workers {
@@ -517,18 +524,23 @@ impl Actor {
                 self.publish();
             }
             let wait = if self.playing && self.fault.is_none() {
-                Duration::from_secs_f64(
-                    (FIXED_DT
-                        - self.host.session.pending_time()
-                        - self.clock.elapsed().as_secs_f64())
-                    .clamp(0.001, FIXED_DT),
+                tick_wait(
+                    self.host.session.pending_time(),
+                    self.clock.elapsed().as_secs_f64(),
                 )
             } else if self.host.has_pending_preparation() {
                 Duration::from_millis(10)
             } else {
                 Duration::from_millis(100)
             };
-            thread::park_timeout(wait);
+            if wait.is_zero() {
+                // A due tick still yields between bounded owner turns, without
+                // adding a millisecond after its deadline. The next turn checks
+                // shutdown, commands and restart before processing another tick.
+                thread::yield_now();
+            } else {
+                thread::park_timeout(wait);
+            }
         }
     }
 
@@ -987,6 +999,15 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_wait_keeps_submillisecond_deadlines_and_adds_no_delay_to_ready_backlog() {
+        assert_eq!(tick_wait(0., 0.), Duration::from_secs_f64(FIXED_DT));
+        assert_eq!(tick_wait(0., FIXED_DT - 0.0001), Duration::from_micros(100));
+        assert_eq!(tick_wait(FIXED_DT - 0.0001, 0.), Duration::from_micros(100));
+        assert_eq!(tick_wait(FIXED_DT, 0.), Duration::ZERO);
+        assert_eq!(tick_wait(FIXED_DT * 2., 0.004), Duration::ZERO);
+    }
 
     #[test]
     fn post_window_drain_signals_all_owners_then_waits_for_actual_cleanup() {

@@ -27,9 +27,7 @@ pub fn run(output: &Path) -> Result<Value, String> {
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
     let registry = crate::host::registry()?;
     let mut document = crate::host::settings_demo_document(WorldKind::Objects);
-    crate::project::stamp_module_versions(&mut document, &registry);
-    let mut ecs_document = crate::host::settings_demo_document(WorldKind::Ecs);
-    crate::project::stamp_module_versions(&mut ecs_document, &registry);
+    let ecs_document = crate::host::settings_demo_document(WorldKind::Ecs);
     let mut objects = Runtime::from_document(&document, &registry).map_err(|e| e.to_string())?;
     let mut ecs = Runtime::from_document(&ecs_document, &registry).map_err(|e| e.to_string())?;
     crate::advance(&document, &mut objects, 30)?;

@@ -37,7 +37,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Vulkan/Rust/project integration check failed" }
     cargo run --offline --locked -p module-engine-editor -- --settings-check outputs/verification-v04/settings
     if ($LASTEXITCODE -ne 0) { throw "Settings/properties policy check failed" }
-    $verificationGame = Join-Path $PSScriptRoot 'game-project.json'
+    $verificationGame = Join-Path $PSScriptRoot 'game-project-v4.json'
+    if (-not (Test-Path -LiteralPath $verificationGame -PathType Leaf)) {
+        $verificationGame = Join-Path $PSScriptRoot 'game-project.json'
+    }
     if (-not (Test-Path -LiteralPath $verificationGame -PathType Leaf)) {
         $verificationGame = Join-Path $PSScriptRoot 'project.json'
     }

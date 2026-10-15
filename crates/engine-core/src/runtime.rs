@@ -765,6 +765,10 @@ mod tests {
             .find(|n| n.id == "world")
             .unwrap()
             .module = "test.single".into();
+        d.module_versions.insert(
+            "test.single".into(),
+            registry.module_version("test.single").unwrap().into(),
+        );
         let runtime = Runtime::from_document(&d, &registry).unwrap();
         assert_eq!(runtime.world_kind(), WorldKind::Custom);
         assert_eq!(runtime.world_module_id(), "test.single");
@@ -822,9 +826,11 @@ mod tests {
                 .err()
                 .unwrap()
                 .message
-                .contains("requires version")
+                .contains("exact version pin")
         );
         document.module_versions.clear();
+        assert!(Runtime::from_document(&document, &registry).is_err());
+        let document = demo_document(WorldKind::Objects);
         let mut runtime = Runtime::from_document(&document, &registry).unwrap();
         let before = runtime.objects().unwrap();
         let commands = vec![

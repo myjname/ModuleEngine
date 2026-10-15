@@ -1,0 +1,2365 @@
+{
+  "schema_version": 4,
+  "name": "ModuleEngine / Two arenas",
+  "root": {
+    "nodes": [
+      {
+        "id": "world",
+        "module": "world.objects",
+        "label": "World",
+        "position": [
+          70.0,
+          120.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "extract",
+        "module": "scene.extract",
+        "label": "Extract scene",
+        "position": [
+          325.0,
+          120.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "renderer",
+        "module": "render.vulkan",
+        "label": "Vulkan renderer",
+        "position": [
+          580.0,
+          120.0
+        ],
+        "params": {},
+        "subgraph": {
+          "nodes": [
+            {
+              "id": "scene",
+              "module": "interface.input",
+              "label": "Scene input",
+              "position": [
+                20.0,
+                90.0
+              ],
+              "params": {
+                "data_type": "Scene3D",
+                "port": "scene"
+              }
+            },
+            {
+              "id": "geometry",
+              "module": "gpu.forward",
+              "label": "Geometry GPU pass",
+              "position": [
+                289.5911,
+                90.0
+              ],
+              "params": {}
+            },
+            {
+              "id": "tonemap",
+              "module": "gpu.tonemap",
+              "label": "tonemap",
+              "position": [
+                570.87506,
+                80.22451
+              ],
+              "params": {
+                "exposure": 1.0,
+                "mode": "aces"
+              }
+            },
+            {
+              "id": "encode",
+              "module": "gpu.color_encode",
+              "label": "encode",
+              "position": [
+                812.7966,
+                81.62099
+              ],
+              "params": {}
+            },
+            {
+              "id": "frame",
+              "module": "interface.output",
+              "label": "Frame output",
+              "position": [
+                1310.1133,
+                91.3965
+              ],
+              "params": {
+                "data_type": "Frame3D",
+                "port": "frame"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "scene",
+              "from_port": "value",
+              "to_node": "geometry",
+              "to_port": "scene"
+            },
+            {
+              "from_node": "encode",
+              "from_port": "frame",
+              "to_node": "frame",
+              "to_port": "value"
+            },
+            {
+              "from_node": "tonemap",
+              "from_port": "color",
+              "to_node": "encode",
+              "to_port": "color"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "color",
+              "to_node": "tonemap",
+              "to_port": "color"
+            }
+          ]
+        }
+      },
+      {
+        "id": "viewport",
+        "module": "viewport.output",
+        "label": "Viewport",
+        "position": [
+          840.0,
+          120.0
+        ],
+        "params": {}
+      }
+    ],
+    "edges": [
+      {
+        "from_node": "world",
+        "from_port": "world",
+        "to_node": "extract",
+        "to_port": "world"
+      },
+      {
+        "from_node": "extract",
+        "from_port": "scene",
+        "to_node": "renderer",
+        "to_port": "scene"
+      },
+      {
+        "from_node": "renderer",
+        "from_port": "frame",
+        "to_node": "viewport",
+        "to_port": "frame"
+      }
+    ]
+  },
+  "custom_sources": {
+    "game-controller": "// module-engine-state: {\"schema\":\"game.counter.v1\",\"initial\":{\"ticks\":0,\"hits\":0}}\nfn update(ctx: &mut ScriptContext) {\n    let ticks = ctx.state[\"ticks\"].as_u64().unwrap_or(0) + 1;\n    let hits = ctx.state[\"hits\"].as_u64().unwrap_or(0)\n        + ctx.events.iter().filter(|event| event.get(\"Hit\").is_some()).count() as u64;\n    ctx.state[\"ticks\"] = serde_json::json!(ticks);\n    ctx.state[\"hits\"] = serde_json::json!(hits);\n    if ctx.input[\"interact\"].as_bool() == Some(true) {\n        ctx.set_color(1, [250, 180, 75, 255]);\n        ctx.emit_event(serde_json::json!({\"Sound\":{\"cue\":\"hit\",\"object\":1}}));\n    }\n}\n"
+  },
+  "shader_sources": {},
+  "asset_manifest": {
+    "assets": {
+      "a-1792021744685-18824-0": {
+        "dependencies": [],
+        "path": "assets/audio/attack.wav",
+        "sha256": "7c3eeb0e062f5d61cc1fb6ed00f70cfd12c51c11f62b8f71dc6e6bf3ad6f6dde"
+      },
+      "a-1792021744685-18824-1": {
+        "dependencies": [],
+        "path": "assets/audio/death.wav",
+        "sha256": "cac3b72c083fa78cac38b2c787998072584c4ba7c7b7db946063ae840baeac41"
+      },
+      "a-1792021744685-18824-2": {
+        "dependencies": [],
+        "path": "assets/audio/hit.wav",
+        "sha256": "d9e89346e1a2fc157434a418bca9c740a3ca3f0f66d355012bef35326b71859b"
+      },
+      "a-1792021744685-18824-3": {
+        "dependencies": [],
+        "path": "assets/audio/victory.wav",
+        "sha256": "5fd73ceb215ad8d6ef89f8147be6ce5b481a1ca4e364e0ebec2e211eb4797262"
+      },
+      "a-1792021744685-18824-4": {
+        "dependencies": [],
+        "path": "assets/models/demo_crystal.glb",
+        "sha256": "6845a04788a7b9e7bcb189c57773a502e23f6665ddec0f5761c643aa6a8853a4"
+      }
+    },
+    "schema_version": 1
+  },
+  "module_versions": {
+    "clock.time": "0.4.0",
+    "custom.rust": "0.4.0",
+    "custom.rust.update": "0.4.0",
+    "example.spin": "0.4.0",
+    "game.ai": "0.4.0",
+    "game.audio": "0.4.0",
+    "game.collision": "0.4.0",
+    "game.combat": "0.4.0",
+    "game.health": "0.4.0",
+    "game.input": "0.4.0",
+    "game.motion": "0.4.0",
+    "game.movement": "0.4.0",
+    "game.portals": "0.4.0",
+    "gpu.color_encode": "0.4.0",
+    "gpu.custom": "0.4.0",
+    "gpu.deferred": "0.4.0",
+    "gpu.depth_normal": "0.4.0",
+    "gpu.forward": "0.4.0",
+    "gpu.fxaa": "0.4.0",
+    "gpu.gbuffer": "0.4.0",
+    "gpu.ssao": "0.4.0",
+    "gpu.tonemap": "0.4.0",
+    "interface.input": "0.4.0",
+    "interface.output": "0.4.0",
+    "render.rasterize": "0.4.0",
+    "render.software3d": "0.4.0",
+    "render.vulkan": "0.4.0",
+    "scalar.value": "0.4.0",
+    "scene.extract": "0.4.0",
+    "viewport.output": "0.4.0",
+    "world.ecs": "0.4.0",
+    "world.objects": "0.4.0"
+  },
+  "engine_lock": {
+    "profile": {
+      "id": "module-engine.arpg",
+      "version": "1",
+      "fingerprint": "7114bec52eea80dfa1302a03601119715b5a49b0d0dfa9694138c142e41c6314"
+    },
+    "lock_fingerprint": "3e0feb55d3965ce96c313e15718cf8166dc17a427bd17a0cb228f87dd9082e24",
+    "component_schemas": {
+      "actor": {
+        "owner_module": "game.movement",
+        "version": "1",
+        "contract_hash": "ff11f2db523fc916d8ee3e58dfb7709d4b9ec963912fbdff3253b05c08fb120d"
+      },
+      "ai": {
+        "owner_module": "game.ai",
+        "version": "1",
+        "contract_hash": "59518e0b7445ed67baba909cb68da729597ef9c22e925c7558fd095d9525202c"
+      },
+      "boss": {
+        "owner_module": "game.health",
+        "version": "1",
+        "contract_hash": "ecfa2f104f7cfcd1989217aff29bcf29c5cb41c90374c7a9afc8df5b9d435dde"
+      },
+      "health": {
+        "owner_module": "game.health",
+        "version": "1",
+        "contract_hash": "3352bd6bf8b15f18447408f950fbb5f2b4e26497820a9b6469e6961a8c0d942f"
+      },
+      "material": {
+        "owner_module": "scene.extract",
+        "version": "1",
+        "contract_hash": "43c87a9c77d77045613c60f6e2d3e17341ffb3d99fa34f8eb5f15b15e537060b"
+      },
+      "melee": {
+        "owner_module": "game.combat",
+        "version": "1",
+        "contract_hash": "9c7725c43c88cae63269b4143d9a17392c5f2433fa9ec691e6fa6dbb97cd2890"
+      },
+      "mesh": {
+        "owner_module": "scene.extract",
+        "version": "1",
+        "contract_hash": "d93061cb532cc3d96581fa3a461186a9a014a5b3af415344f38dab831e37b69f"
+      },
+      "obstacle": {
+        "owner_module": "game.collision",
+        "version": "1",
+        "contract_hash": "67037276a6dadde46c3f81a3d27df7b9bb09ff7334837a825ba6d8c522ea8a97"
+      },
+      "persistent": {
+        "owner_module": "game.portals",
+        "version": "1",
+        "contract_hash": "a51f236f2d8e9e78270f9f84c466cfe968b8507d3e2ecb4652fccd7b12ba4244"
+      },
+      "player": {
+        "owner_module": "game.input",
+        "version": "1",
+        "contract_hash": "efb0517cfc7d4b714efa07722b32acfe634ab368e637cf2b5a4b3501d270c598"
+      },
+      "portal": {
+        "owner_module": "game.portals",
+        "version": "1",
+        "contract_hash": "58882a8921fb8c2f361ab42f1cf3c9d1ba0c63051dad27fb487aa926aab7d899"
+      }
+    },
+    "system_state_schemas": {
+      "custom.rust.update": "owned-rust-state-v1",
+      "game.ai": "game.ai/1",
+      "game.audio": "game.audio/1",
+      "game.collision": "game.collision/1",
+      "game.combat": "game.combat/1",
+      "game.health": "game.health/1",
+      "game.input": "game.input/1",
+      "game.movement": "game.movement/1",
+      "game.portals": "game.portals/1"
+    },
+    "sdk": {
+      "version": "0.4.0",
+      "data_api_fingerprint": "module-engine-data-api/v2"
+    }
+  },
+  "engine_profile": {
+    "blueprint": {
+      "available_modules": [
+        "clock.time",
+        "custom.rust",
+        "custom.rust.update",
+        "example.spin",
+        "game.ai",
+        "game.audio",
+        "game.collision",
+        "game.combat",
+        "game.health",
+        "game.input",
+        "game.motion",
+        "game.movement",
+        "game.portals",
+        "gpu.color_encode",
+        "gpu.custom",
+        "gpu.deferred",
+        "gpu.depth_normal",
+        "gpu.forward",
+        "gpu.fxaa",
+        "gpu.gbuffer",
+        "gpu.ssao",
+        "gpu.tonemap",
+        "interface.input",
+        "interface.output",
+        "render.rasterize",
+        "render.software3d",
+        "render.vulkan",
+        "scalar.value",
+        "scene.extract",
+        "viewport.output",
+        "world.ecs",
+        "world.objects"
+      ],
+      "custom_sources": {},
+      "default_execution": {
+        "resources": [],
+        "stages": []
+      },
+      "engine": {
+        "enabled_modules": [],
+        "exposure": {
+          "parameters": {
+            "exposure": {
+              "default": 1.0,
+              "label": "Exposure",
+              "target": {
+                "name": "exposure",
+                "pass": "tonemap"
+              },
+              "value_type": {
+                "Number": {
+                  "max": 8.0,
+                  "min": 0.01
+                }
+              }
+            }
+          },
+          "variants": {
+            "antialiasing": {
+              "default": "fxaa",
+              "label": "Antialiasing",
+              "options": {
+                "fxaa": {
+                  "commands": [
+                    {
+                      "SetEnabled": {
+                        "enabled": true,
+                        "pass": "aa"
+                      }
+                    }
+                  ],
+                  "label": "FXAA"
+                },
+                "off": {
+                  "commands": [
+                    {
+                      "SetEnabled": {
+                        "enabled": false,
+                        "pass": "aa"
+                      }
+                    }
+                  ],
+                  "label": "Off"
+                }
+              }
+            },
+            "tonemap": {
+              "default": "aces",
+              "label": "Tone mapping",
+              "options": {
+                "aces": {
+                  "commands": [
+                    {
+                      "SetParameter": {
+                        "name": "mode",
+                        "pass": "tonemap",
+                        "value": 1.0
+                      }
+                    }
+                  ],
+                  "label": "ACES"
+                },
+                "reinhard": {
+                  "commands": [
+                    {
+                      "SetParameter": {
+                        "name": "mode",
+                        "pass": "tonemap",
+                        "value": 0.0
+                      }
+                    }
+                  ],
+                  "label": "Reinhard"
+                }
+              }
+            }
+          }
+        },
+        "initialized": true
+      },
+      "root": {
+        "edges": [
+          {
+            "from_node": "world",
+            "from_port": "world",
+            "to_node": "extract",
+            "to_port": "world"
+          },
+          {
+            "from_node": "extract",
+            "from_port": "scene",
+            "to_node": "renderer",
+            "to_port": "scene"
+          },
+          {
+            "from_node": "renderer",
+            "from_port": "frame",
+            "to_node": "viewport",
+            "to_port": "frame"
+          }
+        ],
+        "nodes": [
+          {
+            "id": "world",
+            "label": "World",
+            "module": "world.ecs",
+            "params": {},
+            "position": [
+              70.0,
+              120.0
+            ]
+          },
+          {
+            "id": "extract",
+            "label": "Extract scene",
+            "module": "scene.extract",
+            "params": {},
+            "position": [
+              325.0,
+              120.0
+            ]
+          },
+          {
+            "id": "renderer",
+            "label": "Vulkan renderer",
+            "module": "render.vulkan",
+            "params": {},
+            "position": [
+              580.0,
+              120.0
+            ],
+            "subgraph": {
+              "edges": [
+                {
+                  "from_node": "scene",
+                  "from_port": "value",
+                  "to_node": "geometry",
+                  "to_port": "scene"
+                },
+                {
+                  "from_node": "geometry",
+                  "from_port": "color",
+                  "to_node": "ao",
+                  "to_port": "color"
+                },
+                {
+                  "from_node": "geometry",
+                  "from_port": "normals",
+                  "to_node": "ao",
+                  "to_port": "normals"
+                },
+                {
+                  "from_node": "geometry",
+                  "from_port": "depth",
+                  "to_node": "ao",
+                  "to_port": "depth"
+                },
+                {
+                  "from_node": "ao",
+                  "from_port": "color",
+                  "to_node": "tonemap",
+                  "to_port": "color"
+                },
+                {
+                  "from_node": "tonemap",
+                  "from_port": "color",
+                  "to_node": "aa",
+                  "to_port": "color"
+                },
+                {
+                  "from_node": "aa",
+                  "from_port": "color",
+                  "to_node": "encode",
+                  "to_port": "color"
+                },
+                {
+                  "from_node": "encode",
+                  "from_port": "frame",
+                  "to_node": "frame",
+                  "to_port": "value"
+                }
+              ],
+              "nodes": [
+                {
+                  "id": "scene",
+                  "label": "Scene input",
+                  "module": "interface.input",
+                  "params": {
+                    "data_type": "Scene3D",
+                    "port": "scene"
+                  },
+                  "position": [
+                    20.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "geometry",
+                  "label": "Geometry GPU pass",
+                  "module": "gpu.forward",
+                  "params": {},
+                  "position": [
+                    245.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "ao",
+                  "label": "ao",
+                  "module": "gpu.ssao",
+                  "params": {
+                    "strength": 0.8
+                  },
+                  "position": [
+                    695.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "tonemap",
+                  "label": "tonemap",
+                  "module": "gpu.tonemap",
+                  "params": {
+                    "exposure": 1.0,
+                    "mode": "aces"
+                  },
+                  "position": [
+                    920.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "aa",
+                  "label": "aa",
+                  "module": "gpu.fxaa",
+                  "params": {},
+                  "position": [
+                    1145.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "encode",
+                  "label": "encode",
+                  "module": "gpu.color_encode",
+                  "params": {},
+                  "position": [
+                    1370.0,
+                    90.0
+                  ]
+                },
+                {
+                  "id": "frame",
+                  "label": "Frame output",
+                  "module": "interface.output",
+                  "params": {
+                    "data_type": "Frame3D",
+                    "port": "frame"
+                  },
+                  "position": [
+                    1595.0,
+                    90.0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "id": "viewport",
+            "label": "Viewport",
+            "module": "viewport.output",
+            "params": {},
+            "position": [
+              840.0,
+              120.0
+            ]
+          }
+        ]
+      },
+      "shader_sources": {}
+    },
+    "identity": {
+      "fingerprint": "7114bec52eea80dfa1302a03601119715b5a49b0d0dfa9694138c142e41c6314",
+      "id": "module-engine.arpg",
+      "version": "1"
+    }
+  },
+  "engine": {
+    "initialized": true,
+    "enabled_modules": [],
+    "exposure": {
+      "parameters": {
+        "exposure": {
+          "label": "Exposure",
+          "value_type": {
+            "Number": {
+              "min": 0.01,
+              "max": 8.0
+            }
+          },
+          "default": 1.0,
+          "target": {
+            "pass": "tonemap",
+            "name": "exposure"
+          }
+        }
+      },
+      "variants": {
+        "tonemap": {
+          "label": "Tone mapping",
+          "default": "aces",
+          "options": {
+            "aces": {
+              "label": "ACES",
+              "commands": [
+                {
+                  "SetParameter": {
+                    "pass": "tonemap",
+                    "name": "mode",
+                    "value": 0.0
+                  }
+                }
+              ]
+            },
+            "reinhard": {
+              "label": "Reinhard",
+              "commands": [
+                {
+                  "SetParameter": {
+                    "pass": "tonemap",
+                    "name": "mode",
+                    "value": 1.0
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "project": {
+    "parameters": {},
+    "variants": {},
+    "rules": []
+  },
+  "properties": {
+    "active": {
+      "global": {},
+      "modules": {},
+      "objects": {},
+      "components": {}
+    },
+    "inactive": {
+      "global": {},
+      "modules": {},
+      "objects": {},
+      "components": {}
+    },
+    "detached_components": {}
+  },
+  "game": {
+    "entry_scene": "arena",
+    "scenes": {
+      "arena": {
+        "name": "Small monsters",
+        "objects": [
+          {
+            "object": {
+              "id": 1000,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  -0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  8.0,
+                  0.2,
+                  8.0
+                ]
+              },
+              "color": [
+                60,
+                78,
+                86,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1001,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -8.0,
+                  0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.2,
+                  1.0,
+                  8.0
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.20000000298023224,
+                  8.0
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1002,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  8.0,
+                  0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.2,
+                  1.0,
+                  8.0
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.20000000298023224,
+                  8.0
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1003,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.5,
+                  8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  8.0,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  8.0,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1004,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -4.75,
+                  0.5,
+                  -8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  3.25,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  3.25,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1005,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.75,
+                  0.5,
+                  -8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  3.25,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  3.25,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1006,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -3.0,
+                  0.4,
+                  1.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.8,
+                  0.8,
+                  0.8
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.800000011920929,
+                  0.800000011920929
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.0,
+                  5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.35,
+                  0.7,
+                  0.35
+                ]
+              },
+              "color": [
+                70,
+                170,
+                245,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "actor": {
+                "radius": 0.35,
+                "speed": 6.0,
+                "team": "player"
+              },
+              "health": {
+                "current": 100.0,
+                "maximum": 100.0
+              },
+              "melee": {
+                "arc": 1.9,
+                "cooldown": 0.35,
+                "damage": 28.0,
+                "duration": 0.12,
+                "range": 2.2,
+                "windup": 0.0
+              },
+              "mesh": {
+                "path": "assets/models/demo_crystal.glb"
+              },
+              "persistent": {},
+              "player": {}
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 10,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -5.0,
+                  0.0,
+                  -5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 11,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -2.6,
+                  0.0,
+                  -5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 12,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -0.19999981,
+                  0.0,
+                  -5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 13,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  2.2000003,
+                  0.0,
+                  -5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 14,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.6000004,
+                  0.0,
+                  -5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 15,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -5.0,
+                  0.0,
+                  -3.4
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 16,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -2.6,
+                  0.0,
+                  -3.4
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 17,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -0.19999981,
+                  0.0,
+                  -3.4
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 18,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  2.2000003,
+                  0.0,
+                  -3.4
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 19,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.6000004,
+                  0.0,
+                  -3.4
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 20,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -5.0,
+                  0.0,
+                  -1.8
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 21,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -2.6,
+                  0.0,
+                  -1.8
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 22,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -0.19999981,
+                  0.0,
+                  -1.8
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 23,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  2.2000003,
+                  0.0,
+                  -1.8
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 24,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.6000004,
+                  0.0,
+                  -1.8
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 25,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -5.0,
+                  0.0,
+                  -0.19999981
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 26,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -2.6,
+                  0.0,
+                  -0.19999981
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 27,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -0.19999981,
+                  0.0,
+                  -0.19999981
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 28,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  2.2000003,
+                  0.0,
+                  -0.19999981
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 29,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.6000004,
+                  0.0,
+                  -0.19999981
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.3,
+                  0.45,
+                  0.3
+                ]
+              },
+              "color": [
+                190,
+                80,
+                85,
+                255
+              ]
+            },
+            "prefab": "small-monster",
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1100,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.0,
+                  -7.2
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  1.4,
+                  0.08,
+                  0.5
+                ]
+              },
+              "color": [
+                60,
+                190,
+                140,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "portal": {
+                "radius": 1.1,
+                "requires_clear": true,
+                "scene": "boss",
+                "spawn": [
+                  0.0,
+                  0.0,
+                  5.0
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          }
+        ]
+      },
+      "boss": {
+        "name": "Boss arena",
+        "objects": [
+          {
+            "object": {
+              "id": 1000,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  -0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  8.0,
+                  0.2,
+                  8.0
+                ]
+              },
+              "color": [
+                60,
+                78,
+                86,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {},
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1001,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -8.0,
+                  0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.2,
+                  1.0,
+                  8.0
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.20000000298023224,
+                  8.0
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1002,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  8.0,
+                  0.5,
+                  0.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.2,
+                  1.0,
+                  8.0
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.20000000298023224,
+                  8.0
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1003,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.5,
+                  8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  8.0,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  8.0,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1004,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -4.75,
+                  0.5,
+                  -8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  3.25,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  3.25,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1005,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  4.75,
+                  0.5,
+                  -8.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  3.25,
+                  1.0,
+                  0.2
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  3.25,
+                  0.20000000298023224
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1006,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  -3.0,
+                  0.4,
+                  1.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.8,
+                  0.8,
+                  0.8
+                ]
+              },
+              "color": [
+                95,
+                104,
+                119,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "obstacle": {
+                "half_extents": [
+                  0.800000011920929,
+                  0.800000011920929
+                ]
+              }
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 1,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.0,
+                  5.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.35,
+                  0.7,
+                  0.35
+                ]
+              },
+              "color": [
+                70,
+                170,
+                245,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "actor": {
+                "radius": 0.35,
+                "speed": 6.0,
+                "team": "player"
+              },
+              "health": {
+                "current": 100.0,
+                "maximum": 100.0
+              },
+              "melee": {
+                "arc": 1.9,
+                "cooldown": 0.35,
+                "damage": 28.0,
+                "duration": 0.12,
+                "range": 2.2,
+                "windup": 0.0
+              },
+              "mesh": {
+                "path": "assets/models/demo_crystal.glb"
+              },
+              "persistent": {},
+              "player": {}
+            },
+            "overrides": {},
+            "references": {}
+          },
+          {
+            "object": {
+              "id": 100,
+              "parent": null,
+              "transform": {
+                "translation": [
+                  0.0,
+                  0.0,
+                  -3.0
+                ],
+                "rotation": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scale": [
+                  0.9,
+                  1.2,
+                  0.9
+                ]
+              },
+              "color": [
+                150,
+                65,
+                210,
+                255
+              ]
+            },
+            "prefab": null,
+            "components": {
+              "actor": {
+                "radius": 0.9,
+                "speed": 1.6,
+                "team": "enemy"
+              },
+              "ai": {
+                "aggro_radius": 20.0,
+                "kind": "boss"
+              },
+              "boss": {
+                "victory_on_death": true
+              },
+              "health": {
+                "current": 400.0,
+                "maximum": 400.0
+              },
+              "melee": {
+                "arc": 6.3,
+                "cooldown": 2.2,
+                "damage": 30.0,
+                "duration": 0.1,
+                "range": 3.0,
+                "windup": 1.0
+              }
+            },
+            "overrides": {},
+            "references": {}
+          }
+        ]
+      }
+    },
+    "prefabs": {
+      "small-monster": {
+        "color": [
+          190,
+          80,
+          85,
+          255
+        ],
+        "components": {
+          "actor": {
+            "radius": 0.36,
+            "speed": 2.1,
+            "team": "enemy"
+          },
+          "ai": {
+            "aggro_radius": 14.0,
+            "kind": "chase"
+          },
+          "health": {
+            "current": 36.0,
+            "maximum": 36.0
+          },
+          "melee": {
+            "arc": 1.5,
+            "cooldown": 1.25,
+            "damage": 7.0,
+            "duration": 0.15,
+            "range": 1.2,
+            "windup": 0.4
+          }
+        }
+      }
+    },
+    "execution": {
+      "resources": [
+        {
+          "name": "world",
+          "data_type": "GameWorld",
+          "external": true,
+          "initial": null
+        },
+        {
+          "name": "input",
+          "data_type": "GameInput",
+          "external": true,
+          "initial": null
+        },
+        {
+          "name": "events",
+          "data_type": "GameEvents",
+          "external": true,
+          "initial": []
+        },
+        {
+          "name": "previous",
+          "data_type": "Positions",
+          "external": false,
+          "initial": null
+        }
+      ],
+      "stages": [
+        {
+          "name": "Controllers",
+          "nodes": [
+            {
+              "id": "system-0",
+              "module": "game.input",
+              "params": {},
+              "bindings": {
+                "input": "input",
+                "world": "world"
+              },
+              "after": []
+            }
+          ]
+        },
+        {
+          "name": "AI",
+          "nodes": [
+            {
+              "id": "system-1",
+              "module": "game.ai",
+              "params": {},
+              "bindings": {
+                "world": "world"
+              },
+              "after": [
+                "system-0"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Movement",
+          "nodes": [
+            {
+              "id": "system-2",
+              "module": "game.movement",
+              "params": {},
+              "bindings": {
+                "previous": "previous",
+                "world": "world"
+              },
+              "after": [
+                "system-1"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Collisions",
+          "nodes": [
+            {
+              "id": "system-3",
+              "module": "game.collision",
+              "params": {},
+              "bindings": {
+                "previous": "previous",
+                "world": "world"
+              },
+              "after": [
+                "system-2"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Combat",
+          "nodes": [
+            {
+              "id": "system-4",
+              "module": "game.combat",
+              "params": {},
+              "bindings": {
+                "events": "events",
+                "world": "world"
+              },
+              "after": [
+                "system-3"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Health",
+          "nodes": [
+            {
+              "id": "system-5",
+              "module": "game.health",
+              "params": {},
+              "bindings": {
+                "events": "events",
+                "world": "world"
+              },
+              "after": [
+                "system-4"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Scenes",
+          "nodes": [
+            {
+              "id": "system-6",
+              "module": "game.portals",
+              "params": {},
+              "bindings": {
+                "events": "events",
+                "world": "world"
+              },
+              "after": [
+                "system-5"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Audio events",
+          "nodes": [
+            {
+              "id": "system-7",
+              "module": "game.audio",
+              "params": {},
+              "bindings": {
+                "events": "events"
+              },
+              "after": [
+                "system-6"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Custom game logic",
+          "nodes": [
+            {
+              "id": "game-controller",
+              "module": "custom.rust.update",
+              "params": {
+                "source_id": "game-controller"
+              },
+              "bindings": {
+                "events": "events",
+                "input": "input",
+                "world": "world"
+              },
+              "after": [
+                "system-7"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "audio_cues": {
+      "attack": "assets/audio/attack.wav",
+      "death": "assets/audio/death.wav",
+      "hit": "assets/audio/hit.wav",
+      "victory": "assets/audio/victory.wav"
+    }
+  }
+}

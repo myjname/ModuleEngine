@@ -44,6 +44,7 @@ pub fn service_requests(project: &GameProject) -> Result<Vec<HostServiceRequest>
     }
     Ok(vec![HostServiceRequest {
         id: "audio.wav".into(),
+        asset_references: project.audio_cues.values().cloned().collect(),
         config: serde_json::json!({
             "cues":project.audio_cues,
             "event":"Sound",
@@ -122,6 +123,10 @@ mod service_tests {
         let requests = (host_contribution().service_requests)(&project).unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].id, "audio.wav");
+        assert_eq!(
+            requests[0].asset_references,
+            BTreeSet::from(["asset://tone".into()])
+        );
         assert_eq!(
             requests[0].config,
             json!({"cues":{"hit":"asset://tone"},"event":"Sound","cue_field":"cue"})

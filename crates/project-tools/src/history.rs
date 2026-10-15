@@ -174,18 +174,38 @@ pub struct MigratedDocument {
     pub source_schema: u32,
     pub changed: bool,
 }
-/// Migration changes only the in-memory document; explicit save keeps a backup.
-pub fn load_document_migrating(path: &Path) -> Result<MigratedDocument, String> {
-    let mut document: GraphDocument = read_json(path)?;
-    let source_schema = document.schema_version;
-    if !(1..=SCHEMA_VERSION).contains(&source_schema) {
-        return Err(format!("Unsupported schema {source_schema}"));
+/// Parse the exact current document format without capturing locks or changing
+/// pins. Composition/profile/asset validation remains the caller's next step.
+pub fn read_document_strict(path: &Path) -> Result<GraphDocument, String> {
+    let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let value = crate::engine_migration::parse_source(&bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("Project needs an integer schema_version")?;
+    if version != u64::from(SCHEMA_VERSION) {
+        if (1..u64::from(SCHEMA_VERSION)).contains(&version) {
+            return Err(format!(
+                "Migration required: document format {version}; expected {SCHEMA_VERSION}. Use explicit migrate-copy"
+            ));
+        }
+        return Err(format!(
+            "Unsupported document format {version}; expected exact format {SCHEMA_VERSION}"
+        ));
     }
-    document.schema_version = SCHEMA_VERSION;
+    serde_json::from_value(value).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Compatibility name for existing callers. Normal reads are now strict;
+/// explicit legacy adapters live in prepare_legacy_migration.
+pub fn load_document_migrating(path: &Path) -> Result<MigratedDocument, String> {
+    let document = read_document_strict(path)?;
+    let source_schema = document.schema_version;
     Ok(MigratedDocument {
         document,
         source_schema,
-        changed: source_schema != SCHEMA_VERSION,
+        changed: false,
     })
 }
 /// Original survives serialization/write failures; replacing an existing file keeps a unique backup.
@@ -280,7 +300,7 @@ mod tests {
         assert_eq!(history.current(), &b);
     }
     #[test]
-    fn checkpoints_and_migration_preserve_original_bytes() {
+    fn strict_read_rejects_legacy_without_rewriting_and_checkpoints_preserve_source() {
         let root = std::env::temp_dir().join(format!("module-project-{}", unique_id()));
         fs::create_dir_all(&root).unwrap();
         let mut original = demo_document(WorldKind::Ecs);
@@ -288,12 +308,20 @@ mod tests {
         let path = root.join("project.json");
         let bytes = serde_json::to_vec(&original).unwrap();
         fs::write(&path, &bytes).unwrap();
-        let migrated = load_document_migrating(&path).unwrap();
+        assert!(
+            load_document_migrating(&path)
+                .unwrap_err()
+                .contains("Migration required")
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        let backup = save_document_with_backup(&path, &migrated.document)
-            .unwrap()
-            .unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let current = demo_document(WorldKind::Ecs);
+        let backup = save_document_with_backup(&path, &current).unwrap().unwrap();
         assert_eq!(fs::read(backup).unwrap(), bytes);
+        let loaded = load_document_migrating(&path).unwrap();
+        assert_eq!(loaded.document, current);
+        assert!(!loaded.changed);
+        assert_eq!(loaded.source_schema, SCHEMA_VERSION);
         let store = CheckpointStore::new(root.join("history"));
         let a = store.save("before", &original).unwrap();
         let mut edited = original.clone();

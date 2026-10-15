@@ -87,13 +87,50 @@ pub fn run(source: &Path, output: &Path) -> Result<Value, String> {
     project::save(&saved.path, &document)?;
     let compile = distribution.compile_root()?;
     let mut timings = vec![];
-    // Isolated imported model and authored two-arena gameplay data.
-    let arena = workspace_files::template_document(
+    // Use the actual New path so every arena scene and WAV cue owns its
+    // physical resources. The separate imported project's history stays intact.
+    let arena_project = workspace_files::new_project(
+        &saved.path,
+        &case.join("arena-benchmark"),
         &document,
-        workspace_files::ProjectTemplate::TwoArenas,
         &distribution,
+        workspace_files::ProjectTemplate::TwoArenas,
     )?;
-    for (label, mut benchmark) in [("single-model", document.clone()), ("two-arenas", arena)] {
+    let arena_root = arena_project
+        .path
+        .parent()
+        .ok_or("Arena project root missing")?;
+    let mut arena = arena_project.document;
+    let mut arena_manifest = AssetManifest::from_value(&arena.asset_manifest)?;
+    for (id, imported) in &manifest.assets {
+        if let Some(existing) = arena_manifest.assets.get(id)
+            && existing != imported
+        {
+            return Err(format!("Arena/imported asset ID collision: {id}"));
+        }
+        let imported_path = module_engine_project::normalize_relative(&imported.path)?;
+        for existing in arena_manifest.assets.values() {
+            let existing_path = module_engine_project::normalize_relative(&existing.path)?;
+            if existing_path.eq_ignore_ascii_case(&imported_path)
+                && (existing_path != imported_path
+                    || !existing.sha256.eq_ignore_ascii_case(&imported.sha256))
+            {
+                return Err(format!(
+                    "Arena/imported asset path collision: {imported_path}"
+                ));
+            }
+        }
+        arena_manifest.assets.insert(id.clone(), imported.clone());
+    }
+    // Verifies source hashes and refuses to overwrite a different physical file.
+    module_engine_project::export_assets(root, &manifest, arena_root)?;
+    arena_manifest.verify(arena_root)?;
+    arena.asset_manifest = serde_json::to_value(arena_manifest).map_err(|e| e.to_string())?;
+    project::save(&arena_project.path, &arena)?;
+    for (label, mut benchmark, benchmark_root) in [
+        ("single-model", document.clone(), root),
+        ("two-arenas", arena, arena_root),
+    ] {
         let game = benchmark.game.as_mut().ok_or("Benchmark game missing")?;
         let player = game
             .scenes
@@ -109,7 +146,7 @@ pub fn run(source: &Path, output: &Path) -> Result<Value, String> {
         for kind in [WorldKind::Objects, WorldKind::Ecs] {
             timings.push(drag_benchmark(
                 &benchmark,
-                root,
+                benchmark_root,
                 &distribution.package_root,
                 &compile,
                 kind,
@@ -388,6 +425,11 @@ fn drag_benchmark(
     label: &str,
 ) -> Result<Value, String> {
     let mut host = crate::game_host::new_at(document.clone(), root, backend, Some(compile), kind)?;
+    // The parity selector explicitly changes the graph route. Keep edits and
+    // history on that accepted document, rather than resubmitting the source
+    // document's other world implementation on every pointer move.
+    let authored = host.accepted_document().clone();
+    let baseline = authored.clone();
     host.services.set_enabled(false);
     let cached = host.content.load_model(reference)?;
     let slots: Vec<_> = host
@@ -406,8 +448,8 @@ fn drag_benchmark(
     view.camera.target = selected.translation;
     let mut harness = DragHarness {
         host,
-        authored: document.clone(),
-        history: SnapshotHistory::new(document.clone(), 10),
+        history: SnapshotHistory::new(authored.clone(), 10),
+        authored,
         ctx: egui::Context::default(),
         view,
         begins: 0,
@@ -484,7 +526,7 @@ fn drag_benchmark(
         .history
         .undo()
         .ok_or("Missing completed gesture Undo")?;
-    if &undone != document {
+    if undone != baseline {
         return Err("Gesture Undo did not restore the authored baseline".into());
     }
     harness.host.refresh_author_preview(&undone)?;

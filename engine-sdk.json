@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "sdk": {
+    "version": "0.4.0",
+    "data_api_fingerprint": "module-engine-data-api/v2"
+  }
+}

@@ -3,20 +3,44 @@
 use crate::activity::{ActivitySnapshot, BuildProgress};
 use crate::game_host::ShaderDependencyWatch;
 use module_engine_core::{ControlCommand, GraphDocument, ModuleRegistry, Runtime, ScriptContext};
-use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind, ScriptTick};
+use module_engine_script::{
+    CompiledScript, JobLease, ScriptCompiler, ScriptKind, ScriptTick, spawn_job,
+};
 use std::{
     cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::mpsc,
-    thread,
     time::Duration,
 };
 
 struct ScriptJob {
     source: String,
     kind: ScriptKind,
-    receiver: mpsc::Receiver<Result<CompiledScript, String>>,
+    _job: Option<JobLease>,
+    receiver: DeferredReceiver<Result<CompiledScript, String>>,
+}
+
+// A queued accepted result can own a worker/renderer. Move the receiver itself
+// off the UI, so closing a panel never drops that result or joins it there.
+struct DeferredReceiver<T: Send + 'static>(Option<mpsc::Receiver<T>>);
+impl<T: Send + 'static> From<mpsc::Receiver<T>> for DeferredReceiver<T> {
+    fn from(receiver: mpsc::Receiver<T>) -> Self {
+        Self(Some(receiver))
+    }
+}
+impl<T: Send + 'static> std::ops::Deref for DeferredReceiver<T> {
+    type Target = mpsc::Receiver<T>;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("live background receiver")
+    }
+}
+impl<T: Send + 'static> Drop for DeferredReceiver<T> {
+    fn drop(&mut self) {
+        if let Some(receiver) = self.0.take() {
+            let _ = spawn_job(move |_| drop(receiver));
+        }
+    }
 }
 
 pub struct Scripts {
@@ -116,24 +140,24 @@ impl Scripts {
         let progress = BuildProgress::new(format!("Rust: {id}"));
         progress.stage("Компиляция Rust");
         self.activities.insert(id.into(), progress.clone());
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        let (receiver, job) = spawn_job(move |cancelled| {
             let result = compiler
-                .compile_kind(&candidate, kind)
+                .compile_kind_cancellable(&candidate, kind, cancelled)
                 .and_then(|script| script.with_asset_root(&asset_root))
                 .map_err(|e| e.to_string());
             match &result {
                 Ok(_) => progress.stage("Код скомпилирован; ожидание применения"),
                 Err(error) => progress.fail(error.clone()),
             }
-            let _ = sender.send(result);
+            result
         });
         self.pending.insert(
             id.to_owned(),
             ScriptJob {
                 source,
                 kind,
-                receiver,
+                _job: Some(job),
+                receiver: receiver.into(),
             },
         );
         self.errors.remove(id);
@@ -435,7 +459,8 @@ struct PreviewJob {
     document: GraphDocument,
     backend_root: PathBuf,
     dependencies: ShaderDependencyWatch,
-    receiver: mpsc::Receiver<Result<Runtime, String>>,
+    _job: Option<JobLease>,
+    receiver: DeferredReceiver<Result<Runtime, String>>,
 }
 
 struct PreviewAttempt {
@@ -506,11 +531,15 @@ impl PreviewBuilder {
         // failed worker result reaches the UI. Capturing after failure misses it.
         let dependencies = ShaderDependencyWatch::new(document, backend_root);
         let registry = registry.clone();
+        let artifacts = module_engine_script::retain_test_artifacts(backend_root);
         let progress = BuildProgress::new("Предпросмотр Engine");
         progress.stage("Проверка графа, подготовка Vulkan и шейдеров");
         self.progress = Some(progress.clone());
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        let (receiver, job) = spawn_job(move |cancelled| {
+            let _artifacts = artifacts;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("Подготовка предпросмотра отменена".into());
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Runtime::from_document(&candidate, &registry).map_err(|e| e.to_string())
             }))
@@ -521,13 +550,14 @@ impl PreviewBuilder {
                 Ok(_) => progress.stage("GPU-кандидат подготовлен; ожидание применения"),
                 Err(error) => progress.fail(error.clone()),
             }
-            let _ = sender.send(result);
+            result
         });
         self.pending = Some(PreviewJob {
             document: document.clone(),
             backend_root: backend_root.to_path_buf(),
             dependencies,
-            receiver,
+            _job: Some(job),
+            receiver: receiver.into(),
         });
         self.awaiting_acceptance = None;
         self.rejected = None;
@@ -562,6 +592,7 @@ impl PreviewBuilder {
         };
         let candidate = self.pending.take().unwrap();
         if !candidate.document.execution_eq(document) || candidate.backend_root != backend_root {
+            let _ = spawn_job(move |_| drop(result));
             self.latest = None;
             self.request_at(document, registry, backend_root);
             return None;
@@ -591,6 +622,7 @@ mod tests {
     use super::*;
     use module_engine_core::{WorldKind, demo_document};
     use std::path::Path;
+    use std::thread;
 
     #[test]
     fn preview_progress_reports_success_only_after_acceptance_and_keeps_failures() {
@@ -611,7 +643,8 @@ mod tests {
                 &document,
                 &module_engine_vulkan::resource_root(),
             ),
-            receiver,
+            _job: None,
+            receiver: receiver.into(),
         });
         assert!(builder.poll(&document, &registry).is_some());
         assert_eq!(
@@ -642,7 +675,8 @@ mod tests {
             ScriptJob {
                 source: source.to_owned(),
                 kind: ScriptKind::Update,
-                receiver,
+                _job: None,
+                receiver: receiver.into(),
             },
         );
         let progress = BuildProgress::new(format!("Rust: {id}"));
@@ -665,7 +699,8 @@ mod tests {
                     &document,
                     &module_engine_vulkan::resource_root(),
                 ),
-                receiver,
+                _job: None,
+                receiver: receiver.into(),
             });
             let mut edited = document;
             if layout_only {
@@ -681,14 +716,12 @@ mod tests {
 
     #[test]
     fn failed_preview_retries_repaired_external_include_without_json_edit() {
-        let root = std::env::temp_dir().join(format!(
-            "preview-include-repair-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &std::env::temp_dir(),
+            "preview-include-repair",
+        )
+        .unwrap();
+        let root = artifacts.path().to_path_buf();
         std::fs::create_dir_all(root.join("assets/gpu")).unwrap();
         let root = root.canonicalize().unwrap();
         let header = root.join("assets/gpu/repair.hlsli");
@@ -754,10 +787,14 @@ mod tests {
             );
             assert!(builder.error.is_none());
             assert_eq!(document, original);
+            // Await the retry too; the directory must outlive both workers.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while builder.is_pending() {
+                builder.poll_at(&document, &registry, &root);
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
         }
-        let temporary = std::env::temp_dir().canonicalize().unwrap();
-        assert!(root.starts_with(&temporary) && root != temporary);
-        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn nongame_custom_resolves_asset_ids_in_selected_project_and_retains_state_on_relocation() {
@@ -767,9 +804,12 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        let work = root
-            .join(".work")
-            .join(format!("authoring-asset-context-{}", std::process::id()));
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &root.join(".work/test-temp"),
+            "authoring-asset-context",
+        )
+        .unwrap();
+        let work = artifacts.path();
         let first = work.join("first");
         let second = work.join("second");
         for (folder, data) in [(&first, b"ab".as_slice()), (&second, b"xyz".as_slice())] {
@@ -777,8 +817,7 @@ mod tests {
             std::fs::write(folder.join("assets/data/value.txt"), data).unwrap();
         }
         let source = "// module-engine-state: {\"schema\":\"asset-counter.v1\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { let path=ctx.asset_path(\"stable\").unwrap(); let value=std::fs::read(path).unwrap().len() as f64; ctx.state[\"ticks\"]=serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap()+1); ctx.set_render_parameter(\"tonemap\",\"exposure\",value); }";
-        let mut compiler = ScriptCompiler::new(root.clone(), work.join("compile"));
-        compiler.target_dir = Some(work.join("target"));
+        let compiler = ScriptCompiler::new(root.clone(), work.join("compile"));
         let compiled = compiler.compile(source).unwrap();
         let mut scripts = Scripts::with_root(root);
         scripts.install_for_test("assets", compiled);
@@ -831,11 +870,12 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        let work = root
-            .join(".work")
-            .join(format!("authoring-state-test-{}", std::process::id()));
-        let mut compiler = ScriptCompiler::new(root.clone(), work.clone());
-        compiler.target_dir = Some(work.join("target"));
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &root.join(".work/test-temp"),
+            "authoring-state-test",
+        )
+        .unwrap();
+        let compiler = ScriptCompiler::new(root.clone(), artifacts.path().to_path_buf());
         let source = "// module-engine-state: {\"schema\":\"preview.v1\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap() + 1); ctx.set_render_parameter(\"tonemap\",\"exposure\",1.4); }";
         let compiled = compiler.compile(source).unwrap();
         let mut scripts = Scripts::with_root(root);

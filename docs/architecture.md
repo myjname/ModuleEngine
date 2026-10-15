@@ -59,3 +59,5 @@ Undo/redo и checkpoints сохраняют GraphDocument, включая сце
 Merge нормализует обычные Graph nodes по ID и edges по входу. Сценовые arrays объектов и arrays стадий/узлов ExecutionGraph пока не имеют поэлементного ID-aware merge: пересекающиеся изменения такого массива дают конфликт целиком с base/ours/theirs. При конфликте preview сохраняет базу. Это граница текущего алгоритма, а не автоматическое объединение двух сцен.
 
 Подробнее: [формат](graph-format.md), [исполнение модулей](module-execution.md), [сцены](scenes.md), [редактор игры](editor-game.md), [контент](content.md), [Custom state](custom-state.md), [история](history-assets.md).
+
+Точные контракты формата 4, явная публикация профилей, миграция в копию и отдельные feature-selected Player описаны в [Engine profiles](engine-profiles.md). Общий Host не зависит от редактора; Player и редактор устанавливают одинаковые source-контракты через composition.

@@ -2,14 +2,14 @@
 
 Модульный движок на Rust с двумя рабочими пространствами. Engine задаёт архитектуру; Project настраивает игру в разрешённых движком границах. Нативный редактор показывает типизированные вложенные графы, реальную 3D-сцену Vulkan и редактируемый Rust/HLSL.
 
-Object и ECS — независимые модели хранения с общими контрактами сцены и команд. Forward/deferred пути исполняют геометрию, освещение, SSAO, ACES/Reinhard, FXAA и кодирование цвета. Custom Rust действительно компилируется; неизвестные визуальному редактору конструкции остаются обычным текстом.
+Изменяемый игровой мир хранится в ECS; Object остаётся сменным представлением через общие контракты сцены и команд. Forward/deferred пути исполняют геометрию, освещение, SSAO, ACES/Reinhard, FXAA и кодирование цвета. Custom Rust действительно компилируется; неизвестные визуальному редактору конструкции остаются обычным текстом.
 
 В 0.4 добавлен игровой маршрут: сохраняемые сцены и связанные шаблоны, общий граф исполняемых систем, ввод/столкновения/бой/события/звук, статические glTF/GLB и текстурированные материалы, постоянное состояние Rust Custom и отдельный Windows Player. Пример содержит две арены, 20 монстров и босса. [Назначение и устройство этапа](docs/next-stage.md), [редактор игры](docs/editor-game.md), [запуск и экспорт Player](docs/player.md).
 
 ~~~powershell
-.\outputs\ModuleEngine.exe game-project.json
-.\outputs\ModuleEngine.exe --play game-project.json
-.\outputs\ModuleEngine.exe --export-game game-project.json outputs\my-game
+.\outputs\ModuleEngine.exe game-project-v4.json
+.\outputs\ModuleEngine.exe --play game-project-v4.json
+.\outputs\ModuleEngine.exe --export-game game-project-v4.json outputs\my-game
 ~~~
 
 ![Project 0.4: Scene, Hierarchy, Inspector и Assets](docs/media/editor-scene-assets.png)
@@ -43,7 +43,9 @@ cargo run --locked -p module-engine-editor
 
 Doctor проверяет инструменты без загрузок. Явный .\scripts\bootstrap.ps1 -Restore восстанавливает закреплённые Rust/DXC и Cargo-зависимости локально в проекте. После создания локального Rust подключите . .\.tools\env.ps1 в новой PowerShell-сессии. MSVC/SDK и драйвер остаются требованиями хоста; холодная установка Rust отдельно не проверена.
 
-Без аргумента редактор предпочитает game-project.json в выбранном пакете/папке; если его нет, открывает project.json. Готовая авторская поставка 0.4 поэтому открывает игровой пример. Прежний project.json с кубами и полом доступен по явному пути. File → New Project создаёт новый JSON и ресурсы на текущем Engine в выбранной отдельной папке. В runtime-пакете Player.exe без аргументов открывает игру из player.json. CLI редактора принимает путь и --profile full|team.
+Форматы 1–3 открываются через явную миграцию в другой файл: `ModuleEngine.exe --migrate-copy game-project.json game-project-v4.json arpg`; исходник сохраняется. Подробности: [Engine profiles](docs/engine-profiles.md).
+
+Без аргумента редактор предпочитает созданную копию game-project-v4.json, затем game-project.json в выбранном пакете/папке; если его нет, открывает project.json. Старые файлы требуют явной миграции, в том числе прежний project.json с кубами и полом. File → New Project создаёт новый JSON и ресурсы на явно выбранном или унаследованном Engine. В runtime-пакете Player.exe без аргументов открывает игру из player.json. CLI редактора принимает путь и --profile full|team.
 
 ## Engine и Project
 

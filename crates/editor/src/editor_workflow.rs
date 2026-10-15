@@ -20,6 +20,8 @@ use std::{
 pub enum Command {
     NewEmpty,
     NewArenas,
+    NewPuzzle,
+    UpdateEngineContracts,
     Open,
     Save,
     SaveAs,
@@ -60,7 +62,7 @@ enum Action {
     Asset(BrowserAction),
     Open,
     OpenPath(PathBuf),
-    New(bool),
+    New(workspace_files::ProjectTemplate),
     Quit,
     Export(ExportKind),
     Check,
@@ -69,7 +71,7 @@ enum Action {
 enum DialogPurpose {
     Open,
     SaveAs,
-    New(bool),
+    New(workspace_files::ProjectTemplate),
     Export(ExportKind),
 }
 enum Outcome {
@@ -117,6 +119,7 @@ pub struct Workflow {
     job: Option<Job>,
     allow_close: bool,
     new_uses_saved: bool,
+    new_engine_choice: crate::engine_profiles::EngineChoice,
     report: String,
     show_report: bool,
     menu_rects: BTreeMap<String, egui::Rect>,
@@ -133,6 +136,7 @@ impl Workflow {
             job: None,
             allow_close: false,
             new_uses_saved: false,
+            new_engine_choice: Default::default(),
             report: String::new(),
             show_report: false,
             menu_rects: BTreeMap::new(),
@@ -358,6 +362,7 @@ impl Editor {
                         self.document.clone()
                     };
                 self.workflow.new_uses_saved = false;
+                let engine_choice = self.workflow.new_engine_choice;
                 self.spawn_job(
                     "Подготовка проекта и копирование ресурсов…",
                     ctx,
@@ -380,17 +385,16 @@ impl Editor {
                                     )?
                                 }
                             }
-                            DialogPurpose::New(empty) => workspace_files::new_project(
-                                &source,
-                                &path,
-                                &document,
-                                &distribution,
-                                if empty {
-                                    workspace_files::ProjectTemplate::Empty
-                                } else {
-                                    workspace_files::ProjectTemplate::TwoArenas
-                                },
-                            )?,
+                            DialogPurpose::New(template) => {
+                                workspace_files::new_project_with_choice(
+                                    &source,
+                                    &path,
+                                    &document,
+                                    &distribution,
+                                    template,
+                                    engine_choice,
+                                )?
+                            }
                             _ => unreachable!(),
                         };
                         Ok(Outcome::Saved(Box::new(saved)))
@@ -748,8 +752,10 @@ impl Editor {
             return false;
         }
         match command {
-            Command::ExportSource | Command::ExportTeam => self.can_author_engine(),
-            Command::NewEmpty | Command::NewArenas => {
+            Command::ExportSource | Command::ExportTeam | Command::UpdateEngineContracts => {
+                self.can_author_engine()
+            }
+            Command::NewEmpty | Command::NewArenas | Command::NewPuzzle => {
                 self.document.game.is_some() || self.can_author_engine()
             }
             Command::ExportPlayer => self.document.game.is_some(),
@@ -765,8 +771,34 @@ impl Editor {
         }
         self.cancel_active_scene_gestures();
         match command {
-            Command::NewEmpty => self.request_action(Action::New(true), ctx),
-            Command::NewArenas => self.request_action(Action::New(false), ctx),
+            Command::NewEmpty => {
+                self.request_action(Action::New(workspace_files::ProjectTemplate::Empty), ctx)
+            }
+            Command::NewArenas => self.request_action(
+                Action::New(workspace_files::ProjectTemplate::TwoArenas),
+                ctx,
+            ),
+            Command::NewPuzzle => {
+                self.request_action(Action::New(workspace_files::ProjectTemplate::Puzzle), ctx)
+            }
+            Command::UpdateEngineContracts => {
+                let backend = self
+                    .distribution
+                    .as_ref()
+                    .map(|d| d.package_root.clone())
+                    .unwrap_or_else(crate::project::source_root);
+                match crate::engine_profiles::update_contracts(&self.document, &backend) {
+                    Ok(candidate) => {
+                        self.history
+                            .record("Publish Engine profile and exact contracts", &candidate);
+                        self.document = candidate;
+                        self.authoring_intent = true;
+                        self.changed(true);
+                        self.status="Engine profile published locally; exact active contracts updated. Save to persist.".into();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
             Command::Open => self.request_action(Action::Open, ctx),
             Command::Save => {
                 if !self.save_workflow() {
@@ -833,11 +865,40 @@ impl Editor {
         egui::MenuBar::new().ui(ui, |ui| {
             let menu = ui.menu_button("File", |ui| {
                 ui.menu_button("New Project", |ui| {
+                    use crate::engine_profiles::{EngineChoice, ProfileKind};
+                    let selected =
+                        module_engine_project::EngineProfile::from_document(&self.document)
+                            .ok()
+                            .map(|p| p.identity.id)
+                            .unwrap_or_else(|| "unresolved".into());
+                    ui.label(format!("Engine for New: {selected}"));
+                    ui.add_enabled_ui(!self.workflow.blocks_document_edits(), |ui| {
+                        ui.radio_value(
+                            &mut self.workflow.new_engine_choice,
+                            EngineChoice::InheritCurrent,
+                            "Inherit current Engine",
+                        );
+                        ui.add_enabled_ui(self.can_author_engine(), |ui| {
+                            for kind in
+                                [ProfileKind::Neutral, ProfileKind::Arpg, ProfileKind::Puzzle]
+                            {
+                                ui.radio_value(
+                                    &mut self.workflow.new_engine_choice,
+                                    EngineChoice::Selected(kind),
+                                    format!("Choose {} Engine", kind.label()),
+                                );
+                            }
+                        });
+                    });
+                    ui.separator();
                     if self.menu_item(ui, Command::NewEmpty, "Empty scene", "Ctrl+N") {
                         commands.push(Command::NewEmpty);
                     }
                     if self.menu_item(ui, Command::NewArenas, "Two arenas example", "") {
                         commands.push(Command::NewArenas);
+                    }
+                    if self.menu_item(ui, Command::NewPuzzle, "Crate puzzle example", "") {
+                        commands.push(Command::NewPuzzle);
                     }
                 });
                 if self.menu_item(ui, Command::Open, "Open Project…", "Ctrl+O") {
@@ -915,6 +976,10 @@ impl Editor {
             let menu = ui.menu_button("Tools", |ui| {
                 for (command, label) in [
                     (Command::Check, "Check Project"),
+                    (
+                        Command::UpdateEngineContracts,
+                        "Publish Engine profile / update contracts",
+                    ),
                     (Command::ExportPlayer, "Build Windows Player…"),
                     (Command::Diagnostics, "Diagnostics"),
                     (Command::ProjectSettings, "Project Settings"),
@@ -1463,6 +1528,16 @@ mod workflow_tests {
                 document.game = Some(module_engine_two_arenas::demo_project());
             }
             let installation = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            crate::engine_profiles::finish_template(
+                &mut document,
+                if game {
+                    crate::engine_profiles::ProfileKind::Arpg
+                } else {
+                    crate::engine_profiles::ProfileKind::Neutral
+                },
+                &installation,
+            )
+            .unwrap();
             if let Some(game) = &document.game {
                 for path in game.audio_cues.values() {
                     let target = root.join(path);
@@ -1735,7 +1810,11 @@ mod workflow_tests {
         let path = editor.path.clone();
         let history_len = editor.history.entries().len();
         editor.complete_dialog(DialogPurpose::Open, None, &ctx);
-        editor.complete_dialog(DialogPurpose::New(true), None, &ctx);
+        editor.complete_dialog(
+            DialogPurpose::New(workspace_files::ProjectTemplate::Empty),
+            None,
+            &ctx,
+        );
         assert_eq!(editor.path, path);
         assert_eq!(editor.document, working);
         assert_eq!(editor.history.entries().len(), history_len);

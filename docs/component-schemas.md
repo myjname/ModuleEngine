@@ -78,8 +78,8 @@ component can therefore add fields and resource dependencies without a named
 Inspector panel or exporter branch. The existing mesh/model importer remains a
 specific render-content workflow.
 
-The shipped source example is `crates/editor/src/source_modules.rs`. Its single
-`install` call in `host::composition_at` registers `example.spin` with speed,
+The shipped source example is `crates/player/src/source_modules.rs`. Its single
+`install` call in the shared Player composition registers `example.spin` with speed,
 axis and enabled fields and a system that issues real transform commands. Add
 its system to Gameplay Systems, bind `world` to the GameWorld resource and apply
 the execution draft while stopped. Inspector can then attach Rotation to an
@@ -87,6 +87,8 @@ object even in an otherwise empty scene. Change radians/second and axis, apply
 fields, save and run. The tests exercise the actual Inspector Apply button,
 save/reopen, simulation and Full source export without a special panel branch.
 
-Data schema versions are currently registered metadata. Separate persisted
-schema locks and checked data migrations are the later profile/version stage;
-implementation pins already include active consumers and component owners.
+Format4 persists schema owner/version/contract hashes alongside module and
+system-state pins. Ordinary loading and saving validate these exact contracts;
+Full profile publication and known legacy migration are explicit operations.
+See [Engine profiles](engine-profiles.md). The editor source_modules test module
+exercises the same shared registration rather than installing a second catalog.

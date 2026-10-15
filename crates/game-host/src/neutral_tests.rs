@@ -420,6 +420,7 @@ impl Fixture {
                             vec![HostServiceRequest {
                                 id: "fixture.service".into(),
                                 config: Value::Null,
+                                asset_references: BTreeSet::new(),
                             }]
                         } else {
                             vec![]
@@ -490,6 +491,7 @@ impl Fixture {
             }],
         });
         document.game = Some(game);
+        approve_fixture(&composition, &mut document);
         Self {
             root,
             document,
@@ -532,6 +534,14 @@ impl Fixture {
             .params = json!({"generation":generation,"tint":tint});
         document
     }
+}
+/// Explicit approval while constructing a new source fixture/profile choice.
+fn approve_fixture(composition: &CompositionContext, document: &mut GraphDocument) {
+    let profile = document.engine_lock.as_ref().unwrap().profile.clone();
+    composition
+        .capture_lock(document, profile, Some(SdkIdentity::current()))
+        .unwrap()
+        .apply_to(document);
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -652,6 +662,7 @@ fn switching_renderer_module_uses_the_target_factory_instead_of_live_preparation
         .find(|n| n.id == "renderer")
         .unwrap()
         .module = "render.second_cpu".into();
+    approve_fixture(&fixture.composition, &mut candidate);
     host.sync_document(&candidate).unwrap();
     assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 0);
@@ -740,6 +751,417 @@ fn registered_cpu_renderer_reuses_unchanged_configuration_and_validates_all_pres
         2,
         "Unknown executable fields must remain in the conservative key"
     );
+}
+
+#[test]
+fn exact_locks_reject_before_factories_and_all_candidate_paths_preserve_last_good() {
+    let fixture = Fixture::new(false);
+    let build = |document: GraphDocument| {
+        GameHost::build(
+            document,
+            fixture.composition.clone(),
+            fixture.options(RenderMode::Graph, HostServiceRegistry::new(), false),
+            None,
+        )
+    };
+    let mut missing = fixture.document.clone();
+    missing.engine_lock = None;
+    assert!(
+        build(missing.clone())
+            .err()
+            .unwrap()
+            .contains("explicit engine lock")
+    );
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 0);
+    let mut missing_pin = fixture.document.clone();
+    missing_pin.module_versions.remove("fixture.step");
+    assert!(build(missing_pin).err().unwrap().contains("fixture.step"));
+    let mut missing_state = fixture.document.clone();
+    missing_state
+        .engine_lock
+        .as_mut()
+        .unwrap()
+        .system_state_schemas
+        .remove("fixture.step");
+    assert!(
+        build(missing_state)
+            .err()
+            .unwrap()
+            .contains("state schema pin")
+    );
+    let mut missing_schema = fixture.document.clone();
+    missing_schema
+        .engine_lock
+        .as_mut()
+        .unwrap()
+        .component_schemas
+        .remove("mesh");
+    assert!(build(missing_schema).err().unwrap().contains("schema pin"));
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 0);
+
+    let mut host = fixture.host();
+    let state = host.session.state().clone();
+    let accepted = host.accepted_document().clone();
+    let revision = host.presentation_revision();
+    assert!(host.sync_document(&missing).is_err());
+    assert!(host.sync_document_deferred(&missing).is_err());
+    assert!(host.poll_preparation(&missing).is_err());
+    assert!(host.refresh_author_preview(&missing).is_err());
+    assert_eq!(host.session.state(), &state);
+    assert_eq!(host.accepted_document(), &accepted);
+    assert_eq!(host.presentation_revision(), revision);
+    assert!(!host.has_pending_preparation());
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 0);
+
+    let mut new_active = accepted.clone();
+    new_active
+        .engine
+        .enabled_modules
+        .insert("game.motion".into());
+    assert!(
+        host.sync_document(&new_active)
+            .unwrap_err()
+            .contains("game.motion")
+    );
+    assert!(!new_active.module_versions.contains_key("game.motion"));
+    assert_eq!(host.accepted_document(), &accepted);
+}
+
+#[test]
+fn worker_rejects_unpinned_activity_after_roundtrip_then_accepts_explicit_lock_update() {
+    let fixture = Fixture::new(false);
+    let mut worker = GameWorker::spawn(fixture.host(), None);
+    send(
+        &worker,
+        WorkerCommand::SetViewport {
+            width: 160,
+            height: 100,
+        },
+    );
+    let initial = snapshot(&mut worker, |status| status.frame.is_some());
+    let mut candidate = fixture.document.clone();
+    candidate
+        .engine
+        .enabled_modules
+        .insert("game.motion".into());
+    let ordinary_saved = serde_json::to_vec(&candidate).unwrap();
+    let reopened: GraphDocument = serde_json::from_slice(&ordinary_saved).unwrap();
+    assert!(!reopened.module_versions.contains_key("game.motion"));
+    send(
+        &worker,
+        WorkerCommand::UpdateDocument {
+            document: Arc::new(reopened.clone()),
+            authoring: false,
+            request: 70,
+        },
+    );
+    let rejected = snapshot(&mut worker, |status| {
+        status
+            .results
+            .iter()
+            .any(|reply| reply.request == 70 && reply.result.is_err())
+    });
+    assert_eq!(
+        rejected.accepted_document.as_ref(),
+        initial.accepted_document.as_ref()
+    );
+    assert_eq!(rejected.state.as_ref(), initial.state.as_ref());
+    assert_eq!(
+        rejected.frame.as_ref().unwrap().rgba,
+        initial.frame.as_ref().unwrap().rgba
+    );
+    assert_eq!(rejected.epoch, initial.epoch);
+    assert!(
+        rejected
+            .preparation_error
+            .as_ref()
+            .unwrap()
+            .contains("game.motion")
+    );
+    assert_eq!(
+        serde_json::to_vec(&reopened).unwrap(),
+        ordinary_saved,
+        "rejection cannot rewrite the edited source document"
+    );
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 0);
+
+    let selected_profile = ProfileIdentity::from_payload(
+        "fixture.explicit-update",
+        "2",
+        &json!({"allows":"game.motion"}),
+    )
+    .unwrap();
+    let update = fixture
+        .composition
+        .capture_lock(
+            &reopened,
+            selected_profile.clone(),
+            Some(SdkIdentity::current()),
+        )
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), ordinary_saved);
+    let mut approved = reopened;
+    update.apply_to(&mut approved);
+    assert_eq!(
+        approved.engine_lock.as_ref().unwrap().profile,
+        selected_profile
+    );
+    send(
+        &worker,
+        WorkerCommand::UpdateDocument {
+            document: Arc::new(approved.clone()),
+            authoring: false,
+            request: 71,
+        },
+    );
+    let accepted = snapshot(&mut worker, |status| {
+        status
+            .results
+            .iter()
+            .any(|reply| reply.request == 71 && reply.result.is_ok())
+    });
+    assert_eq!(accepted.accepted_document.as_ref(), &approved);
+    assert!(accepted.preparation_error.is_none());
+    assert_eq!(accepted.state.as_ref(), initial.state.as_ref());
+    assert_eq!(accepted.epoch, initial.epoch);
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 0);
+    stop(&worker);
+}
+
+#[test]
+fn compatible_locks_cannot_publish_a_new_execution_or_world_without_replacing_session() {
+    let fixture = Fixture::new(false);
+    let mut host = fixture.host();
+    let accepted = host.accepted_document().clone();
+    let state = host.session.state().clone();
+    let project = host.session.project().clone();
+    let revision = host.presentation_revision();
+    let frame = host.render(160, 100).unwrap();
+    let mut removed_schedule = accepted.clone();
+    removed_schedule.game.as_mut().unwrap().execution = ExecutionGraph::default();
+    approve_fixture(&fixture.composition, &mut removed_schedule);
+    let mut changed_parameters = accepted.clone();
+    changed_parameters.game.as_mut().unwrap().execution.stages[0].nodes[0].params["configuration"] =
+        json!("changed");
+    approve_fixture(&fixture.composition, &mut changed_parameters);
+    let mut changed_world = accepted.clone();
+    changed_world
+        .root
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "world")
+        .unwrap()
+        .module = "world.objects".into();
+    approve_fixture(&fixture.composition, &mut changed_world);
+    let mut changed_world_identity = accepted.clone();
+    changed_world_identity
+        .root
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "world")
+        .unwrap()
+        .id = "another-world".into();
+    for edge in &mut changed_world_identity.root.edges {
+        if edge.from_node == "world" {
+            edge.from_node = "another-world".into();
+        }
+    }
+    for rejected in [
+        &removed_schedule,
+        &changed_parameters,
+        &changed_world,
+        &changed_world_identity,
+    ] {
+        fixture
+            .composition
+            .validate_lock(rejected, Some(&SdkIdentity::current()))
+            .unwrap();
+        assert!(
+            host.sync_document(rejected)
+                .unwrap_err()
+                .contains("complete host")
+        );
+        assert!(
+            host.sync_document_deferred(rejected)
+                .unwrap_err()
+                .contains("complete host")
+        );
+        assert!(
+            host.poll_preparation(rejected)
+                .unwrap_err()
+                .contains("complete host")
+        );
+        assert!(!host.has_pending_preparation());
+        assert_eq!(host.accepted_document(), &accepted);
+        assert_eq!(host.session.project(), &project);
+        assert_eq!(host.session.state(), &state);
+        assert_eq!(host.presentation_revision(), revision);
+        assert_eq!(host.render(160, 100).unwrap().rgba, frame.rgba);
+    }
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 0);
+    let renderer_only = fixture.candidate(4, [255, 30, 30]);
+    host.sync_document(&renderer_only).unwrap();
+    assert_eq!(host.accepted_document(), &renderer_only);
+    assert_eq!(host.session.project(), &project);
+    assert_eq!(host.session.state(), &state);
+    assert_ne!(host.render(160, 100).unwrap().rgba, frame.rgba);
+    assert_eq!(fixture.control.candidates.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 1);
+    let source = Fixture::new(true);
+    let mut source_host = source.host();
+    let mut parameters = source.document.clone();
+    parameters
+        .root
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "world")
+        .unwrap()
+        .params = json!({"seed":7});
+    source
+        .composition
+        .validate_lock(&parameters, Some(&SdkIdentity::current()))
+        .unwrap();
+    assert!(
+        source_host
+            .sync_document(&parameters)
+            .unwrap_err()
+            .contains("complete host")
+    );
+    assert!(
+        source_host
+            .sync_document_deferred(&parameters)
+            .unwrap_err()
+            .contains("complete host")
+    );
+    assert_eq!(source_host.accepted_document(), &source.document);
+    assert_eq!(source.control.world_factories.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn optional_profile_payload_and_active_sdk_identity_are_checked_before_device_creation() {
+    let fixture = Fixture::new(false);
+    let build = |document: GraphDocument| {
+        GameHost::build(
+            document,
+            fixture.composition.clone(),
+            fixture.options(RenderMode::Graph, HostServiceRegistry::new(), false),
+            None,
+        )
+    };
+    let mut malformed = fixture.document.clone();
+    malformed.engine_profile = Some(json!({"invalid":"profile"}));
+    assert!(
+        build(malformed)
+            .err()
+            .unwrap()
+            .contains("Saved Engine profile")
+    );
+
+    let mut selected = fixture.document.clone();
+    let profile = module_engine_project::EngineProfile::new(
+        "fixture.selected",
+        "1",
+        module_engine_project::EngineBlueprint {
+            root: selected.root.clone(),
+            engine: selected.engine.clone(),
+            custom_sources: selected.custom_sources.clone(),
+            shader_sources: selected.shader_sources.clone(),
+            default_execution: selected.game.as_ref().unwrap().execution.clone(),
+            available_modules: fixture.composition.module_versions().into_keys().collect(),
+        },
+    )
+    .unwrap();
+    selected.engine_profile = Some(profile.document_value().unwrap());
+    fixture
+        .composition
+        .capture_lock(
+            &selected,
+            profile.identity.clone(),
+            Some(SdkIdentity::current()),
+        )
+        .unwrap()
+        .apply_to(&mut selected);
+    let mut tampered = selected.clone();
+    tampered.engine_profile.as_mut().unwrap()["blueprint"]["custom_sources"] =
+        json!({"added":"source"});
+    assert!(build(tampered).err().unwrap().contains("fingerprint"));
+    let mut wrong_sdk = fixture.document.clone();
+    wrong_sdk
+        .engine
+        .enabled_modules
+        .insert("custom.rust".into());
+    approve_fixture(&fixture.composition, &mut wrong_sdk);
+    wrong_sdk
+        .engine_lock
+        .as_mut()
+        .unwrap()
+        .sdk
+        .as_mut()
+        .unwrap()
+        .data_api_fingerprint = "module-engine-data-api/v1".into();
+    assert!(
+        build(wrong_sdk)
+            .err()
+            .unwrap()
+            .contains("data/API identity")
+    );
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 0);
+    let mut host = build(selected).unwrap();
+    let accepted = host.accepted_document().clone();
+    let mut invalid = accepted.clone();
+    invalid.engine_profile.as_mut().unwrap()["identity"]["version"] = json!("different");
+    assert!(host.sync_document(&invalid).is_err());
+    assert_eq!(host.accepted_document(), &accepted);
+}
+
+#[test]
+fn headless_selection_requires_world_activity_and_explicit_pin_without_creating_backends() {
+    let fixture = Fixture::new(false);
+    let mut document = fixture.document.clone();
+    document.root.nodes.retain(|node| node.id == "world");
+    document.root.edges.clear();
+    approve_fixture(&fixture.composition, &mut document);
+    let error = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+            HostServiceRegistry::new(),
+            false,
+        ),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("engine.enabled_modules"), "{error}");
+    document.engine.enabled_modules.insert("world.ecs".into());
+    approve_fixture(&fixture.composition, &mut document);
+    document.module_versions.remove("world.ecs");
+    assert!(
+        GameHost::build(
+            document,
+            fixture.composition.clone(),
+            fixture.options(
+                RenderMode::Headless {
+                    world_node: "world".into()
+                },
+                HostServiceRegistry::new(),
+                false
+            ),
+            None,
+        )
+        .err()
+        .unwrap()
+        .contains("world.ecs")
+    );
+    assert_eq!(fixture.control.factories.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.control.world_factories.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -937,6 +1359,7 @@ fn headless_and_omitted_services_skip_all_renderer_and_optional_service_factorie
     let mut document = fixture.document.clone();
     document.root.nodes.retain(|node| node.id == "world");
     document.root.edges.clear();
+    document.engine.enabled_modules.insert("world.ecs".into());
     request_service(&mut document);
     document
         .game
@@ -948,6 +1371,7 @@ fn headless_and_omitted_services_skip_all_renderer_and_optional_service_factorie
         .objects[0]
         .components
         .insert("mesh".into(), json!({"path":"assets/does-not-exist.glb"}));
+    approve_fixture(&fixture.composition, &mut document);
     let mut host = GameHost::build(
         document,
         fixture.composition.clone(),
@@ -1121,6 +1545,50 @@ fn worker_retains_last_good_cpu_frame_metadata_on_draw_and_candidate_failure() {
     assert!(wakes.load(Ordering::SeqCst) > 0);
     stop(&worker);
     assert!(retired.load(Ordering::Acquire));
+}
+
+#[test]
+fn cancelled_renderer_preparation_retires_result_off_caller_and_preserves_last_good() {
+    let fixture = Fixture::new(false);
+    let mut host = fixture.host();
+    let before = host.render(80, 60).unwrap();
+    let state = host.session.state().clone();
+    let document = host.accepted_document().clone();
+    let candidate = fixture.candidate(17, [0, 100, 200]);
+    fixture
+        .control
+        .delayed_generation
+        .store(17, Ordering::SeqCst);
+    host.sync_document_deferred(&candidate).unwrap();
+    wait_until(|| fixture.control.started.lock().unwrap().contains(&17));
+    // The factory is deliberately blocked. Cancellation must return before
+    // release, so a UI-thread join here would deadlock this regression.
+    host.cancel_preparation();
+    assert!(!host.has_pending_preparation());
+    assert_eq!(host.accepted_document(), &document);
+    assert_eq!(host.session.state(), &state);
+    fixture.control.release();
+    wait_until(|| {
+        fixture
+            .control
+            .dropped
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| *generation == 17)
+    });
+    assert!(
+        fixture
+            .control
+            .dropped
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(generation, _)| *generation == 17)
+            .all(|(_, owner)| *owner != thread::current().id())
+    );
+    assert_eq!(host.render(80, 60).unwrap().rgba, before.rgba);
+    assert_eq!(host.accepted_document(), &document);
 }
 
 struct FailingService;

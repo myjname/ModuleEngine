@@ -32,10 +32,8 @@ const CONTROLLER: &str = r#"fn update(ctx: &mut ScriptContext) {
 pub fn integration_self_check(output: &Path) -> Result<Value, String> {
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
     let registry = crate::host::registry()?;
-    let mut forward_document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Forward);
-    let mut deferred_document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Deferred);
-    crate::project::stamp_module_versions(&mut forward_document, &registry);
-    crate::project::stamp_module_versions(&mut deferred_document, &registry);
+    let forward_document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Forward);
+    let deferred_document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Deferred);
     save_document(output, "gpu-forward.json", &forward_document)?;
     save_document(output, "gpu-deferred.json", &deferred_document)?;
 
@@ -355,7 +353,7 @@ pub fn integration_self_check(output: &Path) -> Result<Value, String> {
         .find(|n| n.id == "controller")
         .ok_or("Missing controller node")?;
     controller.params["code_layout"] = json!({exposure_node: [123.0, 456.0]});
-    crate::project::stamp_module_versions(&mut controller_document, &registry);
+    publish_fixture(&mut controller_document)?;
     save_document(output, "gpu-controller.json", &controller_document)?;
     let mut controller_ecs_document = controller_document.clone();
     controller_ecs_document
@@ -530,8 +528,7 @@ pub fn integration_self_check(output: &Path) -> Result<Value, String> {
         "Adopted world did not execute the new tone graph",
     )?;
 
-    let persistence =
-        persistence_checks(output, &registry, &controller_document, &compute_document)?;
+    let persistence = persistence_checks(output, &controller_document, &compute_document)?;
     let report = json!({
         "backend": objects.backend_name(), "frame_size": [WIDTH, HEIGHT], "simulation_time": before.time,
         "registered_runtime": true, "objects_ecs_forward_equal": true, "objects_ecs_deferred_equal": true,
@@ -615,6 +612,7 @@ fn custom_compute_document(base: &GraphDocument) -> Result<GraphDocument, String
     document
         .shader_sources
         .insert("custom_compute".into(), demo_custom_compute_source());
+    publish_fixture(&mut document)?;
     Ok(document)
 }
 fn custom_raster_document(base: &GraphDocument) -> Result<GraphDocument, String> {
@@ -640,6 +638,7 @@ fn custom_raster_document(base: &GraphDocument) -> Result<GraphDocument, String>
     document
         .shader_sources
         .insert("custom_scene".into(), demo_custom_raster_source());
+    publish_fixture(&mut document)?;
     Ok(document)
 }
 fn controller_document(base: &GraphDocument, source: &str) -> Result<GraphDocument, String> {
@@ -675,15 +674,22 @@ fn exposure(value: f64) -> ControlCommand {
 fn save_document(output: &Path, name: &str, document: &GraphDocument) -> Result<(), String> {
     crate::project::save(&output.join(name), document)
 }
+/// Diagnostic constructors explicitly publish their authored Engine contracts.
+/// Save/read and runtime validation continue to validate without repairing them.
+fn publish_fixture(document: &mut GraphDocument) -> Result<(), String> {
+    crate::engine_profiles::finish_template(
+        document,
+        crate::engine_profiles::ProfileKind::Neutral,
+        &module_engine_vulkan::resource_root(),
+    )
+}
 fn persistence_checks(
     output: &Path,
-    registry: &ModuleRegistry,
     controller: &GraphDocument,
     compute: &GraphDocument,
 ) -> Result<Value, String> {
     let mut base = controller.clone();
     base.shader_sources = compute.shader_sources.clone();
-    crate::project::stamp_module_versions(&mut base, registry);
     let mut edited = base.clone();
     edited
         .custom_sources

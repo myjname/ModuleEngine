@@ -15,8 +15,8 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Complete |
 | 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Complete |
 | 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Complete |
-| 7 | Profiles, exact versions, separate Player | Safe checked migration and relocated exports for both games | Pending |
-| 8 | Acceptance, performance and author documentation | Serial tests, isolated UI/worker/export checks and scoped performance reports | Pending |
+| 7 | Profiles, exact versions, separate Player | Safe checked migration and relocated exports for both games | Complete |
+| 8 | Acceptance, performance and author documentation | Serial tests, isolated UI/worker/export checks and scoped performance reports | Complete; strict native FPS target remains unmet |
 
 Each stage must build and pass its relevant checks before dependent stages.
 Module dependencies do not change the authored execution order. The registry is
@@ -256,3 +256,123 @@ passed with warnings denied. Final whole-workspace acceptance remains stage 8.
 The standalone native feature-selected Player and exact profile/migration
 metadata are still stage 7. The authored game bytes remain unchanged and the
 canonical installed editor executable has not been republished yet.
+
+## Stage 7 result
+
+Format4 retains an explicitly selected/inherited Engine blueprint and exact
+implementation/schema/state/SDK contracts. Ordinary Open/Save/Play/export do not
+repair missing pins. Full contract publication is explicit; Team remains frozen.
+New validates actual game contracts before publication, including refusal of an
+empty scene under a Team Puzzle schedule. Project controllers are separate from
+Engine-owned sources. Unknown inactive payloads remain opaque during resource
+collection and Save As.
+
+Legacy formats require a different copy and a shipped known-contract adapter.
+The real authored v3 game migrated, reopened unchanged, preserved its controller
+text, legacy interaction and effective boss victory rule. Wrong active legacy
+versions and absent/wrong pins reject before publication. The original project,
+binding and resource hashes were verified unchanged. A local usable copy is
+`game-project-v4.json`; the original remains archived in place.
+
+Player is a separate package with default-empty native features. The production
+exporter built Puzzle with `puzzle,ui,vulkan` and ARPG with
+`arpg,audio,ui,vulkan`. Both copied packages passed actual graphical and headless
+execution from relocated folders with spaces and an unrelated cwd, without
+compilers/SDK/sources. Hashes were unchanged by verification. Cargo normal-edge
+trees independently confirm Puzzle omits ARPG/audio and default Player/Host omit
+UI/Vulkan/game packages. Transitive manifest dependencies are retained. Team ships
+checked audio/silent variants when its frozen schedule permits either.
+
+Evidence: `stage7-workflow/engine-profile-report.json`, `stage7-*-tree.txt`.
+
+## Stage 8 result
+
+Final source acceptance:513 workspace tests passed, with the latency acceptance
+and old catch-up diagnostic intentionally excluded from that run. The isolated
+slow-UI case then passed1 separately:514 distinct passing unit cases. All doc-test
+groups, workspace/all-targets Clippy with warnings denied, formatting and rustdoc
+with warnings denied passed. Final logs are `stage8-validation-steps.json` and
+its referenced files. Earlier failed attempts remain evidence, not green checks.
+
+Actual CPU, Vulkan/Rust integration, settings, editor workflow, Game, worker,
+Scene/Assets and independent Puzzle CLI acceptance passed. The real Game check
+compared180 input frames, complete state/events and rendered pixels for both
+world adapters, then exercised defeat/restart, scene transition and boss victory.
+Release Scene/Assets also passed after parity fixtures were made consistent with
+the accepted world route and imported-resource manifest. The author project and
+its original resources remained unchanged. Existing-folder Save As now stages
+inside that writable folder rather than requiring access to its parent.
+
+Owned background jobs cancel without UI joins and drain after the native window
+closes. Windows Job Objects replace taskkill startup. Tests cover normal child
+and descendant cancellation, and child termination when its owner exits without
+Rust destructors. Cleanup waits for owners before releasing files. Strict Host
+validation avoids one redundant complete lock pass; no pins/checks were removed.
+
+Interactive scheduling removes an artificial minimum1ms deadline sleep. Native
+measurements count every egui pass and separate worker completion, UI observation
+and frame age. The unchanged60FPS mean/p95 target remains false in the real Player
+measurement below; this stage completes the audit, not that performance target.
+Game simulation/rendering still share one worker. The authored Scene viewport
+retains on-demand synchronous rendering/readback, and arbitrary slow code still
+slows game time even while the window remains responsive. Linux, a clean-machine
+installation, physical display latency and a security sandbox are not verified.
+
+## Release measurements (2026-10-15)
+
+Actual native Editor:90 graph-pan frames per Stop/Play phase. Document, actor
+and Custom identities were retained; simulation advanced during Play; no errors.
+UI handler p95:2.305ms stopped,2.6406ms playing (max3.7594ms playing). The window
+was focused; OS visibility was unknown. No physical mouse/display latency is
+claimed and percentages versus differently focused historical runs are not used.
+
+Release Scene/Assets:120 real pointer updates per scenario/world, one completed
+gesture/Undo record. Single-model p95:3.2512ms Object,3.2656ms ECS; two arenas:
+4.7804ms Object,4.8835ms ECS. Decoded model and Custom slots stayed the same.
+These are headless egui+Vulkan/readback/texture-enqueue timings, not compositor
+presentation. The earlier58–84ms debug samples are retained and not compared
+as a release regression.
+
+Separate native Player:120 distinct completed frames,1920x1080,20 live enemies,
+Playing throughout, zero errors. Legacy mean59.9941FPS, UI143.5028 callbacks/s;
+worker completion intervals of observed frames p9518.1092ms, max19.8636ms.
+UI first-observation intervals p9520.9343ms; observed frame age p956.9929ms,
+max7.4719ms. Missing completion timestamps:0. **target_met=false** under the
+unchanged16.667ms mean/p95 criteria. The baseline independent run was also false
+(p9518.5009ms); this small observed difference is not a controlled speedup claim.
+Physical display scanout and clean-machine portability remain unmeasured.
+
+Evidence: `stage8-editor-native/report.json`,
+`stage8-player-native/native-frame-report.json`,
+`stage8-scene-assets-release/scene-assets-report.json`.
+
+## Artifact maintenance
+
+After native inventory confirmed no builds/apps/workers, the explicit reviewed
+cleanup selected439 reproducible targets. Apply with `-KeepBlocked` removed437,
+with no partial failures, and retained two old fixtures whose PID6500 is occupied
+by unrelated UnityAutoQuitter. It did not stop that process. Removed logical file
+lengths:86,408,072,202B. Observed E: available-space delta:86,439,370,752B is a
+whole-volume observation, not exclusive attribution. After scan:
+target/debug45,687,352,420B; .work4,634,904,805B; outputs4,840,302,435B.
+Source/project/assets/reports/exports were outside the deletion scope.
+
+New candidates share dependency products and automatically prune their unique
+Cargo products, retain active/last-good owners and at most16 completed failures.
+Test guards and tracked jobs retain source directories until all owners exit.
+The maintenance script defaults to dry run, requires native inventory, rejects
+reparse points and uses a fixed allowlist. Twenty-one isolated safety checks
+passed. See [maintenance policy](artifact-maintenance.md), `cleanup-applied.json`
+and `cleanup-after.json`. The first slow read-only scan was interrupted; no
+mutation ran in that scan.
+
+After final tests, native inventory found no owned builds/apps/workers. The
+exact `target/debug` tree had no reparse entries. An explicit offline/locked
+`cargo clean --profile dev --target-dir E:\ModuleEngine\target` removed11088
+reproducible files (46,785,121,976 logical bytes; Cargo reported43.6GiB).
+Original/migrated project and both published/release EXE hashes stayed unchanged.
+The combined two cleanups removed133,193,194,178 logical bytes (about124.05GiB).
+Release binaries, offline dependency cache, Custom dependency cache, source,
+project data and all verification reports remain. The next debug build is cold.
+This native-cache reset is explicit maintenance, not an automatic launch action.
+See `stage8-native-dev-cache-clean.json` and its Cargo log.

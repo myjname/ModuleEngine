@@ -1631,10 +1631,12 @@ pub fn validate_project_edit(
         || candidate.engine != baseline.engine
         || candidate.shader_sources != baseline.shader_sources
         || candidate.module_versions != baseline.module_versions
+        || candidate.engine_lock != baseline.engine_lock
+        || candidate.engine_profile != baseline.engine_profile
         || candidate.game.as_ref().map(|g| &g.execution)
             != baseline.game.as_ref().map(|g| &g.execution)
     {
-        return Err("Project edits cannot change the locked engine architecture, exposure, shader sources or module versions".into());
+        return Err("Project edits cannot change the locked engine architecture, exposure, shader sources, module versions or selected profile/contract lock".into());
     }
     if candidate.custom_sources.keys().collect::<Vec<_>>()
         != baseline.custom_sources.keys().collect::<Vec<_>>()
@@ -2435,6 +2437,14 @@ mod tests {
             document.engine.enabled_modules.insert("game.motion".into());
             document.engine.exposure = default_renderer_exposure("tonemap", "aa");
             attach_component(&mut document, &registry, 1, "game.motion").unwrap();
+            let composition =
+                crate::CompositionContext::new(registry.clone(), crate::SystemRegistry::builtin())
+                    .unwrap();
+            let profile = document.engine_lock.as_ref().unwrap().profile.clone();
+            composition
+                .capture_lock(&document, profile, Some(crate::SdkIdentity::current()))
+                .unwrap()
+                .apply_to(&mut document);
             let mut runtime = Runtime::from_document(&document, &registry).unwrap();
             runtime.apply_project_settings(1.5).unwrap();
             let mut context = ScriptContext::new(0.0, 0.1, runtime.objects().unwrap());
@@ -2516,6 +2526,27 @@ mod tests {
             "fn update(ctx:&mut ScriptContext){ctx.remove(1);}".into(),
         );
         validate_project_edit(&candidate, &baseline, &registry).unwrap();
+        let cosmetic = candidate.clone();
+        candidate
+            .engine_lock
+            .as_mut()
+            .unwrap()
+            .profile
+            .version
+            .push_str(" changed");
+        assert!(
+            validate_project_edit(&candidate, &baseline, &registry)
+                .unwrap_err()
+                .contains("profile/contract lock")
+        );
+        candidate = cosmetic.clone();
+        candidate.engine_profile = Some(json!({"selected":"another engine"}));
+        assert!(
+            validate_project_edit(&candidate, &baseline, &registry)
+                .unwrap_err()
+                .contains("profile/contract lock")
+        );
+        candidate = cosmetic;
         candidate.root.nodes[0].module = "world.ecs".into();
         assert!(validate_project_edit(&candidate, &baseline, &registry).is_err());
         candidate = baseline.clone();
@@ -2535,7 +2566,8 @@ mod tests {
         assert!(
             crate::validate_graph(&restored, &registry)
                 .iter()
-                .all(|d| d.severity != crate::Severity::Error)
+                .any(|d| d.severity == crate::Severity::Error
+                    && d.message.contains("Migration required"))
         );
     }
 }

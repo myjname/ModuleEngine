@@ -6,9 +6,10 @@ mod assets_ui;
 mod authoring;
 mod canvas;
 mod distribution;
+mod engine_profile_verification;
+mod engine_profiles;
 mod game_host;
 mod game_package;
-mod game_presentations;
 mod game_templates;
 mod game_ui;
 mod game_verification;
@@ -25,6 +26,7 @@ mod scene_assets_verification;
 mod scene_tools;
 mod scene_view_ui;
 mod settings_verification;
+#[cfg(test)]
 mod source_modules;
 mod ui_capture;
 mod verification;
@@ -80,10 +82,55 @@ fn run() -> Result<(), String> {
         println!("  module-engine-editor --editor-benchmark game-project.json output-folder");
         println!("  module-engine-editor --game-worker-check game-project.json output-folder");
         println!("  module-engine-editor --new-puzzle puzzle-project.json");
+        println!(
+            "  module-engine-editor --migrate-copy source.json new-project.json neutral|arpg|puzzle"
+        );
         println!("  module-engine-editor --puzzle-check puzzle-project.json output-folder");
         return Ok(());
     }
     match args.first().map(String::as_str) {
+        Some("--inspect-installed-contracts") => {
+            let output = Path::new(
+                args.get(1)
+                    .ok_or("Provide contract inventory JSON destination")?,
+            );
+            fs::write(
+                output,
+                serde_json::to_vec_pretty(&engine_profiles::inspected_contracts(
+                    &project::source_root(),
+                )?)
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        Some("--migrate-copy") => {
+            let source = Path::new(args.get(1).ok_or("Provide legacy source JSON")?);
+            let destination = Path::new(args.get(2).ok_or("Provide a different destination JSON")?);
+            let kind = engine_profiles::ProfileKind::parse(
+                args.get(3)
+                    .ok_or("Explicitly select Engine: neutral, arpg or puzzle")?,
+            )?;
+            let (saved, report) = workspace_files::migrate_copy(source, destination, kind)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"path":saved.path,"migration":report})
+                )
+                .map_err(|e| e.to_string())?
+            );
+            return Ok(());
+        }
+        Some("--engine-profile-check") => {
+            let source = Path::new(args.get(1).ok_or("Provide the legacy author project")?);
+            let output = Path::new(args.get(2).ok_or("Provide a new evidence directory")?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine_profile_verification::run(source, output)?)
+                    .map_err(|e| e.to_string())?
+            );
+            return Ok(());
+        }
         Some("--puzzle-check") => {
             let source = Path::new(args.get(1).ok_or("Provide puzzle project JSON")?);
             let folder = Path::new(args.get(2).ok_or("Provide separate verification folder")?);
@@ -154,11 +201,7 @@ fn run() -> Result<(), String> {
                 package.validate_document(&document)?;
                 (document, Some(package.compile_root()?))
             };
-            let kind = if document.root.nodes.iter().any(|n| n.module == "world.ecs") {
-                WorldKind::Ecs
-            } else {
-                WorldKind::Objects
-            };
+            let kind = game_host::world_kind(&document)?;
             return player::run_benchmark(document, root, compile.as_deref(), kind, &folder);
         }
         Some("--game-check") => {
@@ -222,11 +265,7 @@ fn run() -> Result<(), String> {
                 package.validate_document(&document)?;
                 (document, Some(package.compile_root()?))
             };
-            let kind = if document.root.nodes.iter().any(|n| n.module == "world.ecs") {
-                WorldKind::Ecs
-            } else {
-                WorldKind::Objects
-            };
+            let kind = game_host::world_kind(&document)?;
             return player::run(document, root, compile.as_deref(), kind);
         }
         Some("--export-game") => {
@@ -253,7 +292,10 @@ fn run() -> Result<(), String> {
                 .get(1)
                 .map(PathBuf::from)
                 .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
-            let document = project::read(&root.join("project.json"))?;
+            let document: GraphDocument = serde_json::from_slice(
+                &fs::read(root.join("project.json")).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
             distribution::write_full_manifest(&root, &document)?;
             println!("Complete source inventory recorded: {}", root.display());
             return Ok(());
@@ -316,11 +358,7 @@ fn run() -> Result<(), String> {
             let distribution = distribution::detect(Path::new(path), &document, requested_profile)?;
             distribution.validate_document(&document)?;
             if document.game.is_some() {
-                let kind = if document.root.nodes.iter().any(|n| n.module == "world.ecs") {
-                    WorldKind::Ecs
-                } else {
-                    WorldKind::Objects
-                };
+                let kind = game_host::world_kind(&document)?;
                 let asset_root = Path::new(path)
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
@@ -367,11 +405,7 @@ fn run() -> Result<(), String> {
             let distribution = distribution::detect(Path::new(path), &document, requested_profile)?;
             distribution.validate_document(&document)?;
             if document.game.is_some() {
-                let kind = if document.root.nodes.iter().any(|n| n.module == "world.ecs") {
-                    WorldKind::Ecs
-                } else {
-                    WorldKind::Objects
-                };
+                let kind = game_host::world_kind(&document)?;
                 let mut host = crate::game_host::new(
                     document,
                     Path::new(path)
@@ -464,11 +498,7 @@ fn run() -> Result<(), String> {
         && root.join("player.json").is_file()
     {
         let document = game_package::validate_package(root)?;
-        let kind = if document.root.nodes.iter().any(|n| n.module == "world.ecs") {
-            WorldKind::Ecs
-        } else {
-            WorldKind::Objects
-        };
+        let kind = game_host::world_kind(&document)?;
         return player::run(document, root, None, kind);
     }
     let path = args
@@ -536,7 +566,9 @@ fn default_project_path() -> PathBuf {
         && root.join(distribution::MANIFEST_NAME).is_file()
         && root.join("project.json").is_file()
     {
-        return if root.join("game-project.json").is_file() {
+        return if root.join("game-project-v4.json").is_file() {
+            root.join("game-project-v4.json")
+        } else if root.join("game-project.json").is_file() {
             root.join("game-project.json")
         } else {
             root.join("project.json")
@@ -544,7 +576,9 @@ fn default_project_path() -> PathBuf {
     }
     let current = PathBuf::from("project.json");
     if current.is_file() {
-        return if Path::new("game-project.json").is_file() {
+        return if Path::new("game-project-v4.json").is_file() {
+            PathBuf::from("game-project-v4.json")
+        } else if Path::new("game-project.json").is_file() {
             PathBuf::from("game-project.json")
         } else {
             current
@@ -554,7 +588,9 @@ fn default_project_path() -> PathBuf {
         && root.join(distribution::MANIFEST_NAME).is_file()
         && root.join("project.json").is_file()
     {
-        return if root.join("game-project.json").is_file() {
+        return if root.join("game-project-v4.json").is_file() {
+            root.join("game-project-v4.json")
+        } else if root.join("game-project.json").is_file() {
             root.join("game-project.json")
         } else {
             root.join("project.json")
@@ -755,8 +791,8 @@ fn reject_same_render_path(input: &Path, output: &Path) -> Result<(), String> {
 fn self_check(folder: PathBuf) -> Result<(), String> {
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let registry = ModuleRegistry::builtin();
-    let objects = demo_document(WorldKind::Objects);
-    let ecs = demo_document(WorldKind::Ecs);
+    let objects = self_check_document(WorldKind::Objects)?;
+    let ecs = self_check_document(WorldKind::Ecs)?;
     let mut a = Runtime::from_document(&objects, &registry).map_err(|e| e.to_string())?;
     let mut b = Runtime::from_document(&ecs, &registry).map_err(|e| e.to_string())?;
     advance(&objects, &mut a, 120)?;
@@ -791,9 +827,38 @@ fn self_check(folder: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+fn self_check_document(kind: WorldKind) -> Result<GraphDocument, String> {
+    let mut document = demo_document(kind);
+    engine_profiles::finish_template(
+        &mut document,
+        engine_profiles::ProfileKind::Neutral,
+        &module_engine_vulkan::resource_root(),
+    )?;
+    Ok(document)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn self_check_constructor_publishes_neutral_profile_before_public_persistence() {
+        let backend = module_engine_vulkan::resource_root();
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let document = self_check_document(kind).unwrap();
+            engine_profiles::validate(&document, &backend).unwrap();
+            assert_eq!(
+                document.engine_lock.as_ref().unwrap().profile.id,
+                "module-engine.neutral"
+            );
+            assert!(document.engine_profile.is_some());
+            assert_eq!(
+                Runtime::from_document(&document, &ModuleRegistry::builtin())
+                    .unwrap()
+                    .world_kind(),
+                kind
+            );
+        }
+    }
     #[test]
     fn render_only_scripts_do_not_require_optional_world_queries() {
         struct OldProvider;
@@ -821,6 +886,7 @@ mod tests {
             .find(|n| n.id == "world")
             .unwrap()
             .module = "test.old".into();
+        crate::project::stamp_module_versions(&mut document, &registry);
         let runtime = Runtime::from_document(&document, &registry).unwrap();
         let context = script_context(&runtime, 1., 0.1, false).unwrap();
         assert!(!context.world_queries_available && context.objects.is_empty());

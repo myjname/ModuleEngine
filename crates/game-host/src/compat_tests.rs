@@ -1,8 +1,8 @@
 //! Original GameHost regressions against the extracted generic host.
 use super::test_support::{
-    active_graph, aim_at, audio_played, demo_document, game_registry, graphics_only_change,
-    modules, new_host, new_host_at, render_graph, retained_render_controls, selected_render_graph,
-    validate_candidate_controls, validate_render_settings_at,
+    active_graph, aim_at, approve_fixture, audio_played, demo_document, game_registry,
+    graphics_only_change, modules, new_host, new_host_at, render_graph, retained_render_controls,
+    selected_render_graph, validate_candidate_controls, validate_render_settings_at,
 };
 use super::*;
 use module_engine_vulkan::{RenderPath, VulkanRenderer};
@@ -658,6 +658,7 @@ fn author_preview_reuses_content_and_custom_and_rejects_failed_edits_transaction
             WorldKind::Custom => unreachable!(),
         }
         .into();
+        approve_fixture(&mut document).unwrap();
         let mut host = new_host(document.clone(), &root, Some(&root), kind).unwrap();
         host.services.set_enabled(false);
         host.camera.target = [1., 0., 1.];

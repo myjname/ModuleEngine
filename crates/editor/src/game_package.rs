@@ -1,23 +1,302 @@
 //! Standalone game export: runtime executable, authored data, assets and compiled code.
 use crate::game_host::{render_graph, script_ids};
 use module_engine_content::ContentLibrary;
-use module_engine_core::{GraphDocument, WorldKind};
+use module_engine_core::GraphDocument;
 use module_engine_project::{AssetManifest, hash_file, resolve_relative};
 use module_engine_script::{ScriptCompiler, ScriptKind};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlayerManifest {
-    pub schema_version: u32,
-    pub engine_version: String,
-    pub project: String,
-    pub files: BTreeMap<String, String>,
+pub use module_engine_player::package::PlayerManifest;
+
+pub(crate) fn selected_features(
+    document: &GraphDocument,
+    backend: &Path,
+) -> Result<BTreeSet<String>, String> {
+    let composition = crate::host::composition_at(backend)?;
+    crate::engine_profiles::validate(document, backend)?;
+    let activity = composition.activity(document)?;
+    let mut features = BTreeSet::from(["ui".into()]);
+    let required = composition.required_contracts(document)?;
+    let builtin = module_engine_core::SystemRegistry::builtin();
+    for (feature, catalog) in [
+        ("arpg", module_engine_arpg::registry()),
+        ("puzzle", module_engine_project_puzzle::registry()),
+    ] {
+        if required
+            .module_versions
+            .keys()
+            .any(|id| builtin.module_version(id).is_none() && catalog.module_version(id).is_some())
+        {
+            features.insert(feature.into());
+        }
+    }
+    if activity.modules.contains("render.vulkan") {
+        features.insert("vulkan".into());
+    }
+    if let Some(game) = &document.game {
+        for contribution in composition
+            .systems
+            .active_game_contributions(&game.execution)
+        {
+            match contribution.id.as_str() {
+                "arpg.presentation" => {
+                    features.insert("arpg".into());
+                }
+                "puzzle.presentation" => {
+                    features.insert("puzzle".into());
+                }
+                _ => {}
+            }
+            for request in (contribution.service_requests)(game)? {
+                if request.id == "audio.wav" {
+                    features.insert("audio".into());
+                } else {
+                    return Err(format!(
+                        "Player has no compiled feature mapping for service '{}'",
+                        request.id
+                    ));
+                }
+            }
+        }
+    }
+    let subset = module_engine_player::composition_for_features(backend, &features)?;
+    module_engine_project::EngineProfile::from_document(document)?.validate_with_sdk(
+        document,
+        &subset,
+        Some(&module_engine_core::SdkIdentity::current()),
+    )?;
+    Ok(features)
+}
+#[cfg(test)]
+pub fn native_feature_key(document: &GraphDocument, backend: &Path) -> Result<String, String> {
+    Ok(selected_features(document, backend)?
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("-"))
+}
+/// Build a real feature-selected binary from the checked Full sources, or use
+/// the matching checked native Player delivered with a Team installation.
+pub fn build_native_player(document: &GraphDocument, backend: &Path) -> Result<PathBuf, String> {
+    build_native_player_variant(document, backend, selected_features(document, backend)?)
+}
+/// Team data may add/remove cues without changing its frozen audio system.
+/// Deliver both exact native variants so either permitted project can export.
+pub fn team_feature_sets(
+    document: &GraphDocument,
+    backend: &Path,
+) -> Result<Vec<BTreeSet<String>>, String> {
+    let base = selected_features(document, backend)?;
+    let activity = crate::host::composition_at(backend)?.activity(document)?;
+    if activity.modules.contains("game.audio") {
+        let mut without = base.clone();
+        without.remove("audio");
+        let mut with = base;
+        with.insert("audio".into());
+        Ok(vec![without, with])
+    } else {
+        Ok(vec![base])
+    }
+}
+pub fn team_player_variants(
+    document: &GraphDocument,
+    backend: &Path,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    team_feature_sets(document, backend)?
+        .into_iter()
+        .map(|features| {
+            let key = features.iter().cloned().collect::<Vec<_>>().join("-");
+            Ok((
+                key,
+                build_native_player_variant(document, backend, features)?,
+            ))
+        })
+        .collect()
+}
+fn build_native_player_variant(
+    document: &GraphDocument,
+    backend: &Path,
+    features: BTreeSet<String>,
+) -> Result<PathBuf, String> {
+    let subset = module_engine_player::composition_for_features(backend, &features)?;
+    module_engine_project::EngineProfile::from_document(document)?.validate_with_sdk(
+        document,
+        &subset,
+        Some(&module_engine_core::SdkIdentity::current()),
+    )?;
+    let key = features.iter().cloned().collect::<Vec<_>>().join("-");
+    let prebuilt = backend.join("players").join(&key).join("Player.exe");
+    if prebuilt.is_file() {
+        let manifest: crate::distribution::PackageManifest = serde_json::from_slice(
+            &fs::read(backend.join(crate::distribution::MANIFEST_NAME))
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let relative = format!("players/{key}/Player.exe");
+        if manifest.backend_files.get(&relative) != Some(&hash_file(&prebuilt)?) {
+            return Err("Prebuilt Player is not covered by the checked backend inventory".into());
+        }
+        return Ok(prebuilt);
+    }
+    if !backend.join("crates/player/Cargo.toml").is_file() {
+        return Err(format!(
+            "This installation lacks the '{key}' native Player; rebuild the Team package from Full sources"
+        ));
+    }
+    fs::create_dir_all(backend.join(".work/player-build")).map_err(|e| e.to_string())?;
+    // One shared dependency target; serialize build + immutable snapshot creation
+    // across exporting editor/CLI processes. Windows closes this lease on crash.
+    #[cfg(windows)]
+    let _build_lease = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let started = std::time::Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(backend.join(".work/player-build/build.lock"))
+            {
+                Ok(file) => break file,
+                Err(error)
+                    if error.raw_os_error() == Some(32)
+                        && started.elapsed() < std::time::Duration::from_secs(600) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(error) => return Err(format!("Native Player build lease: {error}")),
+            }
+        }
+    };
+    let compiler = ScriptCompiler::new(backend.into(), backend.join(".work/player-build"));
+    let target = backend.join(".work/player-native-target");
+    let mut command = std::process::Command::new(
+        compiler
+            .cargo_binary
+            .as_deref()
+            .unwrap_or_else(|| Path::new("cargo")),
+    );
+    command
+        .current_dir(backend)
+        .args([
+            "build",
+            "--offline",
+            "--locked",
+            "--release",
+            "-p",
+            "module-engine-player",
+            "--bin",
+            "module-engine-player",
+            "--no-default-features",
+            "--features",
+        ])
+        .arg(features.iter().cloned().collect::<Vec<_>>().join(","))
+        .arg("--target-dir")
+        .arg(&target);
+    if let Some(path) = compiler.cargo_home {
+        command.env("CARGO_HOME", path);
+    }
+    if let Some(path) = compiler.rustc_binary {
+        command.env("RUSTC", path);
+    }
+    if let Some(path) = compiler.rustup_home {
+        command.env("RUSTUP_HOME", path);
+    }
+    if let Some(toolchain) = compiler.rustup_toolchain {
+        command.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    command.env("CARGO_INCREMENTAL", "0");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("Player Cargo launch: {e}"))?;
+    let log = String::from_utf8_lossy(&output.stderr);
+    fs::create_dir_all(backend.join(".work/player-build")).map_err(|e| e.to_string())?;
+    fs::write(
+        backend.join(format!(".work/player-build/{key}.log")),
+        output.stderr.as_slice(),
+    )
+    .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("Selected Player build failed: {log}"));
+    }
+    let executable = target.join("release/module-engine-player.exe");
+    if !executable.is_file() {
+        return Err("Cargo did not produce the selected Player executable".into());
+    }
+    let snapshot = backend
+        .join(".work/player-build")
+        .join(&key)
+        .join(hash_file(&executable)?)
+        .join("Player.exe");
+    if !snapshot.is_file() {
+        fs::create_dir_all(snapshot.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::copy(&executable, &snapshot).map_err(|e| e.to_string())?;
+    }
+    if hash_file(&snapshot)? != hash_file(&executable)? {
+        return Err("Native Player snapshot integrity mismatch".into());
+    }
+    Ok(snapshot)
+}
+fn select_player_assets(document: &mut GraphDocument, backend: &Path) -> Result<(), String> {
+    let composition = crate::host::composition_at(backend)?;
+    let Some(game) = document.game.as_ref() else {
+        return Ok(());
+    };
+    let mut references = crate::host::component_asset_references(document, backend)?;
+    let mut requests = vec![];
+    for contribution in composition
+        .systems
+        .active_game_contributions(&game.execution)
+    {
+        requests.extend((contribution.service_requests)(game)?);
+    }
+    for request in &requests {
+        references.extend(request.asset_references.iter().cloned());
+    }
+    // Arbitrary Rust can construct asset IDs dynamically. Its declared manifest
+    // remains conservative until source modules provide a narrower contract.
+    if script_ids(game).is_empty() {
+        let mut manifest = AssetManifest::from_value(&document.asset_manifest)?;
+        let paths = references
+            .iter()
+            .map(|r| manifest.resolve_reference(r))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut retained = manifest
+            .assets
+            .iter()
+            .filter(|(id, entry)| {
+                references.contains(&format!("asset://{id}")) || paths.contains(&entry.path)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut pending = retained.iter().cloned().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            for dependency in &manifest.assets[&id].dependencies {
+                if !manifest.assets.contains_key(dependency) {
+                    return Err(format!("Asset {id}: missing dependency {dependency}"));
+                }
+                if retained.insert(dependency.clone()) {
+                    pending.push(dependency.clone());
+                }
+            }
+        }
+        manifest.assets.retain(|id, _| retained.contains(id));
+        document.asset_manifest = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+    }
+    if !requests.iter().any(|request| request.id == "audio.wav") {
+        document.game.as_mut().unwrap().audio_cues.clear();
+    }
+    Ok(())
 }
 
 pub fn export(
@@ -156,10 +435,13 @@ fn export_into_staging(
     destination: &Path,
 ) -> Result<PathBuf, String> {
     let mut prepared = document.clone();
+    crate::engine_profiles::validate(document, backend_root)?;
     crate::host::validate_document_at(document, backend_root)?;
     if document.game.is_some() {
         prepared.game = Some(crate::host::prepare_game_at(document, backend_root)?);
     }
+    select_player_assets(&mut prepared, backend_root)?;
+    let features = selected_features(&prepared, backend_root)?;
     let document = &prepared;
     let game = document
         .game
@@ -234,23 +516,22 @@ fn export_into_staging(
             .export_precompiled(&destination.join("scripts").join(id))
             .map_err(|e| e.to_string())?;
     }
-    module_engine_vulkan::precompile_graph_at(
-        &render_graph(document),
-        &document.shader_sources,
-        &backend_root,
-        &destination,
-    )?;
-    fs::copy(
-        std::env::current_exe().map_err(|e| e.to_string())?,
-        destination.join("Player.exe"),
-    )
-    .map_err(|e| e.to_string())?;
+    if features.contains("vulkan") {
+        module_engine_vulkan::precompile_graph_at(
+            &render_graph(document),
+            &document.shader_sources,
+            &backend_root,
+            &destination,
+        )?;
+    }
+    let player = build_native_player(document, &backend_root)?;
+    fs::copy(player, destination.join("Player.exe")).map_err(|e| e.to_string())?;
     fs::write(
         destination.join("project.json"),
         serde_json::to_vec_pretty(document).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    fs::write(destination.join("README.txt"),"ModuleEngine game\r\nLaunch Player.exe. Rust, Cargo, DXC and editor sources are not required.\r\nWASD: move. Left mouse: melee towards cursor. R: restart. Esc: close.\r\nDefeat all small monsters, enter the green passage, defeat the boss.\r\nGPU with Vulkan 1.3 support and an installed driver is required.\r\n").map_err(|e|e.to_string())?;
+    fs::write(destination.join("README.txt"),format!("ModuleEngine standalone Player\r\nLaunch Player.exe. Rust, Cargo, DXC and engine sources are not required.\r\nSelected native features: {}\r\nR restarts; Escape closes. Gameplay controls are shown by the selected project.\r\nAn installed compatible GPU driver is required for GPU rendering.\r\n",features.iter().cloned().collect::<Vec<_>>().join(", "))).map_err(|e|e.to_string())?;
     let mut files = BTreeSet::new();
     collect_files(&destination, &destination, &mut files)?;
     let hashes = files
@@ -263,7 +544,9 @@ fn export_into_staging(
         })
         .collect::<Result<_, String>>()?;
     let manifest = PlayerManifest {
-        schema_version: 1,
+        schema_version: 2,
+        native_features: features.into_iter().collect(),
+        sdk_data_api_fingerprint: module_engine_core::SDK_DATA_API_FINGERPRINT.into(),
         engine_version: env!("CARGO_PKG_VERSION").into(),
         project: "project.json".into(),
         files: hashes,
@@ -275,10 +558,63 @@ fn export_into_staging(
     .map_err(|e| e.to_string())?;
     // Read from the actual exported root, with no compile root and sealed GPU artifacts.
     validate_package(&destination)?;
-    let mut host = crate::game_host::new(document.clone(), &destination, None, WorldKind::Objects)?;
-    host.services.set_enabled(false);
-    host.render(320, 180)?;
+    verify_native_player(&destination)?;
     Ok(destination)
+}
+
+/// Verify the copied binary itself, including its exact feature fingerprint.
+/// Output stays outside the sealed artifact. The child never receives a compiler root.
+fn verify_native_player(root: &Path) -> Result<(), String> {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let prefix = std::env::temp_dir().join(format!(
+        "module-player-verify-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let output_path = prefix.with_extension("stdout");
+    let error_path = prefix.with_extension("stderr");
+    let mut command = Command::new(root.join("Player.exe"));
+    command
+        .arg("--verify-package")
+        .arg(root)
+        .current_dir(root)
+        .stdout(Stdio::from(
+            fs::File::create(&output_path).map_err(|e| e.to_string())?,
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&error_path).map_err(|e| e.to_string())?,
+        ));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Copied Player launch: {e}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(40) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Copied Player verification exceeded 40 seconds".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let error = fs::read_to_string(&error_path).unwrap_or_default();
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    if !status.success() {
+        return Err(format!("Copied Player verification failed: {error}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -376,19 +712,20 @@ fn prepare_files(
         }
     }
     assets.extend(library.dependencies(models)?);
-    if crate::host::composition_at(backend_root)?
-        .activity(document)?
-        .modules
-        .contains("game.audio")
+    let composition = crate::host::composition_at(backend_root)?;
+    for contribution in composition
+        .systems
+        .active_game_contributions(&game.execution)
     {
-        for path in game.audio_cues.values() {
-            assets.insert(manifest.resolve_reference(path)?);
+        for request in (contribution.service_requests)(game)? {
+            for reference in request.asset_references {
+                assets.insert(manifest.resolve_reference(&reference)?);
+            }
         }
     }
     manifest.verify(asset_root)?;
     assets.extend(manifest.assets.values().map(|e| e.path.clone()));
     let mut backend = BTreeSet::new();
-    collect_files(backend_root, &backend_root.join("assets/gpu"), &mut backend)?;
     for source in document.shader_sources.values() {
         backend.extend(module_engine_project::collect_hlsl_source_dependencies(
             backend_root,
@@ -444,22 +781,7 @@ fn prepare_files(
 }
 
 pub fn validate_package(root: &Path) -> Result<GraphDocument, String> {
-    let manifest: PlayerManifest =
-        serde_json::from_slice(&fs::read(root.join("player.json")).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    if manifest.schema_version != 1 || manifest.engine_version != env!("CARGO_PKG_VERSION") {
-        return Err("Player package version is incompatible".into());
-    }
-    for (relative, hash) in &manifest.files {
-        if hash_file(&resolve_relative(root, relative)?)? != *hash {
-            return Err(format!("Player file changed or corrupt: {relative}"));
-        }
-    }
-    let document = serde_json::from_slice(
-        &fs::read(resolve_relative(root, &manifest.project)?).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(document)
+    module_engine_player::package::validate_package_metadata(root)
 }
 fn collect_files(
     root: &Path,
@@ -655,6 +977,10 @@ mod tests {
                 .unwrap();
         }
         let mut doc = no_resource_document();
+        doc.shader_sources.insert(
+            "include-contract".into(),
+            "#include \"forward.hlsl\"\n".into(),
+        );
         doc.asset_manifest = serde_json::to_value(index).unwrap();
         let game = doc.game.as_mut().unwrap();
         let components = &mut game.scenes.get_mut("arena").unwrap().objects[0].components;
@@ -689,6 +1015,88 @@ mod tests {
                 .unwrap_err()
                 .contains("Unknown asset ID")
         );
+    }
+
+    #[test]
+    fn selected_player_assets_keep_transitive_manifest_dependencies_without_custom() {
+        let backend = backend_root();
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &backend.join(".work/test-temp"),
+            "player-dependency-closure",
+        )
+        .unwrap();
+        let resources = artifacts.path();
+        fs::create_dir_all(resources.join("assets/models")).unwrap();
+        fs::create_dir_all(resources.join("assets/data")).unwrap();
+        fs::copy(
+            backend.join("assets/models/demo_crystal.glb"),
+            resources.join("assets/models/demo_crystal.glb"),
+        )
+        .unwrap();
+        for name in ["buffer.bin", "metadata.json", "unused.bin"] {
+            fs::write(resources.join("assets/data").join(name), name.as_bytes()).unwrap();
+        }
+        let mut manifest = AssetManifest::default();
+        for (id, path) in [
+            ("model", "assets/models/demo_crystal.glb"),
+            ("model-alias", "assets/models/demo_crystal.glb"),
+            ("buffer", "assets/data/buffer.bin"),
+            ("metadata", "assets/data/metadata.json"),
+            ("unused", "assets/data/unused.bin"),
+        ] {
+            manifest.register(id, path, resources).unwrap();
+        }
+        manifest.assets.get_mut("model").unwrap().dependencies = vec!["buffer".into()];
+        manifest.assets.get_mut("buffer").unwrap().dependencies = vec!["metadata".into()];
+        // Legal manifest cycles are bounded by visited IDs, not traversal depth.
+        manifest.assets.get_mut("metadata").unwrap().dependencies = vec!["buffer".into()];
+        manifest.verify(resources).unwrap();
+        for reference in ["asset://model", "assets/models/demo_crystal.glb"] {
+            let mut authored = crate::game_host::puzzle_document();
+            let game = authored.game.as_mut().unwrap();
+            assert!(script_ids(game).is_empty());
+            game.scenes.get_mut("board").unwrap().objects[0]
+                .components
+                .insert("mesh".into(), serde_json::json!({"path":reference}));
+            authored.asset_manifest = serde_json::to_value(&manifest).unwrap();
+            let mut prepared = authored.clone();
+            select_player_assets(&mut prepared, &backend).unwrap();
+            let selected = AssetManifest::from_value(&prepared.asset_manifest).unwrap();
+            assert_eq!(
+                selected
+                    .assets
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["buffer", "metadata", "model", "model-alias"]
+            );
+            selected.verify(resources).unwrap();
+            let plan = prepare_files(
+                &prepared,
+                prepared.game.as_ref().unwrap(),
+                resources,
+                &backend,
+            )
+            .unwrap();
+            for path in [
+                "assets/models/demo_crystal.glb",
+                "assets/data/buffer.bin",
+                "assets/data/metadata.json",
+            ] {
+                assert!(
+                    plan.contains_key(path),
+                    "missing exported dependency {path}"
+                );
+            }
+            assert!(!plan.contains_key("assets/data/unused.bin"));
+            assert_eq!(prepared.game, authored.game);
+            assert!(
+                AssetManifest::from_value(&authored.asset_manifest)
+                    .unwrap()
+                    .assets
+                    .contains_key("unused")
+            );
+        }
     }
 
     #[test]
@@ -747,6 +1155,10 @@ mod tests {
         .unwrap();
         let mut document = crate::game_host::demo_document();
         document.game.as_mut().unwrap().audio_cues.clear();
+        document.shader_sources.insert(
+            "include-contract".into(),
+            "#include \"forward.hlsl\"\n".into(),
+        );
         let mut manifest = AssetManifest::default();
         manifest
             .register("local", "assets/data/only-here.txt", &resources)
@@ -818,6 +1230,10 @@ mod tests {
             .register("conflict", "assets/gpu/forward.hlsl", &resources)
             .unwrap();
         document.asset_manifest = serde_json::to_value(manifest).unwrap();
+        document.shader_sources.insert(
+            "include-contract".into(),
+            "#include \"forward.hlsl\"\n".into(),
+        );
         let destination = folder.join("backend-player");
         assert!(
             export(&document, &resources, &backend, &backend, &destination)

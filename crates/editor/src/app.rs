@@ -750,22 +750,11 @@ impl Editor {
     fn changed(&mut self, rebuild: bool) {
         if self.document.game.is_some()
             && let Some(active_kind) = self.game_workbench.game_world_kind()
+            && let Ok(kind) = crate::game_host::selected_world_kind(&self.document, &self.registry)
+            && active_kind != kind
         {
-            let kind = if self
-                .document
-                .root
-                .nodes
-                .iter()
-                .any(|n| n.module == "world.ecs")
-            {
-                WorldKind::Ecs
-            } else {
-                WorldKind::Objects
-            };
-            if active_kind != kind {
-                self.game_workbench.stop();
-                self.playing = false;
-            }
+            self.game_workbench.stop();
+            self.playing = false;
         }
         if self.authoring_intent && self.can_author_engine() {
             self.policy_baseline = self.document.clone();
@@ -1786,16 +1775,13 @@ impl Editor {
             .and_then(|p| p.compile_root().ok());
         self.game_workbench
             .set_engine_context(compile.as_deref(), &backend);
-        let kind = if self
-            .document
-            .root
-            .nodes
-            .iter()
-            .any(|n| n.module == "world.ecs")
-        {
-            WorldKind::Ecs
-        } else {
-            WorldKind::Objects
+        let kind = match crate::game_host::selected_world_kind(&self.document, &self.registry) {
+            Ok(kind) => kind,
+            Err(error) => {
+                self.game_workbench.error = Some(error.clone());
+                ui.colored_label(Color32::LIGHT_RED, error);
+                return;
+            }
         };
         let was_playing = self.playing;
         let old = self.document.game.clone();

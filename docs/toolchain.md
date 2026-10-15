@@ -26,3 +26,8 @@ under `.work`; it invokes no installed Rust/Cargo, performs no downloads and
 removes its own fixture directory. It covers matching `rustc` with missing,
 broken or mismatched required tools, restoration and subsequent doctor, and
 manifest-driven environment selection.
+
+Historical test/build artifact cleanup is an explicit maintenance operation;
+see [artifact-maintenance.md](artifact-maintenance.md). The cleanup script defaults
+to a dry run, requires a native process inventory, and preserves ordinary Cargo
+dependency caches. It is never a launch/build hook or an automatic purge.

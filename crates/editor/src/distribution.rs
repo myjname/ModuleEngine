@@ -421,7 +421,7 @@ pub fn blueprint_hash(
         .iter()
         .filter(|(id, _)| !gameplay.contains(*id))
         .collect::<BTreeMap<_, _>>();
-    let projected = serde_json::json!({"schema_version":document.schema_version,"root":value["root"],"engine":value.get("engine"),"shader_sources":document.shader_sources,"module_versions":document.module_versions,"engine_rust_sources":fixed_sources,"custom_source_ids":document.custom_sources.keys().collect::<Vec<_>>(),"game_execution":document.game.as_ref().map(|g|&g.execution)});
+    let projected = serde_json::json!({"schema_version":document.schema_version,"root":value["root"],"engine":value.get("engine"),"shader_sources":document.shader_sources,"module_versions":document.module_versions,"engine_rust_sources":fixed_sources,"custom_source_ids":document.custom_sources.keys().collect::<Vec<_>>(),"game_execution":document.game.as_ref().map(|g|&g.execution),"engine_profile":document.engine_profile,"engine_lock":document.engine_lock});
     Ok(hash_bytes(
         &serde_json::to_vec(&projected).map_err(|e| e.to_string())?,
     ))
@@ -515,10 +515,10 @@ pub fn write_full_manifest(
     document: &GraphDocument,
 ) -> Result<PackageManifest, String> {
     let mut files = BTreeMap::new();
-    for name in ["Cargo.toml", "Cargo.lock"] {
+    for name in ["Cargo.toml", "Cargo.lock", "engine-sdk.json"] {
         files.insert(name.into(), hash_file(&root.join(name))?);
     }
-    for name in ["crates", "assets/gpu"] {
+    for name in ["crates", "assets/gpu", "assets/engine-contracts"] {
         inventory_tree(root, &root.join(name), &mut files)?;
     }
     files.retain(|p, _| native_source_path(p));
@@ -587,7 +587,7 @@ pub fn write_team_manifest(
     let mut sdk_files = BTreeMap::new();
     inventory_tree(root, &root.join(".sdk"), &mut sdk_files)?;
     let mut backend_files = BTreeMap::new();
-    for name in ["assets/gpu", "tools/dxc"] {
+    for name in ["assets/gpu", "tools/dxc", "players"] {
         inventory_tree(root, &root.join(name), &mut backend_files)?;
     }
     for source in document.shader_sources.values() {
@@ -738,6 +738,23 @@ pub fn package_compile_root() -> Result<PathBuf, String> {
 }
 
 const NATIVE_FILES: &[&str] = &[
+    "engine-sdk.json",
+    "assets/engine-contracts/v0.4.0.json",
+    "crates/editor/src/engine_profiles.rs",
+    "crates/editor/src/engine_profile_verification.rs",
+    "crates/runtime-script/src/cleanup.rs",
+    "crates/runtime-script/src/jobs.rs",
+    "crates/engine-core/src/engine_lock.rs",
+    "crates/project-tools/src/engine_profile.rs",
+    "crates/project-tools/src/engine_migration.rs",
+    "crates/player/Cargo.toml",
+    "crates/player/src/composition.rs",
+    "crates/player/src/lib.rs",
+    "crates/player/src/main.rs",
+    "crates/player/src/package.rs",
+    "crates/player/src/presentations.rs",
+    "crates/player/src/source_modules.rs",
+    "crates/player/src/ui.rs",
     "crates/game-host/Cargo.toml",
     "crates/game-host/src/lib.rs",
     "crates/game-host/src/game_host.rs",
@@ -773,7 +790,6 @@ const NATIVE_FILES: &[&str] = &[
     "crates/editor/src/player.rs",
     "crates/engine-core/src/game.rs",
     "crates/engine-core/src/game_contributions.rs",
-    "crates/editor/src/game_presentations.rs",
     "crates/editor/src/game_templates.rs",
     "crates/editor/src/puzzle_verification.rs",
     "crates/project-puzzle/Cargo.toml",
@@ -866,8 +882,10 @@ const NATIVE_FILES: &[&str] = &[
     "assets/gpu/custom_fullscreen.hlsl",
 ];
 fn native_source_path(path: &str) -> bool {
-    matches!(path, "Cargo.toml" | "Cargo.lock")
-        || (path.starts_with("crates/") && (path.ends_with(".rs") || path.ends_with("Cargo.toml")))
+    matches!(
+        path,
+        "Cargo.toml" | "Cargo.lock" | "engine-sdk.json" | "assets/engine-contracts/v0.4.0.json"
+    ) || (path.starts_with("crates/") && (path.ends_with(".rs") || path.ends_with("Cargo.toml")))
         || path.ends_with(".hlsl")
         || path.ends_with(".hlsli")
 }
@@ -890,7 +908,7 @@ fn verify_sdk(root: &Path, m: &PackageManifest) -> Result<(), String> {
             return Err(format!("Team SDK inventory missing {file}"));
         }
     }
-    for file in [".sdk/Cargo.toml", ".sdk/Cargo.lock"] {
+    for file in [".sdk/Cargo.toml", ".sdk/Cargo.lock", ".sdk/engine-sdk.json"] {
         if !m.sdk_files.contains_key(file) {
             return Err(format!("Team SDK inventory missing {file}"));
         }

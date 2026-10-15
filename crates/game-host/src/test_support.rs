@@ -63,7 +63,28 @@ pub(super) fn demo_document() -> GraphDocument {
     )));
     document.engine.initialized = true;
     document.engine.exposure = default_renderer_exposure("tonemap", "aa");
-    module_engine_two_arenas::document(document)
+    let mut document = module_engine_two_arenas::document(document);
+    approve_fixture(&mut document).unwrap();
+    document
+}
+
+/// Explicit New/profile-update step for a fixture. Production host paths only
+/// validate these records and never call this test-only capture helper.
+pub(super) fn approve_fixture(document: &mut GraphDocument) -> Result<(), String> {
+    let composition = composition(&workspace_root())?;
+    let profile = document
+        .engine_lock
+        .as_ref()
+        .map(|lock| lock.profile.clone())
+        .unwrap_or(ProfileIdentity::from_payload(
+            "host.fixture",
+            "1",
+            &json!({"fixture":"host"}),
+        )?);
+    composition
+        .capture_lock(document, profile, Some(SdkIdentity::current()))?
+        .apply_to(document);
+    Ok(())
 }
 
 pub(super) fn new_host(
@@ -109,6 +130,7 @@ pub(super) fn new_host_at(
         .into();
         world.params = json!({});
     }
+    approve_fixture(&mut document)?;
     let mut services = HostServiceRegistry::new();
     module_engine_host_services::install_audio(&mut services)?;
     GameHost::build(

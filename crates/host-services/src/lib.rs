@@ -187,6 +187,7 @@ mod tests {
         let request = HostServiceRequest {
             id: "fixture.service".into(),
             config: Value::Null,
+            asset_references: BTreeSet::new(),
         };
         assert!(registry.build(&[], &context, true).unwrap().is_empty());
         let mut disabled = registry
@@ -211,6 +212,7 @@ mod tests {
         let unknown = HostServiceRequest {
             id: "optional.not-installed".into(),
             config: Value::Null,
+            asset_references: BTreeSet::new(),
         };
         assert!(
             HostServiceRegistry::new()
@@ -239,6 +241,7 @@ mod tests {
         let request = HostServiceRequest {
             id: "fixture.service".into(),
             config: Value::Null,
+            asset_references: BTreeSet::new(),
         };
         let context = HostServiceContext {
             asset_root: Path::new("missing-root"),

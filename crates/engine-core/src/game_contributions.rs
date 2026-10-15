@@ -15,6 +15,10 @@ pub type GameStateValidator = fn(&GameState) -> Result<(), String>;
 pub struct HostServiceRequest {
     pub id: String,
     pub config: Value,
+    /// Portable references needed by this requested service. Exporters consume
+    /// this declaration without interpreting the service's private config JSON.
+    #[serde(default)]
+    pub asset_references: BTreeSet<String>,
 }
 
 pub type HostServiceRequests = fn(&GameProject) -> Result<Vec<HostServiceRequest>, String>;

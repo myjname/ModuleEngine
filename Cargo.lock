@@ -1202,6 +1202,7 @@ version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -1228,6 +1229,7 @@ dependencies = [
  "module-engine-custom",
  "module-engine-host",
  "module-engine-host-services",
+ "module-engine-player",
  "module-engine-project",
  "module-engine-project-puzzle",
  "module-engine-script",
@@ -1260,6 +1262,24 @@ version = "0.4.0"
 dependencies = [
  "module-engine-core",
  "module-engine-project",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "module-engine-player"
+version = "0.4.0"
+dependencies = [
+ "eframe",
+ "module-engine-arpg",
+ "module-engine-core",
+ "module-engine-host",
+ "module-engine-host-services",
+ "module-engine-project",
+ "module-engine-project-puzzle",
+ "module-engine-two-arenas",
+ "module-engine-vulkan",
+ "png",
  "serde",
  "serde_json",
 ]

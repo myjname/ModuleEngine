@@ -11,7 +11,7 @@ use eframe::egui::{self, Color32, Vec2};
 #[cfg(test)]
 use module_engine_arpg::{ArpgInput, ExecutionGraphExt, GameInputExt};
 use module_engine_core::*;
-use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind};
+use module_engine_script::{CompiledScript, JobLease, ScriptCompiler, ScriptKind};
 #[cfg(test)]
 use module_engine_two_arenas::ProjectExt;
 use serde_json::{Value, json};
@@ -27,6 +27,23 @@ struct HostPreparation {
     receiver: mpsc::Receiver<Result<GameHost, String>>,
     progress: BuildProgress,
     dependencies: game_host::ShaderDependencyWatch,
+    _job: Option<JobLease>,
+}
+impl HostPreparation {
+    fn retire(mut self) {
+        self._job.take();
+        retire_in_background(self);
+    }
+}
+impl Drop for HostPreparation {
+    fn drop(&mut self) {
+        self._job.take();
+        let receiver = std::mem::replace(&mut self.receiver, mpsc::channel().1);
+        retire_in_background(receiver);
+    }
+}
+fn retire_in_background(value: impl Send + 'static) {
+    let _ = module_engine_script::spawn_job(move |_| drop(value));
 }
 #[derive(Clone, PartialEq, Eq)]
 struct PreparationContext {
@@ -161,6 +178,7 @@ pub struct GameWorkbench {
     params: String,
     params_id: Option<String>,
     pending: Option<(String, mpsc::Receiver<Result<CompiledScript, String>>)>,
+    pending_job: Option<JobLease>,
     pending_worker_epoch: Option<(u64, u64)>,
     pub rejected: Option<(String, CompiledScript)>,
     migration: String,
@@ -243,6 +261,7 @@ impl Default for GameWorkbench {
             params: String::new(),
             params_id: None,
             pending: None,
+            pending_job: None,
             pending_worker_epoch: None,
             rejected: None,
             migration: "null".into(),
@@ -292,23 +311,30 @@ impl Default for GameWorkbench {
 }
 impl Drop for GameWorkbench {
     fn drop(&mut self) {
+        self.cancel_pending_custom();
         for slot in [&mut self.game_preparation, &mut self.preview_preparation] {
             if let Some(job) = slot.take() {
                 job.progress.succeed("Редактор закрыл запрос подготовки");
-                std::thread::spawn(move || drop(job));
+                job.retire();
             }
         }
         if self.deferred_preparation {
             for slot in [&mut self.host, &mut self.preview_host] {
                 if let Some(mut host) = slot.take() {
                     host.services.stop();
-                    std::thread::spawn(move || drop(host));
+                    retire_in_background(host);
                 }
             }
         }
     }
 }
 impl GameWorkbench {
+    fn cancel_pending_custom(&mut self) {
+        self.pending_job.take();
+        if let Some(pending) = self.pending.take() {
+            retire_in_background(pending);
+        }
+    }
     pub fn performance(&self) -> WorkbenchPerformance {
         self.performance
     }
@@ -629,15 +655,12 @@ impl GameWorkbench {
         if !self.deferred_preparation {
             return Ok(());
         }
-        let kind = if document
-            .root
-            .nodes
-            .iter()
-            .any(|node| node.module == "world.ecs")
-        {
-            WorldKind::Ecs
+        let kind = if self.game_preparation.is_some() || self.preview_preparation.is_some() {
+            game_host::world_kind(document)?
         } else {
-            WorldKind::Objects
+            // No initial host result needs a kind check. Incomplete Engine
+            // drafts remain editable while a previous host stays installed.
+            self.world_kind
         };
         let mut first_error = self.poll_host_preparation(document, kind, false).err();
         if self
@@ -798,7 +821,7 @@ impl GameWorkbench {
         {
             job.progress
                 .succeed("Запрос заменён новой конфигурацией; предыдущий результат сохранён");
-            std::thread::spawn(move || drop(result));
+            retire_in_background(result);
             return Ok(());
         }
         match result {
@@ -806,7 +829,7 @@ impl GameWorkbench {
                 // Metadata may have moved while its execution stayed the same.
                 if let Err(error) = host.sync_document(document) {
                     job.progress.fail(error.clone());
-                    std::thread::spawn(move || drop(host));
+                    retire_in_background(host);
                     return Err(error);
                 }
                 host.services.set_enabled(!preview);
@@ -833,7 +856,7 @@ impl GameWorkbench {
                 };
                 if let Some(mut old) = old {
                     old.services.stop();
-                    std::thread::spawn(move || drop(old));
+                    retire_in_background(old);
                 }
                 job.progress.succeed(if preview {
                     "Scene подготовлена"
@@ -845,8 +868,8 @@ impl GameWorkbench {
             }
             Err(error) => {
                 job.progress.fail(error.clone());
-                let dependencies = job.dependencies;
-                let failed = Some((document.clone(), job.context, error.clone()));
+                let dependencies = job.dependencies.clone();
+                let failed = Some((document.clone(), job.context.clone(), error.clone()));
                 if preview {
                     self.rejected_preview = failed;
                     self.rejected_preview_dependencies = Some(dependencies);
@@ -913,21 +936,20 @@ impl GameWorkbench {
         });
         let worker_progress = progress.clone();
         let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
-        let (send, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = crate::game_host::new_at_with_progress(
+        let (receiver, job) = module_engine_script::spawn_job(move |cancelled| {
+            crate::game_host::new_at_with_progress_cancellable(
                 worker_document,
                 &root,
                 &backend,
                 compile.as_deref(),
                 kind,
                 Some(&worker_progress),
+                cancelled,
             )
             .map(|mut host| {
                 host.services.set_enabled(false);
                 host
-            });
-            let _ = send.send(result);
+            })
         });
         *slot = Some(HostPreparation {
             document: candidate,
@@ -935,6 +957,7 @@ impl GameWorkbench {
             receiver,
             progress: progress.clone(),
             dependencies,
+            _job: Some(job),
         });
         if preview {
             self.preview_activity = Some(progress);
@@ -1153,7 +1176,7 @@ impl GameWorkbench {
                 if let Some(job) = slot.take() {
                     job.progress
                         .succeed("Контекст Engine изменился; запрос заменён");
-                    std::thread::spawn(move || drop(job));
+                    job.retire();
                 }
             }
             for host in [&mut self.host, &mut self.preview_host]
@@ -1204,13 +1227,13 @@ impl GameWorkbench {
         self.clear_worker();
         if let Some(job) = self.game_preparation.take() {
             job.progress.succeed("Подготовка отменена после Stop");
-            std::thread::spawn(move || drop(job));
+            job.retire();
         }
         if self.deferred_preparation {
             if let Some(mut host) = self.host.take() {
                 host.services.stop();
                 host.cancel_preparation();
-                std::thread::spawn(move || drop(host));
+                retire_in_background(host);
             }
         } else {
             self.host = None;
@@ -1227,7 +1250,7 @@ impl GameWorkbench {
         self.play_session = false;
         self.field_key = None;
         self.template_key = None;
-        self.pending = None;
+        self.cancel_pending_custom();
         self.pending_worker_epoch = None;
         self.custom_errors.clear();
         self.restart_error = None;
@@ -1330,17 +1353,15 @@ impl GameWorkbench {
         let source = source.to_owned();
         let progress = BuildProgress::new(format!("Rust Custom {id}"));
         let worker_progress = progress.clone();
-        let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || {
+        let (receive, job) = module_engine_script::spawn_job(move |cancelled| {
             worker_progress.stage("Компиляция Rust; текущая версия продолжает работать");
             let compiler = ScriptCompiler::new(root.clone(), root.join(".work/game-scripts"));
-            let _ = send.send(
-                compiler
-                    .compile_kind(&source, ScriptKind::Update)
-                    .map_err(|e| e.to_string()),
-            );
+            compiler
+                .compile_kind_cancellable(&source, ScriptKind::Update, cancelled)
+                .map_err(|e| e.to_string())
         });
         self.pending = Some((id.into(), receive));
+        self.pending_job = Some(job);
         self.custom_activity = Some(progress);
     }
     pub fn tick(&mut self, dt: f64, playing: bool) -> Result<(), String> {
@@ -1371,6 +1392,7 @@ impl GameWorkbench {
             match receiver.try_recv() {
                 Ok(result) => {
                     let id = id.clone();
+                    self.pending_job.take();
                     self.pending = None;
                     match result {
                         Ok(candidate) => {
@@ -1448,6 +1470,7 @@ impl GameWorkbench {
                         id.clone(),
                         "Rust compilation thread ended without a result".into(),
                     );
+                    self.pending_job.take();
                     self.pending = None;
                     self.error = Some("Rust compilation thread ended without a result".into());
                     if let Some(progress) = &self.custom_activity {
@@ -2505,15 +2528,12 @@ impl GameWorkbench {
         document: &mut GraphDocument,
         root: &Path,
     ) -> bool {
-        self.world_kind = if document
-            .root
-            .nodes
-            .iter()
-            .any(|node| node.module == "world.ecs")
-        {
-            WorldKind::Ecs
-        } else {
-            WorldKind::Objects
+        self.world_kind = match game_host::world_kind(document) {
+            Ok(kind) => kind,
+            Err(error) => {
+                ui.colored_label(Color32::LIGHT_RED, error);
+                return false;
+            }
         };
         let Some(game) = document.game.as_ref() else {
             ui.label("This project has no gameplay graph");
@@ -3676,12 +3696,17 @@ mod tests {
         );
         let mut document = game_host::demo_document();
         document.custom_sources.insert(id.into(), source.clone());
+        let kind = game_host::world_kind(&document).unwrap();
         let ctx = egui::Context::default();
         let mut workbench = GameWorkbench::default();
         workbench.set_background_game(true, Some(&ctx));
         workbench
-            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .ensure(&document, &root, Some(&root), kind)
             .unwrap();
+        assert_eq!(
+            workbench.game_preparation.as_ref().unwrap().context.kind,
+            kind
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
         while workbench.game_snapshot().is_none() {
             workbench.poll_preparation(&document).unwrap();
@@ -3728,14 +3753,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    workbench.scene_ui(
-                        ui,
-                        document,
-                        &root,
-                        Some(&root),
-                        WorldKind::Objects,
-                        &mut playing,
-                    );
+                    workbench.scene_ui(ui, document, &root, Some(&root), kind, &mut playing);
                 },
             )
             .drop_without_applying_deltas();
@@ -3839,7 +3857,7 @@ mod tests {
         let document = game_host::demo_document();
         let mut workbench = GameWorkbench::default();
         workbench
-            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
             .unwrap();
         workbench.set_background_game(true, None);
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -3888,7 +3906,7 @@ mod tests {
         // Undo returns exactly to game_document. That equality must not skip
         // delivery of the cancellation/revert to an autonomous owner.
         workbench
-            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
             .unwrap();
         assert!(
             workbench
@@ -3989,6 +4007,11 @@ mod tests {
                     .replace("c.rgb*values[0].x", "c.rgb*values[0].x*external_gain()")
             ),
         );
+        crate::project::stamp_composition_versions(
+            &mut document,
+            &crate::host::composition_at(&root).unwrap(),
+        )
+        .unwrap();
         let unchanged_document = document.clone();
         let (send, _) = fake_host_job(&mut workbench, &document, context);
         // The file is repaired while the worker is returning its older error.
@@ -4224,8 +4247,52 @@ mod tests {
             receiver,
             progress: progress.clone(),
             dependencies,
+            _job: None,
         });
         (send, progress)
+    }
+    #[test]
+    fn preparation_poll_uses_the_same_active_kind_as_the_authored_request() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let (mut workbench, mut document, root, _) = preparation_fixture();
+            document
+                .root
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == "world")
+                .unwrap()
+                .module = match kind {
+                WorldKind::Objects => "world.objects",
+                WorldKind::Ecs => "world.ecs",
+                WorldKind::Custom => unreachable!(),
+            }
+            .into();
+            document.root.nodes.push(make_node(
+                "inactive-ecs",
+                "world.ecs",
+                "Inactive",
+                [0., 0.],
+                json!({}),
+            ));
+            let selected = game_host::world_kind(&document).unwrap();
+            assert_eq!(selected, kind);
+            let context = workbench
+                .preparation_context(&root, Some(&root), selected)
+                .unwrap();
+            workbench.game_context = Some(context.clone());
+            let (send, _) = fake_host_job(&mut workbench, &document, context);
+            send.send(Err("current request diagnostic".into())).unwrap();
+            // A matching request's failure is observable. Kind disagreement
+            // used to discard it as obsolete and leave no host/error to poll.
+            assert!(
+                workbench
+                    .poll_preparation(&document)
+                    .unwrap_err()
+                    .contains("current request diagnostic")
+            );
+            assert_eq!(workbench.rejected_game.as_ref().unwrap().1.kind, kind);
+            assert!(!workbench.has_pending_preparation());
+        }
     }
     #[test]
     fn deferred_host_failure_is_cached_across_layout_and_reports_terminal_activity() {
@@ -4320,7 +4387,7 @@ mod tests {
         workbench.set_engine_context(Some(&root), &root);
         let mut document = game_host::demo_document();
         workbench
-            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
             .unwrap();
         let host = workbench.host.as_mut().unwrap();
         host.services.set_enabled(false);
@@ -4403,6 +4470,11 @@ mod tests {
             "broken-aa".into(),
             "#error expected_async_hlsl_failure\n".into(),
         );
+        crate::project::stamp_composition_versions(
+            &mut document,
+            &crate::host::composition_at(&root).unwrap(),
+        )
+        .unwrap();
         workbench.sync_graphics(&document).unwrap();
         let mut failed = false;
         while workbench.has_pending_preparation() {
@@ -4446,7 +4518,7 @@ mod tests {
         workbench.poll_preparation(&accepted).unwrap();
         assert_eq!(workbench.error.as_deref(), Some("unrelated Custom failure"));
         let context = workbench
-            .preparation_context(&root, Some(&root), WorldKind::Objects)
+            .preparation_context(&root, Some(&root), WorldKind::Ecs)
             .unwrap();
         workbench.game_context = Some(context.clone());
         let (_send, progress) = fake_host_job(&mut workbench, &accepted, context);
@@ -5029,7 +5101,7 @@ mod tests {
         document.custom_sources.insert(id.into(), first.into());
         let mut workbench = GameWorkbench::default();
         workbench
-            .ensure(&document, &root, Some(&root), WorldKind::Objects)
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
             .unwrap();
         workbench.tick(1. / 60., true).unwrap();
         let old_state = workbench.host.as_ref().unwrap().slots[id]
@@ -5356,6 +5428,151 @@ mod tests {
         assert!(
             registry.validate(&graph).is_err(),
             "Positions still cannot be read before movement produces them"
+        );
+    }
+    #[test]
+    fn removing_disconnected_ecs_does_not_replace_playing_object_host() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut document = module_engine_core::demo_document(WorldKind::Objects);
+        document.game = Some(GameProject::empty());
+        document.root.nodes.push(make_node(
+            "archived-ecs",
+            "world.ecs",
+            "Archived ECS",
+            [0., 0.],
+            json!({}),
+        ));
+        crate::engine_profiles::finish_template(
+            &mut document,
+            crate::engine_profiles::ProfileKind::Neutral,
+            &root,
+        )
+        .unwrap();
+        let host = GameHost::build(
+            document.clone(),
+            crate::host::composition_at(&root).unwrap(),
+            module_engine_host::HostOptions {
+                asset_root: root.clone(),
+                backend_root: Some(root.clone()),
+                compile_root: None,
+                render: module_engine_host::RenderMode::Graph,
+                services: module_engine_host_services::HostServiceRegistry::new(),
+                services_enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        let mut workbench = GameWorkbench::default();
+        assert!(workbench.host.replace(host).is_none());
+        workbench.game_document = Some(document.clone());
+        workbench.set_engine_context(None, &root);
+        workbench.set_deferred_preparation(true);
+        workbench.tick(1. / 60., true).unwrap();
+        let before = workbench.host.as_ref().unwrap().session.state().clone();
+        document.root.nodes.retain(|node| node.id != "archived-ecs");
+        let kind = game_host::world_kind(&document).unwrap();
+        assert_eq!(kind, WorldKind::Objects);
+        workbench.ensure(&document, &root, None, kind).unwrap();
+        workbench.sync_graphics(&document).unwrap();
+        assert!(workbench.game_preparation.is_none());
+        let host = workbench.host.as_ref().unwrap();
+        assert_eq!(host.session.world_kind(), WorldKind::Objects);
+        assert_eq!(host.session.state(), &before);
+        assert_eq!(host.accepted_document(), &document);
+    }
+    #[test]
+    fn owned_custom_failure_and_cancel_keep_last_good_instance_running() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &root.join(".work/test-temp"),
+            "game-ui-owned-compile",
+        )
+        .unwrap();
+        let id = "game-controller";
+        let source = "// module-engine-state: {\"schema\":\"owned.ui/1\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap() + 1); }";
+        let mut document = game_host::demo_document();
+        document.custom_sources.insert(id.into(), source.into());
+        let composition = crate::host::composition_at(&root).unwrap();
+        let world_node = composition
+            .modules
+            .render_route(&document)
+            .unwrap()
+            .world
+            .id
+            .clone();
+        let host = GameHost::build(
+            document,
+            composition,
+            module_engine_host::HostOptions {
+                asset_root: root.clone(),
+                backend_root: None,
+                compile_root: Some(root.clone()),
+                render: module_engine_host::RenderMode::Headless { world_node },
+                services: module_engine_host_services::HostServiceRegistry::new(),
+                services_enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        let mut workbench = GameWorkbench::default();
+        assert!(workbench.host.replace(host).is_none());
+        workbench.tick(1. / 60., true).unwrap();
+        let original = workbench.host.as_ref().unwrap().slots[id].clone();
+        let before = original.lock().unwrap().state().unwrap();
+        workbench.request_custom(
+            id,
+            "// module-engine-state: not json\nfn update(ctx: &mut ScriptContext) {}",
+            &root,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while workbench.pending.is_some() {
+            workbench.tick(0., false).unwrap();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(workbench.custom_errors.contains_key(id));
+        assert_eq!(original.lock().unwrap().source(), source);
+        assert_eq!(original.lock().unwrap().state().unwrap(), before);
+
+        let compiler = ScriptCompiler::new(root, artifacts.path().join("compile"));
+        let source = source.to_owned();
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (observed, result) = mpsc::channel();
+        let (receiver, lease) = module_engine_script::spawn_job(move |cancelled| {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            let result = compiler
+                .compile_kind_cancellable(&source, ScriptKind::Update, cancelled)
+                .map_err(|error| error.to_string());
+            observed.send(result.as_ref().unwrap_err().clone()).unwrap();
+            result
+        });
+        workbench.pending = Some((id.into(), receiver));
+        workbench.pending_job = Some(lease);
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Cancellation is the same path used by Stop/Drop. The gated producer
+        // proves it returns without joining while the installed version lives.
+        workbench.cancel_pending_custom();
+        assert!(workbench.pending.is_none());
+        release.send(()).unwrap();
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .contains("cancelled")
+        );
+        assert_eq!(original.lock().unwrap().state().unwrap(), before);
+        workbench.tick(1. / 60., true).unwrap();
+        assert_eq!(
+            original.lock().unwrap().state().unwrap()["ticks"],
+            before["ticks"].as_u64().unwrap() + 1
         );
     }
     #[test]

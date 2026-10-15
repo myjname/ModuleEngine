@@ -401,6 +401,16 @@ mod tests {
             "a schema contribution must not schedule its owning system"
         );
         assert_eq!(composition.module_version("external.owner"), Some("9.2.1"));
+        let profile = crate::ProfileIdentity::from_payload(
+            "external.fixture",
+            "1",
+            &json!({"owner":"external.owner"}),
+        )
+        .unwrap();
+        composition
+            .capture_lock(&document, profile, Some(crate::SdkIdentity::current()))
+            .unwrap()
+            .apply_to(&mut document);
         assert!(
             composition
                 .validate_document(&document)
@@ -412,9 +422,9 @@ mod tests {
             .insert("external.owner".into(), "data/3".into());
         assert!(
             composition
-                .validate_document(&document)
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("requires version"))
+                .validate_lock(&document, Some(&crate::SdkIdentity::current()))
+                .unwrap_err()
+                .contains("external.owner")
         );
     }
     #[test]

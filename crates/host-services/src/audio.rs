@@ -215,6 +215,7 @@ mod tests {
         let requests = [HostServiceRequest {
             id: WAV_SERVICE_ID.into(),
             config: json!({"cues":{"hit":"asset://missing"},"event":"Sound","cue_field":"cue"}),
+            asset_references: Default::default(),
         }];
         let context = HostServiceContext {
             asset_root: Path::new("missing-root-must-not-be-opened"),
@@ -259,6 +260,7 @@ mod tests {
         let requests = [HostServiceRequest {
             id: WAV_SERVICE_ID.into(),
             config: json!({"cues":{"hit":"asset://tone"},"event":"independent.cue","cue_field":"name"}),
+            asset_references: Default::default(),
         }];
         let mut services = registry.build(&requests, &context, true).unwrap();
         // Never produce platform sound in unit tests.

@@ -13,4 +13,5 @@
 *.tmp
 *.tmp-*
 *.backup-*
+*.module-engine-project.json
 

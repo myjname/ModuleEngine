@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Current serialized graph schema; newer versions are rejected explicitly.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Human-editable project graph and source text owned by Custom nodes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -21,6 +21,14 @@ pub struct GraphDocument {
     pub asset_manifest: Value,
     #[serde(default)]
     pub module_versions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_lock: Option<crate::EngineLock>,
+    /// Retained selected profile payload; locators and package paths stay outside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_profile: Option<Value>,
+    /// Unknown legacy authored records retained by explicit migration adapters.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub legacy_archive: BTreeMap<String, Value>,
     #[serde(default)]
     pub engine: crate::EngineConfiguration,
     #[serde(default)]
@@ -114,6 +122,9 @@ impl GraphDocument {
             shader_sources,
             asset_manifest,
             module_versions,
+            engine_lock,
+            engine_profile,
+            legacy_archive,
             engine,
             project,
             properties,
@@ -126,6 +137,9 @@ impl GraphDocument {
             && shader_sources == &other.shader_sources
             && asset_manifest == &other.asset_manifest
             && module_versions == &other.module_versions
+            && engine_lock == &other.engine_lock
+            && engine_profile == &other.engine_profile
+            && legacy_archive == &other.legacy_archive
             && engine == &other.engine
             && project == &other.project
             && properties == &other.properties
@@ -160,26 +174,29 @@ pub fn validate_graph(document: &GraphDocument, registry: &ModuleRegistry) -> Ve
     if let Err(error) = crate::validate_settings(document, registry) {
         emit(&mut result, Severity::Error, None, error);
     }
-    if !(1..=SCHEMA_VERSION).contains(&document.schema_version) {
+    if document.schema_version != SCHEMA_VERSION {
         emit(
             &mut result,
             Severity::Error,
             None,
             format!(
-                "Unsupported schema version {}; expected {}",
+                "Migration required or unsupported schema version {}; expected exact format {}",
                 document.schema_version, SCHEMA_VERSION
             ),
         );
     }
-    for (module, pinned) in &document.module_versions {
-        if registry.module_version(module) != Some(pinned.as_str()) {
+    for module in crate::effective_modules(document) {
+        let pinned = document.module_versions.get(&module);
+        let installed = registry.module_version(&module);
+        if pinned.is_none() || pinned.map(String::as_str) != installed {
             emit(
                 &mut result,
                 Severity::Error,
                 None,
                 format!(
-                    "Module '{module}' requires version '{pinned}', installed: {}",
-                    registry.module_version(module).unwrap_or("missing")
+                    "Active module '{module}' requires an exact version pin (saved: {}, installed: {})",
+                    pinned.map(String::as_str).unwrap_or("missing"),
+                    installed.unwrap_or("missing")
                 ),
             );
         }
@@ -621,7 +638,7 @@ pub fn demo_document(kind: WorldKind) -> GraphDocument {
         WorldKind::Ecs => "world.ecs",
         WorldKind::Custom => "world.objects",
     };
-    GraphDocument {
+    let mut document = GraphDocument {
         schema_version: SCHEMA_VERSION,
         name: format!("{} world / same 3D renderer", if kind == WorldKind::Ecs { "ECS" } else { "Objects" }),
         root: Graph {
@@ -647,11 +664,36 @@ pub fn demo_document(kind: WorldKind) -> GraphDocument {
         shader_sources: BTreeMap::new(),
         asset_manifest: Value::Null,
         module_versions: BTreeMap::new(),
+        engine_lock: None,
+        engine_profile: None,
+        legacy_archive: BTreeMap::new(),
         engine: crate::EngineConfiguration::default(),
         project: crate::ProjectConfiguration::default(),
         properties: crate::PropertyStore::default(),
         game: None,
+    };
+    // This is an explicit New constructor. Existing documents are never
+    // stamped or repinned by validation, deserialization or ordinary saves.
+    let composition =
+        crate::CompositionContext::new(ModuleRegistry::builtin(), crate::SystemRegistry::builtin())
+            .expect("builtin contracts compose");
+    // The explicit builtin New profile supports switching either installed
+    // world adapter. Keep the unused choice archived without activating it.
+    for id in ["world.objects", "world.ecs"] {
+        document
+            .module_versions
+            .insert(id.into(), composition.module_version(id).unwrap().into());
     }
+    let profile = crate::ProfileIdentity::from_payload(
+        "module-engine.builtin.software3d",
+        env!("CARGO_PKG_VERSION"),
+        &json!({"format":1,"renderer":"render.software3d","default_execution":crate::ExecutionGraph::default()}),
+    ).expect("builtin profile contains portable JSON");
+    composition
+        .capture_lock(&document, profile, Some(crate::SdkIdentity::current()))
+        .expect("builtin New document has installed contracts")
+        .apply_to(&mut document);
+    document
 }
 
 /// Convenience constructor for an ordinary module node.
@@ -680,6 +722,62 @@ pub fn make_edge(from_node: &str, from_port: &str, to_node: &str, to_port: &str)
 mod tests {
     use super::*;
     use crate::Runtime;
+
+    #[test]
+    fn root_validation_requires_active_pins_and_preserves_unrelated_archives() {
+        let mut document = demo_document(WorldKind::Ecs);
+        let mut registry = ModuleRegistry::builtin();
+        document
+            .module_versions
+            .insert("not-installed.archive".into(), "old".into());
+        document
+            .module_versions
+            .insert("world.objects".into(), "archived".into());
+        registry
+            .set_module_version("world.objects", "unrelated-upgrade")
+            .unwrap();
+        assert!(
+            validate_graph(&document, &registry)
+                .iter()
+                .all(|diagnostic| diagnostic.severity != Severity::Error)
+        );
+        document.engine.enabled_modules.insert("game.motion".into());
+        assert!(
+            validate_graph(&document, &registry)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("game.motion")
+                    && diagnostic.message.contains("exact version pin"))
+        );
+        assert!(
+            !document.module_versions.contains_key("game.motion"),
+            "validation cannot silently repin newly activated modules"
+        );
+        document.engine.enabled_modules.clear();
+        document.module_versions.remove("world.ecs");
+        assert!(Runtime::from_document(&document, &registry).is_err());
+    }
+
+    #[test]
+    fn legacy_format_requires_explicit_migration_and_new_fields_roundtrip_exactly() {
+        let registry = ModuleRegistry::builtin();
+        let mut document = demo_document(WorldKind::Ecs);
+        document.engine_profile = Some(json!({"format":1,"unknown_profile_data":[1,2]}));
+        document.legacy_archive.insert(
+            "unavailable.component".into(),
+            json!({"untouched":{"values":[false,null,3]}}),
+        );
+        let encoded = serde_json::to_vec(&document).unwrap();
+        let decoded: GraphDocument = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(document, decoded);
+        assert!(document.execution_eq(&decoded));
+        document.schema_version = 3;
+        assert!(
+            validate_graph(&document, &registry)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("Migration required"))
+        );
+        assert!(Runtime::from_document(&document, &registry).is_err());
+    }
 
     #[test]
     fn execution_equality_ignores_nested_positions_labels_and_only_rust_layout_keys() {
@@ -760,7 +858,7 @@ mod tests {
     #[test]
     fn document_execution_equality_checks_all_non_graph_fields() {
         let original = demo_document(WorldKind::Objects);
-        let changes: [fn(&mut GraphDocument); 11] = [
+        let changes: [fn(&mut GraphDocument); 14] = [
             |d| d.schema_version += 1,
             |d| d.name.push_str(" changed"),
             |d| {
@@ -776,6 +874,12 @@ mod tests {
             |d| {
                 d.module_versions
                     .insert("world.objects".into(), "other".into());
+            },
+            |d| d.engine_lock = None,
+            |d| d.engine_profile = Some(json!({"selected":"different"})),
+            |d| {
+                d.legacy_archive
+                    .insert("unknown".into(), json!({"preserved":true}));
             },
             |d| d.engine.initialized = !d.engine.initialized,
             |d| {

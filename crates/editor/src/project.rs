@@ -1,8 +1,10 @@
 //! Project persistence, migration and complete editable source export.
-use module_engine_core::{Graph, GraphDocument, ModuleRegistry, Runtime, Severity, validate_graph};
+#[cfg(test)]
+use module_engine_core::ModuleRegistry;
+use module_engine_core::{Graph, GraphDocument, Runtime, Severity, validate_graph};
 use module_engine_project::{
-    AssetManifest, collect_hlsl_source_dependencies, export_assets, hash_file,
-    load_document_migrating, resolve_relative, save_document_with_backup,
+    AssetManifest, collect_hlsl_source_dependencies, export_assets, hash_file, resolve_relative,
+    save_document_with_backup,
 };
 use std::{
     fs,
@@ -10,51 +12,14 @@ use std::{
 };
 
 pub fn read(path: &Path) -> Result<GraphDocument, String> {
-    let mut loaded =
-        load_document_migrating(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if loaded.source_schema <= 3 {
-        let registry = crate::host::registry()?;
-        for (id, version) in &mut loaded.document.module_versions {
-            if first_party_module(id)
-                && ((loaded.source_schema < 3 && matches!(version.as_str(), "0.1.0" | "0.2.0"))
-                    || (loaded.source_schema == 3 && version == "0.3.0"))
-                && let Some(current) = registry.module_version(id)
-            {
-                *version = current.into();
-            }
-        }
-    }
-    Ok(loaded.document)
-}
-fn first_party_module(id: &str) -> bool {
-    matches!(
-        id,
-        "world.objects"
-            | "world.ecs"
-            | "scene.extract"
-            | "render.software3d"
-            | "render.rasterize"
-            | "viewport.output"
-            | "scalar.value"
-            | "clock.time"
-            | "custom.rust"
-            | "custom.rust.update"
-            | "interface.input"
-            | "interface.output"
-            | "render.vulkan"
-            | "gpu.forward"
-            | "gpu.gbuffer"
-            | "gpu.deferred"
-            | "gpu.depth_normal"
-            | "gpu.ssao"
-            | "gpu.tonemap"
-            | "gpu.fxaa"
-            | "gpu.color_encode"
-            | "gpu.custom"
-            | "game.motion"
-    )
+    let document = module_engine_project::read_document_strict(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let package = crate::distribution::detect(path, &document, None)?;
+    crate::engine_profiles::validate(&document, &package.package_root)?;
+    Ok(document)
 }
 /// Fill only missing implementation pins. A conflicting declared pin is retained.
+#[cfg(test)]
 pub fn stamp_module_versions(document: &mut GraphDocument, registry: &ModuleRegistry) {
     fn visit(
         graph: &Graph,
@@ -98,18 +63,23 @@ pub fn stamp_composition_versions(
     document: &mut GraphDocument,
     composition: &module_engine_core::CompositionContext,
 ) -> Result<(), String> {
-    stamp_module_versions(document, &composition.modules);
-    for name in composition.activity(document)?.components {
-        let schema = composition
-            .systems
-            .components()
-            .schema(&name)
-            .ok_or("Active component schema is missing")?;
-        if let Some(version) = composition.module_version(&schema.owner_module) {
-            document
-                .module_versions
-                .entry(schema.owner_module.clone())
-                .or_insert_with(|| version.into());
+    // Explicit approval helper for constructors and diagnostic fixtures only.
+    // Keep conflicting declarations so rejection tests cannot repair them.
+    let before = document.module_versions.clone();
+    let profile = module_engine_project::EngineProfile::from_document(document)?;
+    composition
+        .capture_lock(
+            document,
+            profile.identity,
+            Some(module_engine_core::SdkIdentity::current()),
+        )?
+        .apply_to(document);
+    for (id, version) in before {
+        if composition
+            .module_version(&id)
+            .is_some_and(|installed| installed != version)
+        {
+            document.module_versions.insert(id, version);
         }
     }
     Ok(())
@@ -120,12 +90,8 @@ pub fn save(path: &Path, document: &GraphDocument) -> Result<(), String> {
     let distribution = crate::distribution::detect(path, document, None)?;
     distribution.validate_document(document)?;
     crate::host::validate_game_at(document, &distribution.package_root)?;
-    let mut saved = document.clone();
-    stamp_composition_versions(
-        &mut saved,
-        &crate::host::composition_at(&distribution.package_root)?,
-    )?;
-    save_document_with_backup(path, &saved).map(|_| ())
+    crate::engine_profiles::validate(document, &distribution.package_root)?;
+    save_document_with_backup(path, document).map(|_| ())
 }
 
 /// An exported source workspace in the current directory takes precedence over
@@ -227,7 +193,7 @@ pub fn export_with_package_root(
     let composition = crate::host::composition_at(package_root)?;
     let registry = composition.modules.clone();
     let mut packaged = document.clone();
-    stamp_composition_versions(&mut packaged, &composition)?;
+    crate::engine_profiles::validate(&packaged, package_root)?;
     crate::host::validate_document_at(&packaged, package_root)?;
     let diagnostics = validate_graph(&packaged, &registry);
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
@@ -313,6 +279,7 @@ pub fn export_with_package_root(
         "run.ps1",
         "verify.ps1",
         "toolchain-manifest.json",
+        "engine-sdk.json",
     ] {
         let source = root.join(relative);
         if source.is_file() {
@@ -501,7 +468,7 @@ pub fn export_team_with_package_root(
     let registry = composition.modules.clone();
     let mut normalized = document.clone();
     crate::host::ensure_authoring_configuration(&mut normalized);
-    stamp_composition_versions(&mut normalized, &composition)?;
+    crate::engine_profiles::validate(&normalized, package_root)?;
     let mut packaged = module_engine_core::prepare_team_document(&normalized);
     crate::host::validate_document_at(&packaged, package_root)?;
     if packaged.game.is_some() {
@@ -569,16 +536,8 @@ pub fn export_team_with_package_root(
     packaged
         .shader_sources
         .retain(|id, _| shader_ids.contains(id));
-    let activity = composition.activity(&packaged)?;
-    let mut modules = activity.modules;
-    for component in activity.components {
-        if let Some(schema) = composition.systems.components().schema(&component) {
-            modules.insert(schema.owner_module.clone());
-        }
-    }
-    packaged
-        .module_versions
-        .retain(|id, _| modules.contains(id));
+    // Pins also archive inactive contracts. Removing them would change the
+    // integrity lock without an explicit profile publication.
     let diagnostics = validate_graph(&packaged, &registry);
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
         return Err(diagnostics
@@ -595,6 +554,7 @@ pub fn export_team_with_package_root(
             ready_executable.display()
         ));
     }
+    let native_players = crate::game_package::team_player_variants(&packaged, package_root)?;
     let source = package_root.to_path_buf();
     let resource = package_root.to_path_buf();
     let mut assets =
@@ -633,6 +593,11 @@ pub fn export_team_with_package_root(
     }
     fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     copy_new(ready_executable, &target.join("ModuleEngine.exe"))?;
+    for (native_key, native_player) in native_players {
+        let native_target = target.join("players").join(native_key).join("Player.exe");
+        fs::create_dir_all(native_target.parent().unwrap()).map_err(|e| e.to_string())?;
+        copy_new(&native_player, &native_target)?;
+    }
     for relative in ["toolchain-manifest.json", "LICENSE"] {
         copy_new(&source.join(relative), &target.join(relative))?;
     }
@@ -722,6 +687,11 @@ fn add_game_assets_at(
 
 fn create_custom_sdk(source: &Path, target: &Path) -> Result<(), String> {
     let sdk = target.join(".sdk");
+    fs::create_dir_all(&sdk).map_err(|e| e.to_string())?;
+    copy_new(
+        &source.join("engine-sdk.json"),
+        &sdk.join("engine-sdk.json"),
+    )?;
     fs::create_dir_all(sdk.join("crates/engine-core")).map_err(|e| e.to_string())?;
     copy_tree(
         &source.join("crates/engine-core/src"),
@@ -874,24 +844,27 @@ mod tests {
         old.schema_version = 1;
         let bytes = serde_json::to_vec_pretty(&old).unwrap();
         fs::write(&file, &bytes).unwrap();
-        let mut current = read(&file).unwrap();
-        assert_eq!(current.schema_version, module_engine_core::SCHEMA_VERSION);
+        assert!(read(&file).unwrap_err().contains("migration"));
         assert_eq!(fs::read(&file).unwrap(), bytes);
+        let mut current = crate::host::settings_demo_document(WorldKind::Objects);
         current
             .custom_sources
             .get_mut("speed")
             .unwrap()
-            .push_str("// Сохранённый комментарий\n");
+            .push_str("// Preserved source comment\n");
+        save(&file, &current).unwrap();
+        assert_eq!(read(&file).unwrap(), current);
+        let accepted = fs::read(&file).unwrap();
         current
             .module_versions
             .insert("world.objects".into(), "99.0-incompatible".into());
-        save(&file, &current).unwrap();
+        assert!(save(&file, &current).is_err());
         stamp_module_versions(&mut current, &crate::host::registry().unwrap());
-        assert_eq!(read(&file).unwrap(), current);
         assert_eq!(
             current.module_versions["world.objects"],
             "99.0-incompatible"
         );
+        assert_eq!(fs::read(&file).unwrap(), accepted);
         let backups: Vec<_> = fs::read_dir(&temp)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -1064,9 +1037,9 @@ mod tests {
         );
         assert!(
             composition
-                .validate_document(&document)
-                .iter()
-                .any(|d| d.severity == Severity::Error && d.message.contains("fixture.owner"))
+                .validate_lock(&document, Some(&module_engine_core::SdkIdentity::current()))
+                .unwrap_err()
+                .contains("fixture.owner")
         );
     }
 
@@ -1093,7 +1066,7 @@ mod tests {
         assets
             .register("mesh", "resources/model.bin", &asset_root)
             .unwrap();
-        let mut doc = demo_document(WorldKind::Ecs);
+        let mut doc = crate::host::settings_demo_document(WorldKind::Ecs);
         doc.asset_manifest = serde_json::to_value(assets).unwrap();
         // Inline shaders use the workspace include roots, regardless of source ID.
         doc.shader_sources.insert(
@@ -1230,22 +1203,14 @@ mod tests {
             .insert("clock.time".into(), "9.9.0".into());
         let bytes = serde_json::to_vec(&doc).unwrap();
         fs::write(&path, &bytes).unwrap();
-        let migrated = read(&path).unwrap();
-        assert_eq!(migrated.schema_version, 3);
-        assert_eq!(
-            migrated.module_versions["world.objects"],
-            env!("CARGO_PKG_VERSION")
-        );
-        assert_eq!(migrated.module_versions["world.third_party"], "0.2.0");
-        assert_eq!(migrated.module_versions["clock.time"], "9.9.0");
+        assert!(read(&path).unwrap_err().contains("migration"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let mut current = doc;
         current.schema_version = 3;
-        fs::write(&path, serde_json::to_vec(&current).unwrap()).unwrap();
-        assert_eq!(
-            read(&path).unwrap().module_versions["world.objects"],
-            "0.2.0"
-        );
+        let current_bytes = serde_json::to_vec(&current).unwrap();
+        fs::write(&path, &current_bytes).unwrap();
+        assert!(read(&path).unwrap_err().contains("migration"));
+        assert_eq!(fs::read(&path).unwrap(), current_bytes);
         cleanup(&root);
     }
     #[test]
@@ -1262,5 +1227,121 @@ mod tests {
             .insert("game.motion".into(), "incompatible".into());
         stamp_module_versions(&mut doc, &registry);
         assert_eq!(doc.module_versions["game.motion"], "incompatible");
+    }
+
+    #[test]
+    fn team_delivery_keeps_audio_and_silent_arpg_variants_when_cues_change_but_puzzle_stays_independent()
+     {
+        let backend = module_engine_vulkan::resource_root();
+        let mut arpg = crate::game_host::demo_document();
+        let with_cues = crate::game_package::team_feature_sets(&arpg, &backend).unwrap();
+        assert_eq!(with_cues.len(), 2);
+        assert!(
+            with_cues
+                .iter()
+                .all(|features| features.contains("arpg") && !features.contains("puzzle"))
+        );
+        assert_eq!(
+            with_cues
+                .iter()
+                .filter(|features| features.contains("audio"))
+                .count(),
+            1
+        );
+        let modules = arpg.module_versions.clone();
+        let lock = arpg.engine_lock.clone();
+        arpg.game.as_mut().unwrap().audio_cues.clear();
+        let without_cues = crate::game_package::team_feature_sets(&arpg, &backend).unwrap();
+        assert_eq!(without_cues, with_cues);
+        assert_eq!(arpg.module_versions, modules);
+        assert_eq!(arpg.engine_lock, lock);
+        let puzzle = crate::game_host::puzzle_document();
+        let variants = crate::game_package::team_feature_sets(&puzzle, &backend).unwrap();
+        assert_eq!(variants.len(), 1);
+        assert!(variants[0].contains("puzzle"));
+        assert!(!variants[0].contains("arpg") && !variants[0].contains("audio"));
+    }
+
+    #[test]
+    fn custom_only_schema_consumers_select_the_owner_package_without_activating_gameplay_or_audio()
+    {
+        let backend = module_engine_vulkan::resource_root();
+        let composition = crate::host::composition_at(&backend).unwrap();
+        for (component, owner, expected, unexpected, mut document) in [
+            (
+                "health",
+                "game.health",
+                "arpg",
+                "puzzle",
+                crate::game_host::demo_document(),
+            ),
+            (
+                "puzzle.board",
+                "puzzle.turn",
+                "puzzle",
+                "arpg",
+                crate::game_host::puzzle_document(),
+            ),
+        ] {
+            let mut game = module_engine_core::GameProject::empty();
+            game.execution = module_engine_core::ExecutionGraph {
+                resources: [
+                    ("world", "GameWorld"),
+                    ("input", "GameInput"),
+                    ("events", "GameEvents"),
+                ]
+                .into_iter()
+                .map(|(name, data_type)| module_engine_core::SystemResource {
+                    name: name.into(),
+                    data_type: data_type.into(),
+                    external: true,
+                    initial: serde_json::Value::Null,
+                })
+                .collect(),
+                stages: vec![module_engine_core::SystemStage {
+                    name: "Custom schema consumer".into(),
+                    nodes: vec![module_engine_core::SystemNode {
+                        id: "consumer".into(),
+                        module: "custom.rust.update".into(),
+                        params: serde_json::json!({"source_id":"schema-consumer","components":[component]}),
+                        bindings: ["world", "input", "events"]
+                            .into_iter()
+                            .map(|name| (name.into(), name.into()))
+                            .collect(),
+                        after: vec![],
+                    }],
+                }],
+            };
+            document.game = Some(game);
+            document.custom_sources = std::collections::BTreeMap::from([(
+                "schema-consumer".into(),
+                "fn update(_ctx: &mut ScriptContext) {}".into(),
+            )]);
+            let identity = module_engine_project::EngineProfile::from_document(&document)
+                .unwrap()
+                .identity;
+            composition
+                .capture_lock(
+                    &document,
+                    identity,
+                    Some(module_engine_core::SdkIdentity::current()),
+                )
+                .unwrap()
+                .apply_to(&mut document);
+            let game = document.game.as_ref().unwrap();
+            assert!(
+                composition
+                    .systems
+                    .active_game_contributions(&game.execution)
+                    .is_empty()
+            );
+            let required = composition.required_contracts(&document).unwrap();
+            assert!(required.module_versions.contains_key(owner));
+            assert!(required.component_schemas.contains_key(component));
+            let key = crate::game_package::native_feature_key(&document, &backend).unwrap();
+            let features = key.split('-').collect::<std::collections::BTreeSet<_>>();
+            assert!(features.contains(expected));
+            assert!(!features.contains(unexpected) && !features.contains("audio"));
+        }
     }
 }

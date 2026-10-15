@@ -1,7 +1,7 @@
 //! Compiled Rust Custom workers exchanging owned, serialized command packets.
 //! Worker processes isolate failure from the editor; they are not a security sandbox.
 
-use module_engine_core::{ControlCommand, ScriptContext};
+use module_engine_core::{ControlCommand, ScriptContext, SdkIdentity};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -10,7 +10,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -20,9 +21,16 @@ use thiserror::Error;
 
 mod persistent;
 pub use persistent::StateDeclaration;
+mod cleanup;
+pub use cleanup::{
+    TestArtifactGuard, TestArtifactLease, finish_artifact_cleanup, retain_test_artifacts,
+};
+mod jobs;
+pub use jobs::{JobLease, finish_background_jobs, spawn_job};
 
 const PACKET_MARKER: &str = "__MODULE_ENGINE_SCRIPT_PACKET__";
 const MAX_PACKET: usize = 1024 * 1024;
+const SDK_IDENTITY_ARGUMENT: &str = "--module-engine-sdk-identity";
 static NEXT_WORKER: AtomicU64 = AtomicU64::new(1);
 
 /// Supported compiled entry-point signatures. Other Rust in the source remains
@@ -80,6 +88,11 @@ pub struct ScriptCompiler {
     pub rustc_binary: Option<PathBuf>,
     pub rustup_home: Option<PathBuf>,
     pub rustup_toolchain: Option<String>,
+    /// Exact host/data API contract expected from the selected SDK. Source file
+    /// inventory and compiler/toolchain pins are separate checks.
+    pub sdk_identity: SdkIdentity,
+    // Retain only a fresh test fixture's owner, never an existing project/cache.
+    artifact_scope: Option<Arc<cleanup::TestArtifacts>>,
 }
 
 impl ScriptCompiler {
@@ -111,10 +124,18 @@ impl ScriptCompiler {
             rustc_binary: resolve_tool_program(&tool_root, "rustc", explicit_rustc),
             rustup_home: uses_portable.then(|| tool_root.join(".tools/rustup")),
             rustup_toolchain: uses_portable.then(|| project_toolchain(&tool_root)),
+            artifact_scope: cleanup::fixture_for(&work_dir),
             project_root,
             work_dir,
             compile_timeout: Duration::from_secs(180),
+            sdk_identity: SdkIdentity::current(),
         }
+    }
+
+    pub fn with_sdk_identity(mut self, sdk: SdkIdentity) -> Result<Self, ScriptError> {
+        validate_supported_sdk(&sdk)?;
+        self.sdk_identity = sdk;
+        Ok(self)
     }
 
     /// Select an explicit update or speed function by parsing syntax, then let
@@ -145,6 +166,21 @@ impl ScriptCompiler {
         source: &str,
         kind: ScriptKind,
     ) -> Result<CompiledScript, ScriptError> {
+        self.compile_kind_cancellable(source, kind, &AtomicBool::new(false))
+    }
+
+    /// A background owner may cancel an obsolete compile. No worker/candidate
+    /// is published after cancellation; owned diagnostics remain available.
+    pub fn compile_kind_cancellable(
+        &self,
+        source: &str,
+        kind: ScriptKind,
+        cancelled: &AtomicBool,
+    ) -> Result<CompiledScript, ScriptError> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(ScriptError::Worker("compilation cancelled".into()));
+        }
+        validate_supported_sdk(&self.sdk_identity)?;
         if source.len() > MAX_PACKET {
             return Err(ScriptError::Compile("source exceeds 1 MiB".into()));
         }
@@ -159,6 +195,8 @@ impl ScriptCompiler {
                 "engine-core Cargo.toml is missing".into(),
             ));
         }
+        let selected_sdk = read_sdk_identity(&root)?;
+        validate_sdk_match(&selected_sdk, &self.sdk_identity)?;
         let root_lock = fs::read_to_string(root.join("Cargo.lock")).map_err(|e| {
             ScriptError::Setup(format!("A restored root Cargo.lock is required: {e}"))
         })?;
@@ -175,135 +213,263 @@ impl ScriptCompiler {
         let json_version = &json_versions[0].version;
         fs::create_dir_all(&self.work_dir).map_err(|e| ScriptError::Setup(e.to_string()))?;
         let name = format!(
-            "module_engine_worker_{}_{}",
+            "module_engine_worker_{}_{}_{}",
             std::process::id(),
-            NEXT_WORKER.fetch_add(1, Ordering::Relaxed)
+            NEXT_WORKER.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| ScriptError::Setup(error.to_string()))?
+                .as_nanos(),
         );
-        let directory = self.work_dir.join(&name);
-        fs::create_dir_all(directory.join("src")).map_err(|e| ScriptError::Setup(e.to_string()))?;
-        // JSON strings are valid TOML basic strings for these owned path values.
-        let core_text = core.to_string_lossy();
-        // Windows canonicalize returns a verbatim prefix which Cargo interprets
-        // as a path URL if represented as //?/C: in a manifest.
-        let portable = if let Some(unc) = core_text.strip_prefix("\\\\?\\UNC\\") {
-            format!("//{}", unc.replace('\\', "/"))
-        } else {
-            core_text
-                .strip_prefix("\\\\?\\")
-                .unwrap_or(&core_text)
-                .replace('\\', "/")
-        };
-        let core_path =
-            serde_json::to_string(&portable).map_err(|e| ScriptError::Setup(e.to_string()))?;
-        let manifest = format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nmodule-engine-core = {{ path = {core_path} }}\nserde_json = \"={json_version}\"\n"
-        );
-        fs::write(directory.join("Cargo.toml"), manifest)
-            .map_err(|e| ScriptError::Setup(e.to_string()))?;
-        let worker_lock = directory.join("Cargo.lock");
-        let seed = format!(
-            "{root_lock}\n[[package]]\nname = \"{name}\"\nversion = \"0.0.0\"\ndependencies = [\n \"module-engine-core\",\n \"serde_json {json_version}\",\n]\n"
-        );
-        fs::write(&worker_lock, seed).map_err(|e| ScriptError::Setup(e.to_string()))?;
-        fs::write(
-            directory.join("src/user_program.rs"),
-            user_module_source(source, kind),
-        )
-        .map_err(|e| ScriptError::Setup(e.to_string()))?;
-        fs::write(directory.join("src/main.rs"), worker_source(kind))
-            .map_err(|e| ScriptError::Setup(e.to_string()))?;
         let target = self
             .target_dir
             .clone()
-            .unwrap_or_else(|| directory.join("target"));
+            .unwrap_or_else(|| self.work_dir.join(&name).join("target"));
         let target = if target.is_absolute() {
             target
         } else {
             root.join(target)
         };
-        let make_command = || {
-            let mut command = Command::new(
-                self.cargo_binary
-                    .as_deref()
-                    .unwrap_or_else(|| Path::new("cargo")),
+        let artifacts = Arc::new(
+            cleanup::CandidateArtifacts::create(
+                &self.work_dir,
+                &target,
+                &name,
+                self.artifact_scope.clone(),
+            )
+            .map_err(ScriptError::Setup)?,
+        );
+        let directory = &artifacts.directory;
+        let result = (|| {
+            fs::create_dir_all(directory.join("src"))
+                .map_err(|e| ScriptError::Setup(e.to_string()))?;
+            fs::write(directory.join("source.rs"), source)
+                .map_err(|error| ScriptError::Setup(error.to_string()))?;
+            // JSON strings are valid TOML basic strings for these owned path values.
+            let core_text = core.to_string_lossy();
+            // Windows canonicalize returns a verbatim prefix which Cargo interprets
+            // as a path URL if represented as //?/C: in a manifest.
+            let portable = if let Some(unc) = core_text.strip_prefix("\\\\?\\UNC\\") {
+                format!("//{}", unc.replace('\\', "/"))
+            } else {
+                core_text
+                    .strip_prefix("\\\\?\\")
+                    .unwrap_or(&core_text)
+                    .replace('\\', "/")
+            };
+            let core_path =
+                serde_json::to_string(&portable).map_err(|e| ScriptError::Setup(e.to_string()))?;
+            let manifest = format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nmodule-engine-core = {{ path = {core_path} }}\nserde_json = \"={json_version}\"\n"
             );
+            fs::write(directory.join("Cargo.toml"), manifest)
+                .map_err(|e| ScriptError::Setup(e.to_string()))?;
+            let worker_lock = directory.join("Cargo.lock");
+            let seed = format!(
+                "{root_lock}\n[[package]]\nname = \"{name}\"\nversion = \"0.0.0\"\ndependencies = [\n \"module-engine-core\",\n \"serde_json {json_version}\",\n]\n"
+            );
+            fs::write(&worker_lock, seed).map_err(|e| ScriptError::Setup(e.to_string()))?;
+            fs::write(
+                directory.join("src/user_program.rs"),
+                user_module_source(source, kind),
+            )
+            .map_err(|e| ScriptError::Setup(e.to_string()))?;
+            fs::write(directory.join("src/main.rs"), worker_source(kind))
+                .map_err(|e| ScriptError::Setup(e.to_string()))?;
+            let make_command = || {
+                let mut command = Command::new(
+                    self.cargo_binary
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new("cargo")),
+                );
+                command
+                    .env("CARGO_TARGET_DIR", &target)
+                    .env("CARGO_INCREMENTAL", "0")
+                    .env_remove("CARGO_HOME")
+                    .current_dir(directory);
+                if let Some(home) = &self.cargo_home {
+                    command.env("CARGO_HOME", home);
+                }
+                if let Some(rustc) = &self.rustc_binary {
+                    command.env("RUSTC", rustc);
+                }
+                if let Some(home) = &self.rustup_home {
+                    command.env("RUSTUP_HOME", home);
+                }
+                if let Some(toolchain) = &self.rustup_toolchain {
+                    command.env("RUSTUP_TOOLCHAIN", toolchain);
+                }
+                command
+            };
+            // Cargo may prune unused root-workspace packages and normalize the newly
+            // inserted worker entry. Resolve before building, preserving seeded pins.
+            let mut metadata = make_command();
+            metadata
+                .args(["metadata", "--offline", "--format-version", "1"])
+                .arg("--manifest-path")
+                .arg(directory.join("Cargo.toml"));
+            let resolved = run_bounded(
+                metadata,
+                vec![],
+                self.compile_timeout,
+                cancelled,
+                Some((&artifacts, "Cargo metadata")),
+            )?;
+            if !resolved.success {
+                return Err(ScriptError::Compile(format!(
+                    "{}{}",
+                    resolved.stderr, resolved.stdout
+                )));
+            }
+            let dependency_versions = verify_worker_lock(
+                &root_lock,
+                &fs::read_to_string(&worker_lock).map_err(|e| ScriptError::Setup(e.to_string()))?,
+                &name,
+            )?;
+            let mut command = make_command();
             command
+                .arg("build")
+                .arg("--offline")
+                .arg("--locked")
+                .arg("--manifest-path")
+                .arg(directory.join("Cargo.toml"))
                 .env("CARGO_TARGET_DIR", &target)
                 .env("CARGO_INCREMENTAL", "0")
-                .env_remove("CARGO_HOME")
-                .current_dir(&directory);
+                .current_dir(directory);
             if let Some(home) = &self.cargo_home {
                 command.env("CARGO_HOME", home);
             }
-            if let Some(rustc) = &self.rustc_binary {
-                command.env("RUSTC", rustc);
+            let output = run_bounded(
+                command,
+                vec![],
+                self.compile_timeout,
+                cancelled,
+                Some((&artifacts, "Cargo build")),
+            )?;
+            if !output.success {
+                return Err(ScriptError::Compile(format!(
+                    "{}{}",
+                    output.stderr, output.stdout
+                )));
             }
-            if let Some(home) = &self.rustup_home {
-                command.env("RUSTUP_HOME", home);
+            let built_executable = target
+                .join("debug")
+                .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            if !built_executable.is_file() {
+                return Err(ScriptError::Compile(
+                    "Cargo succeeded without producing the worker executable".into(),
+                ));
             }
-            if let Some(toolchain) = &self.rustup_toolchain {
-                command.env("RUSTUP_TOOLCHAIN", toolchain);
+            let executable = directory.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
+            fs::copy(&built_executable, &executable)
+                .map_err(|error| ScriptError::Setup(error.to_string()))?;
+            artifacts.trim_build_outputs();
+            // Query only the generated harness: no user entry point or simulation
+            // runs. This verifies the API actually linked from the selected sources,
+            // including same-version metadata/source mismatches, before hot apply.
+            let mut probe = Command::new(&executable);
+            probe.arg(SDK_IDENTITY_ARGUMENT).current_dir(&root);
+            let identity = run_bounded(
+                probe,
+                vec![],
+                self.compile_timeout,
+                cancelled,
+                Some((&artifacts, "Linked SDK probe")),
+            )?;
+            if !identity.success {
+                return Err(ScriptError::Setup(format!(
+                    "Compiled SDK identity probe failed: {}{}",
+                    identity.stderr, identity.stdout
+                )));
             }
-            command
-        };
-        // Cargo may prune unused root-workspace packages and normalize the newly
-        // inserted worker entry. Resolve before building, preserving seeded pins.
-        let mut metadata = make_command();
-        metadata
-            .args(["metadata", "--offline", "--format-version", "1"])
-            .arg("--manifest-path")
-            .arg(directory.join("Cargo.toml"));
-        let resolved = run_bounded(metadata, vec![], self.compile_timeout)?;
-        if !resolved.success {
-            return Err(ScriptError::Compile(format!(
-                "{}{}",
-                resolved.stderr, resolved.stdout
-            )));
+            let linked_sdk: SdkIdentity = serde_json::from_str(&identity.stdout)
+                .map_err(|error| ScriptError::Setup(format!("Compiled SDK identity: {error}")))?;
+            validate_sdk_match(&linked_sdk, &self.sdk_identity)?;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(ScriptError::Worker("compilation cancelled".into()));
+            }
+            artifacts.ready();
+            Ok(CompiledScript {
+                source: source.into(),
+                kind,
+                executable,
+                working_dir: compiler_tool_root(&root),
+                worker_lock,
+                dependency_versions,
+                state_declaration: state_declaration.clone(),
+                instance: persistent::new_instance(&state_declaration),
+                sdk_identity: linked_sdk,
+                _artifacts: Some(artifacts.clone()),
+                _retained_scopes: cleanup::fixture_for(&compiler_tool_root(&root))
+                    .into_iter()
+                    .collect(),
+            })
+        })();
+        if let Err(error) = &result {
+            artifacts.failed(&error.to_string());
         }
-        let dependency_versions = verify_worker_lock(
-            &root_lock,
-            &fs::read_to_string(&worker_lock).map_err(|e| ScriptError::Setup(e.to_string()))?,
-            &name,
-        )?;
-        let mut command = make_command();
-        command
-            .arg("build")
-            .arg("--offline")
-            .arg("--locked")
-            .arg("--manifest-path")
-            .arg(directory.join("Cargo.toml"))
-            .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_INCREMENTAL", "0")
-            .current_dir(&directory);
-        if let Some(home) = &self.cargo_home {
-            command.env("CARGO_HOME", home);
-        }
-        let output = run_bounded(command, vec![], self.compile_timeout)?;
-        if !output.success {
-            return Err(ScriptError::Compile(format!(
-                "{}{}",
-                output.stderr, output.stdout
-            )));
-        }
-        let executable = target
-            .join("debug")
-            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        if !executable.is_file() {
-            return Err(ScriptError::Compile(
-                "Cargo succeeded without producing the worker executable".into(),
-            ));
-        }
-        Ok(CompiledScript {
-            source: source.into(),
-            kind,
-            executable,
-            working_dir: compiler_tool_root(&root),
-            worker_lock,
-            dependency_versions,
-            state_declaration: state_declaration.clone(),
-            instance: persistent::new_instance(&state_declaration),
-        })
+        result
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SdkManifest {
+    schema_version: u32,
+    sdk: SdkIdentity,
+}
+
+/// Inspect selected SDK metadata without compiler/device/worker creation. The
+/// package's file inventory must independently verify the actual SDK sources.
+pub fn read_sdk_identity(root: &Path) -> Result<SdkIdentity, ScriptError> {
+    let path = root.join("engine-sdk.json");
+    let mut bytes = Vec::new();
+    fs::File::open(&path)
+        .and_then(|file| file.take(16 * 1024 + 1).read_to_end(&mut bytes))
+        .map_err(|error| {
+            ScriptError::Setup(format!("Selected SDK metadata {}: {error}", path.display()))
+        })?;
+    if bytes.len() > 16 * 1024 {
+        return Err(ScriptError::Setup(
+            "Selected SDK metadata exceeds 16 KiB".into(),
+        ));
+    }
+    let manifest: SdkManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| ScriptError::Setup(format!("Selected SDK metadata: {error}")))?;
+    if manifest.schema_version != 1 {
+        return Err(ScriptError::Setup(
+            "Unsupported selected SDK metadata format".into(),
+        ));
+    }
+    manifest.sdk.validate().map_err(ScriptError::Setup)?;
+    Ok(manifest.sdk)
+}
+
+fn validate_supported_sdk(sdk: &SdkIdentity) -> Result<(), ScriptError> {
+    sdk.validate().map_err(ScriptError::Setup)?;
+    let supported = SdkIdentity::current();
+    if sdk != &supported {
+        return Err(ScriptError::Setup(format!(
+            "SDK identity differs: this host supports exact version '{}' and data API '{}'",
+            supported.version, supported.data_api_fingerprint
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sdk_match(actual: &SdkIdentity, expected: &SdkIdentity) -> Result<(), ScriptError> {
+    validate_supported_sdk(expected)?;
+    actual.validate().map_err(ScriptError::Setup)?;
+    if actual != expected {
+        return Err(ScriptError::Setup(format!(
+            "Selected/compiled SDK identity version '{}' data API '{}' differs from expected version '{}' data API '{}'",
+            actual.version,
+            actual.data_api_fingerprint,
+            expected.version,
+            expected.data_api_fingerprint
+        )));
+    }
+    Ok(())
 }
 
 /// Keep worker artifacts apart from the outer workspace's native build, even
@@ -371,6 +537,13 @@ pub struct CompiledScript {
     dependency_versions: Vec<(String, String)>,
     state_declaration: StateDeclaration,
     instance: std::sync::Arc<std::sync::Mutex<persistent::ScriptInstance>>,
+    sdk_identity: SdkIdentity,
+    // Struct fields drop in declaration order: the instance (and its child)
+    // must close before the last artifact lease can delete the executable.
+    _artifacts: Option<Arc<cleanup::CandidateArtifacts>>,
+    // Precompiled package/asset fixtures also outlive asynchronous actors even
+    // though their installed package files are never runtime-owned artifacts.
+    _retained_scopes: Vec<Arc<cleanup::TestArtifacts>>,
 }
 
 impl CompiledScript {
@@ -397,6 +570,14 @@ impl CompiledScript {
         let state = self.state()?;
         self.instance = persistent::new_instance(&self.state_declaration);
         self.working_dir = root;
+        if let Some(scope) = cleanup::fixture_for(&self.working_dir)
+            && !self
+                ._retained_scopes
+                .iter()
+                .any(|saved| Arc::ptr_eq(saved, &scope))
+        {
+            self._retained_scopes.push(scope);
+        }
         self.migrate_state(state)?;
         Ok(self)
     }
@@ -406,6 +587,9 @@ impl CompiledScript {
     }
     pub fn kind(&self) -> ScriptKind {
         self.kind
+    }
+    pub fn sdk_identity(&self) -> &SdkIdentity {
+        &self.sdk_identity
     }
     pub fn executable(&self) -> &Path {
         &self.executable
@@ -417,6 +601,14 @@ impl CompiledScript {
     /// Verified dependency versions, excluding the generated worker package.
     pub fn dependency_versions(&self) -> &[(String, String)] {
         &self.dependency_versions
+    }
+
+    /// Preserve this candidate's exact source/build log after its final owner
+    /// closes. Executables remain reproducible and failed history is bounded.
+    pub fn retain_diagnostics(&self, reason: &str) {
+        if let Some(artifacts) = &self._artifacts {
+            artifacts.failed(reason);
+        }
     }
 
     /// Evaluate with a reusable bounded JSON-lines worker. The returned state is
@@ -452,13 +644,10 @@ impl ScriptHost {
     /// Blocking convenience; call off the UI thread. Failure preserves active.
     pub fn compile_and_apply(&mut self, source: &str) -> Result<(), ScriptError> {
         let candidate = self.compiler.compile(source)?;
-        if let Some(active) = &self.active {
-            candidate.inherit_state_from(active)?;
-        }
-        self.active = Some(candidate);
-        Ok(())
+        self.apply(candidate)
     }
     pub fn apply(&mut self, candidate: CompiledScript) -> Result<(), ScriptError> {
+        validate_supported_sdk(candidate.sdk_identity())?;
         if let Some(active) = &self.active {
             candidate.inherit_state_from(active)?;
         }
@@ -589,9 +778,13 @@ fn worker_source(kind: ScriptKind) -> String {
     };
     format!(
         r#"use std::io::{{BufRead, Write}};
-use module_engine_core::ScriptContext;
+use module_engine_core::{{ScriptContext, SdkIdentity}};
 mod user_program;
 fn run() -> Result<(), Box<dyn std::error::Error>> {{
+    if std::env::args().nth(1).as_deref() == Some("{SDK_IDENTITY_ARGUMENT}") {{
+        println!("{{}}", serde_json::to_string(&SdkIdentity::current())?);
+        return Ok(());
+    }}
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     loop {{
@@ -601,12 +794,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {{
         if bytes.len() > 1048576 {{ return Err("input too large".into()); }}
         let input: serde_json::Value = serde_json::from_slice(&bytes)?;
         let request_id = input.get("request_id").and_then(serde_json::Value::as_u64).ok_or("missing request_id")?;
+        let sdk: SdkIdentity = serde_json::from_value(input.get("sdk").cloned().ok_or("missing SDK identity")?)?;
+        if sdk != SdkIdentity::current() {{ return Err("SDK identity differs from linked data API".into()); }}
         let mut context: ScriptContext = serde_json::from_value(input.get("context").cloned().ok_or("missing context")?)?;
         context.commands.clear();
         context.emitted_events.clear();
         {invoke}
         if context.commands.len() > 4096 || context.emitted_events.len() > 4096 {{ return Err("too many commands/events".into()); }}
-        let packet = serde_json::json!({{"request_id":request_id,"commands":context.commands,"speed":speed,"state":context.state,"events":context.emitted_events}});
+        let packet = serde_json::json!({{"request_id":request_id,"sdk":SdkIdentity::current(),"commands":context.commands,"speed":speed,"state":context.state,"events":context.emitted_events}});
         let output = serde_json::to_string(&packet)?;
         if output.len() > 1048576 {{ return Err("output too large".into()); }}
         println!("\n{PACKET_MARKER}{{}}", output);
@@ -648,7 +843,12 @@ fn run_bounded(
     mut command: Command,
     input: Vec<u8>,
     timeout: Duration,
+    cancelled: &AtomicBool,
+    log: Option<(&cleanup::CandidateArtifacts, &str)>,
 ) -> Result<ProcessOutput, ScriptError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ScriptError::Worker("compilation cancelled".into()));
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -658,9 +858,12 @@ fn run_bounded(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW, including worker console.
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| ScriptError::Setup(e.to_string()))?;
+    let mut process = OwnedChild::new(
+        command
+            .spawn()
+            .map_err(|e| ScriptError::Setup(e.to_string()))?,
+    )?;
+    let child = &mut process;
     let stdout = read_pipe(child.stdout.take().unwrap());
     let stderr = read_pipe(child.stderr.take().unwrap());
     let mut stdin = child.stdin.take().unwrap();
@@ -674,11 +877,14 @@ fn run_bounded(
             .try_wait()
             .map_err(|e| ScriptError::Worker(e.to_string()))?
         {
-            Some(status) => break status,
-            None if start.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ScriptError::Timeout(timeout.as_millis()));
+            Some(status) => break Ok(status),
+            None if start.elapsed() >= timeout || cancelled.load(Ordering::Acquire) => {
+                child.stop();
+                break Err(if cancelled.load(Ordering::Acquire) {
+                    ScriptError::Worker("compilation cancelled".into())
+                } else {
+                    ScriptError::Timeout(timeout.as_millis())
+                });
             }
             None => thread::sleep(Duration::from_millis(2)),
         }
@@ -692,11 +898,195 @@ fn run_bounded(
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
+    let stdout = collect(stdout);
+    let stderr = collect(stderr);
+    if let Some((artifacts, phase)) = log {
+        artifacts.log(
+            phase,
+            stdout
+                .as_ref()
+                .map_or_else(|error| error.to_string(), Clone::clone)
+                .as_str(),
+            stderr
+                .as_ref()
+                .map_or_else(|error| error.to_string(), Clone::clone)
+                .as_str(),
+        );
+    }
     Ok(ProcessOutput {
-        success: status.success(),
-        stdout: collect(stdout)?,
-        stderr: collect(stderr)?,
+        success: status?.success(),
+        stdout: stdout?,
+        stderr: stderr?,
     })
+}
+
+#[derive(Debug)]
+struct OwnedChild {
+    child: std::process::Child,
+    #[cfg(windows)]
+    job: WindowsJob,
+}
+impl OwnedChild {
+    fn new(mut child: std::process::Child) -> Result<Self, ScriptError> {
+        #[cfg(windows)]
+        let job = WindowsJob::new(&child).map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            ScriptError::Setup(format!("Cannot own child process tree: {error}"))
+        })?;
+        Ok(Self {
+            child,
+            #[cfg(windows)]
+            job,
+        })
+    }
+    fn stop(&mut self) {
+        #[cfg(windows)]
+        self.job.terminate();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+impl std::ops::Deref for OwnedChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+impl std::ops::DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+// Own the actual process handles, rather than starting taskkill after cancellation.
+// Its startup alone can outlast a short worker. Descendants inherit this job;
+// terminating it covers Cargo/rustc and Custom-created children, without PID reuse.
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsJob(isize);
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreateJobObjectW(attributes: *const std::ffi::c_void, name: *const u16) -> isize;
+    fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+    fn SetInformationJobObject(
+        job: isize,
+        class: i32,
+        data: *const std::ffi::c_void,
+        size: u32,
+    ) -> i32;
+    fn TerminateJobObject(job: isize, code: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: isize,
+        class: i32,
+        data: *mut std::ffi::c_void,
+        size: u32,
+        returned: *mut u32,
+    ) -> i32;
+    fn CloseHandle(handle: isize) -> i32;
+}
+#[cfg(windows)]
+impl WindowsJob {
+    fn new(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: null requests an unnamed job with default security attributes.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let job = Self(handle);
+        #[repr(C)]
+        #[derive(Default)]
+        struct BasicLimits {
+            process_user_time: i64,
+            job_user_time: i64,
+            flags: u32,
+            minimum_working_set: usize,
+            maximum_working_set: usize,
+            active_process_limit: u32,
+            affinity: usize,
+            priority_class: u32,
+            scheduling_class: u32,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct ExtendedLimits {
+            basic: BasicLimits,
+            io_counters: [u64; 6],
+            process_memory_limit: usize,
+            job_memory_limit: usize,
+            peak_process_memory: usize,
+            peak_job_memory: usize,
+        }
+        let mut limits = ExtendedLimits::default();
+        limits.basic.flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        // SAFETY: the extended-limit layout is the Windows C ABI. Closing the
+        // last non-inheritable handle also kills children after a host crash.
+        if unsafe {
+            SetInformationJobObject(
+                handle,
+                9,
+                (&limits as *const ExtendedLimits).cast(),
+                std::mem::size_of::<ExtendedLimits>() as u32,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: both handles are live; Child owns its process handle.
+        if unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as isize) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+    fn terminate(&self) {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Accounting {
+            times: [i64; 4],
+            page_faults: u32,
+            total_processes: u32,
+            active_processes: u32,
+            terminated_processes: u32,
+        }
+        // SAFETY: this wrapper exclusively owns the live job. Wait for all owned
+        // descendants to leave before their artifact leases can be released.
+        unsafe {
+            TerminateJobObject(self.0, 1);
+        }
+        loop {
+            let mut accounting = Accounting::default();
+            let success = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    1,
+                    (&mut accounting as *mut Accounting).cast(),
+                    std::mem::size_of::<Accounting>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if success == 0 || accounting.active_processes == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        self.terminate();
+        // SAFETY: close exactly the handle returned by CreateJobObjectW.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -704,7 +1094,97 @@ mod tests {
     use super::*;
     use module_engine_core::{EcsWorld, ObjectsWorld, RenderOverrides, WorldProvider};
     use std::collections::BTreeMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn owned_program(source: &str, sdk_identity: SdkIdentity) -> CompiledScript {
+        let declaration = StateDeclaration {
+            schema: "fixture.counter/1".into(),
+            initial: serde_json::json!({"count":0}),
+        };
+        CompiledScript {
+            source: source.into(),
+            kind: ScriptKind::Update,
+            executable: PathBuf::from("not-started"),
+            working_dir: PathBuf::from("."),
+            worker_lock: PathBuf::new(),
+            dependency_versions: vec![],
+            state_declaration: declaration.clone(),
+            instance: persistent::new_instance(&declaration),
+            sdk_identity,
+            _artifacts: None,
+            _retained_scopes: vec![],
+        }
+    }
+
+    #[test]
+    fn selected_sdk_metadata_rejects_before_cargo_or_candidate_files_are_created() {
+        let artifacts =
+            TestArtifactGuard::new(&std::env::temp_dir(), "module-sdk-metadata").unwrap();
+        let root = artifacts.path().to_path_buf();
+        fs::create_dir_all(root.join("crates/engine-core")).unwrap();
+        fs::write(
+            root.join("crates/engine-core/Cargo.toml"),
+            "not read by Cargo",
+        )
+        .unwrap();
+        let work = root.join("candidate-work");
+        let mut compiler = ScriptCompiler::new(root.clone(), work.clone());
+        compiler.cargo_binary = Some(root.join("must-not-start-cargo"));
+        let missing = compiler
+            .compile("fn update(_: &mut ScriptContext) {}")
+            .unwrap_err();
+        assert!(missing.to_string().contains("engine-sdk.json"));
+        let mut wrong_version = SdkIdentity::current();
+        wrong_version.version.push_str("-different");
+        let mut wrong_api = SdkIdentity::current();
+        wrong_api.data_api_fingerprint = "module-engine-data-api/v1".into();
+        for sdk in [wrong_version, wrong_api] {
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"schema_version":1,"sdk":sdk})).unwrap();
+            fs::write(root.join("engine-sdk.json"), &bytes).unwrap();
+            let error = compiler
+                .compile("fn update(_: &mut ScriptContext) {}")
+                .unwrap_err();
+            assert!(error.to_string().contains("SDK"), "{error}");
+            assert!(!work.exists());
+            assert_eq!(fs::read(root.join("engine-sdk.json")).unwrap(), bytes);
+        }
+        let mut unsupported = SdkIdentity::current();
+        unsupported.version = "future-version".into();
+        assert!(compiler.with_sdk_identity(unsupported).is_err());
+    }
+
+    #[test]
+    fn incompatible_sdk_apply_preserves_last_accepted_program_and_owned_state() {
+        let compiler = ScriptCompiler::new(PathBuf::from("."), PathBuf::from("not-created"));
+        let mut host = ScriptHost::new(compiler);
+        let previous = owned_program("previous", SdkIdentity::current());
+        previous
+            .migrate_state(serde_json::json!({"count":7}))
+            .unwrap();
+        host.apply(previous.clone()).unwrap();
+        let mut wrong = SdkIdentity::current();
+        wrong.version.push_str("-other");
+        let candidate = owned_program("candidate", wrong);
+        candidate
+            .migrate_state(serde_json::json!({"count":99}))
+            .unwrap();
+        assert!(candidate.inherit_state_from(&previous).is_err());
+        assert!(host.apply(candidate).is_err());
+        assert_eq!(host.active_source(), Some("previous"));
+        assert_eq!(
+            host.active().unwrap().state().unwrap(),
+            serde_json::json!({"count":7})
+        );
+        assert_eq!(previous.state().unwrap(), serde_json::json!({"count":7}));
+        assert_eq!(previous.worker_process_id().unwrap(), None);
+        let compatible = owned_program("compatible", SdkIdentity::current());
+        host.apply(compatible).unwrap();
+        assert_eq!(host.active_source(), Some("compatible"));
+        assert_eq!(
+            host.active().unwrap().state().unwrap(),
+            serde_json::json!({"count":7})
+        );
+    }
 
     #[test]
     fn compiler_assets_classification_keeps_full_sources_named_sdk_in_their_own_package() {
@@ -712,14 +1192,9 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap();
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = workspace.join(format!(
-            ".work/test-temp/compiler-root-{}-{stamp}",
-            std::process::id()
-        ));
+        let artifacts =
+            TestArtifactGuard::new(&workspace.join(".work/test-temp"), "compiler-root").unwrap();
+        let base = artifacts.path();
         let full = base.join("full/.sdk");
         let team = base.join("team/.sdk");
         fs::create_dir_all(full.join("crates/editor/src")).unwrap();
@@ -728,10 +1203,6 @@ mod tests {
         fs::write(team.join("crates/engine-core/Cargo.toml"), "").unwrap();
         assert_eq!(compiler_tool_root(&full), full);
         assert_eq!(compiler_tool_root(&team), base.join("team"));
-        let allowed = workspace.join(".work/test-temp").canonicalize().unwrap();
-        let base = base.canonicalize().unwrap();
-        assert!(base.starts_with(allowed));
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -740,14 +1211,10 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap();
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = compiler_root.join(format!(
-            ".work/test-temp/script-assets-{}-{stamp}",
-            std::process::id()
-        ));
+        let artifacts =
+            TestArtifactGuard::new(&compiler_root.join(".work/test-temp"), "script-assets")
+                .unwrap();
+        let base = artifacts.path();
         let first_root = base.join("first");
         let second_root = base.join("second");
         fs::create_dir_all(first_root.join("assets")).unwrap();
@@ -760,10 +1227,7 @@ fn update(ctx: &mut ScriptContext) {
     ctx.state["asset"] = serde_json::json!(std::fs::read_to_string("assets/marker.txt").unwrap());
 }
 "#;
-        let compiler = ScriptCompiler::new(
-            compiler_root.clone(),
-            compiler_root.join(".work/asset-route-workers"),
-        );
+        let compiler = ScriptCompiler::new(compiler_root.clone(), base.join("compile"));
         // Exercise the default compiler, not just target-path construction:
         // compiling a real worker must leave the outer Cargo/rustdoc inputs
         // byte/metadata-identical in its native dependency directory.
@@ -800,9 +1264,10 @@ fn update(ctx: &mut ScriptContext) {
             .unwrap()
             .with_asset_root(&first_root)
             .unwrap();
+        assert_eq!(active.executable().parent(), active.worker_lock().parent());
         assert!(
-            active
-                .executable
+            !active
+                .executable()
                 .starts_with(compiler.target_dir.as_ref().unwrap())
         );
         assert_eq!(
@@ -811,6 +1276,8 @@ fn update(ctx: &mut ScriptContext) {
             "worker compilation replaced outer Cargo artifacts"
         );
         let context = ScriptContext::new(0., 1. / 60., vec![]);
+        let active_executable = active.executable().to_path_buf();
+        let active_source = active.worker_lock().parent().unwrap().join("source.rs");
         let tick = active.tick(&context, Duration::from_secs(2)).unwrap();
         assert_eq!(tick.state["asset"], "first project");
         active.commit_tick(&tick).unwrap();
@@ -841,16 +1308,51 @@ fn update(ctx: &mut ScriptContext) {
         assert_eq!(next.state["asset"], "first project");
         assert_eq!(next.state["count"], 5);
         drop(candidate);
+        // A runtime diagnostic is not a completed failure: the last accepted
+        // candidate must remain restartable even while other failures age out.
+        active.retain_diagnostics("runtime error on a still accepted program");
+        active.stop_worker().unwrap();
+        assert!(active.worker_process_id().unwrap().is_none());
+        for index in 0..20 {
+            let failure = cleanup::CandidateArtifacts::create(
+                &compiler.work_dir,
+                compiler.target_dir.as_ref().unwrap(),
+                &format!(
+                    "module_engine_worker_completed_failure_{}_{}",
+                    std::process::id(),
+                    index
+                ),
+                compiler.artifact_scope.clone(),
+            )
+            .unwrap();
+            failure.failed("completed independent compile failure");
+        }
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(
+            active_executable.is_file(),
+            "retention pruned a paused accepted executable"
+        );
+        assert_eq!(fs::read_to_string(&active_source).unwrap(), source);
+        let restarted = active.tick(&context, Duration::from_secs(2)).unwrap();
+        assert_eq!(restarted.state["asset"], "first project");
+        assert_eq!(restarted.state["count"], 3);
+        active.commit_tick(&restarted).unwrap();
         drop(rebound);
         drop(same);
         drop(active);
-        let allowed = compiler_root
-            .join(".work/test-temp")
-            .canonicalize()
-            .unwrap();
-        let base = base.canonicalize().unwrap();
-        assert!(base.starts_with(allowed));
-        fs::remove_dir_all(base).unwrap();
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(
+            !active_executable.exists(),
+            "last fork must stop before its executable is retired"
+        );
+        assert!(
+            active_source.is_file(),
+            "test source survives until the fixture outcome is known"
+        );
+        assert!(
+            compiler.target_dir.as_ref().unwrap().is_dir(),
+            "shared dependencies survive retiring candidates"
+        );
     }
 
     #[test]
@@ -861,12 +1363,11 @@ fn update(ctx: &mut ScriptContext) {
             .parent()
             .unwrap()
             .to_path_buf();
-        let work = root
-            .join(".work")
-            .join(format!("state-test-{}", std::process::id()));
+        let artifacts =
+            TestArtifactGuard::new(&root.join(".work/test-temp"), "state-test").unwrap();
+        let work = artifacts.path().to_path_buf();
         let mut compiler = ScriptCompiler::new(root.clone(), work.clone());
         compiler.cargo_home = resolve_cargo_home(&root, None);
-        compiler.target_dir = Some(work.join("target"));
         let source = r#"// module-engine-state: {"schema":"counter.v1","initial":{"count":0,"asset":""}}
 fn update(ctx: &mut ScriptContext) {
     let count = ctx.state["count"].as_u64().unwrap() + 1;
@@ -914,6 +1415,27 @@ fn update(ctx: &mut ScriptContext) {
             fork.worker_process_id().unwrap(),
             active.worker_process_id().unwrap()
         );
+
+        let mut rejected_sdk_host = ScriptHost::new(compiler.clone());
+        rejected_sdk_host.apply(active.clone()).unwrap();
+        rejected_sdk_host
+            .compiler
+            .sdk_identity
+            .version
+            .push_str("-incompatible");
+        assert!(rejected_sdk_host.compile_and_apply(source).is_err());
+        assert_eq!(rejected_sdk_host.active_source(), Some(source));
+        assert_eq!(
+            rejected_sdk_host.active().unwrap().state().unwrap()["count"],
+            2
+        );
+        assert_eq!(active.worker_process_id().unwrap(), Some(pid));
+        let after_sdk_rejection = rejected_sdk_host
+            .tick(&context, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(after_sdk_rejection.state["count"], 3);
+        assert_eq!(active.state().unwrap()["count"], 2);
+        assert_eq!(active.sdk_identity(), &SdkIdentity::current());
 
         let edited = source.replace("unwrap() + 1", "unwrap() + 2");
         let candidate = compiler.compile(&edited).unwrap();
@@ -1020,16 +1542,16 @@ fn update(ctx: &mut ScriptContext) {
             .parent()
             .unwrap()
             .to_path_buf();
-        let work = root
-            .join(".work")
-            .join(format!("script-test-{}", std::process::id()));
+        let artifacts =
+            TestArtifactGuard::new(&root.join(".work/test-temp"), "script-test").unwrap();
+        let work = artifacts.path().to_path_buf();
         let mut compiler = ScriptCompiler::new(root.clone(), work.clone());
         // Actual subprocess builds remove inherited CARGO_HOME and set the
         // project/sibling cache selected without consulting that environment.
         compiler.cargo_home = resolve_cargo_home(&root, None);
         assert!(compiler.cargo_home.is_some());
-        // Do not contend with an outer cargo test process's target directory.
-        compiler.target_dir = Some(work.join("target"));
+        // The default custom-workers dependency target is shared across test
+        // fixtures and separate from the outer native Cargo build.
         let mut host = ScriptHost::new(compiler);
         let source = command_demo_source();
         host.compile_and_apply(&source).unwrap();
@@ -1068,6 +1590,33 @@ fn update(ctx: &mut ScriptContext) {
         let bad = "fn update(ctx:&mut ScriptContext) { ctx.does_not_exist(); }";
         assert!(host.compile_and_apply(bad).is_err());
         assert_eq!(host.active_source(), Some(source.as_str()));
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        let failed = fs::read_dir(&work)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                fs::read_to_string(entry.path().join("source.rs"))
+                    .ok()
+                    .as_deref()
+                    == Some(bad)
+            })
+            .expect("failed source must be retained with its compiler diagnostics")
+            .path();
+        assert!(
+            fs::read_to_string(failed.join("build.log"))
+                .unwrap()
+                .contains("does_not_exist")
+        );
+        assert!(failed.join("failure.txt").is_file());
+        assert!(
+            !failed
+                .join(format!("worker{}", std::env::consts::EXE_SUFFIX))
+                .exists()
+        );
+        assert!(
+            host.active().unwrap().executable().is_file(),
+            "failed compilation must retain the last accepted binary"
+        );
         let asynchronous =
             "async fn update(ctx:&mut ScriptContext) { ctx.set_color(1,[1,2,3,255]); }";
         assert!(host.compile_and_apply(asynchronous).is_err());
@@ -1149,6 +1698,181 @@ fn update(ctx: &mut ScriptContext) {
             vec![("serde_json".into(), "1.0.100".into())]
         );
     }
+
+    #[test]
+    fn cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit() {
+        if let Some(directory) = std::env::var_os("MODULE_ENGINE_CLEANUP_CHILD") {
+            let directory = PathBuf::from(directory);
+            #[cfg(windows)]
+            if std::env::var_os("MODULE_ENGINE_CLEANUP_CHILD_ABRUPT_OWNER").is_some() {
+                use std::os::windows::process::CommandExt;
+                let descendant = directory.join("abrupt-descendant");
+                fs::create_dir(&descendant).unwrap();
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+                    .env_remove("MODULE_ENGINE_CLEANUP_CHILD_ABRUPT_OWNER")
+                    .env("MODULE_ENGINE_CLEANUP_CHILD", &descendant)
+                    .env("MODULE_ENGINE_CLEANUP_CHILD_DELAY_MS", "500")
+                    .creation_flags(0x08000000);
+                let _owned = OwnedChild::new(command.spawn().unwrap()).unwrap();
+                let start = Instant::now();
+                while !descendant.join("started").is_file() {
+                    assert!(start.elapsed() < Duration::from_secs(2));
+                    thread::sleep(Duration::from_millis(2));
+                }
+                fs::write(directory.join("started"), "owner exits without Drop").unwrap();
+                std::process::exit(0);
+            }
+            if std::env::var_os("MODULE_ENGINE_CLEANUP_CHILD_SPAWN_DESCENDANT").is_some() {
+                let descendant = directory.join("descendant");
+                fs::create_dir(&descendant).unwrap();
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+                    .env_remove("MODULE_ENGINE_CLEANUP_CHILD_SPAWN_DESCENDANT")
+                    .env("MODULE_ENGINE_CLEANUP_CHILD", &descendant)
+                    .env("MODULE_ENGINE_CLEANUP_CHILD_DELAY_MS", "500");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(0x08000000);
+                }
+                let mut descendant_child = command.spawn().unwrap();
+                let start = Instant::now();
+                while !descendant.join("started").is_file() {
+                    assert!(start.elapsed() < Duration::from_secs(2));
+                    thread::sleep(Duration::from_millis(2));
+                }
+                fs::write(directory.join("started"), "tree started").unwrap();
+                let _ = descendant_child.wait();
+                fs::write(directory.join("completed"), "unexpected tree survivor").unwrap();
+                return;
+            }
+            fs::write(directory.join("started"), "started").unwrap();
+            let delay = std::env::var("MODULE_ENGINE_CLEANUP_CHILD_DELAY_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(300)
+                .min(30_000);
+            thread::sleep(Duration::from_millis(delay));
+            fs::write(directory.join("completed"), "unexpected survivor").unwrap();
+            return;
+        }
+        let artifacts = TestArtifactGuard::new(&std::env::temp_dir(), "module-cancel").unwrap();
+        let work = artifacts.path().join("never-created");
+        let compiler = ScriptCompiler::new(artifacts.path().to_path_buf(), work.clone());
+        assert!(
+            compiler
+                .compile_kind_cancellable(
+                    "fn update(_: &mut ScriptContext) {}",
+                    ScriptKind::Update,
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        assert!(!work.exists());
+
+        let started = artifacts.path().join("started");
+        let completed = artifacts.path().join("completed");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let wait_started = started.clone();
+        let signal_thread = thread::spawn(move || {
+            let start = Instant::now();
+            while !wait_started.exists() && start.elapsed() < Duration::from_secs(2) {
+                thread::sleep(Duration::from_millis(2));
+            }
+            signal.store(true, Ordering::Release);
+        });
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+            .env("MODULE_ENGINE_CLEANUP_CHILD", artifacts.path());
+        let result = run_bounded(command, vec![], Duration::from_secs(3), &cancelled, None);
+        signal_thread.join().unwrap();
+        assert!(
+            started.is_file(),
+            "the cancellation fixture must really start"
+        );
+        assert!(matches!(result, Err(ScriptError::Worker(error)) if error.contains("cancelled")));
+        thread::sleep(Duration::from_millis(350));
+        assert!(
+            !completed.exists(),
+            "cancelled child continued executing after run_bounded returned"
+        );
+
+        #[cfg(windows)]
+        {
+            fs::remove_file(&started).unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let signal = cancelled.clone();
+            let wait_started = started.clone();
+            let signal_thread = thread::spawn(move || {
+                let start = Instant::now();
+                while !wait_started.exists() && start.elapsed() < Duration::from_secs(3) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                signal.store(true, Ordering::Release);
+            });
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+                .env("MODULE_ENGINE_CLEANUP_CHILD", artifacts.path())
+                .env("MODULE_ENGINE_CLEANUP_CHILD_SPAWN_DESCENDANT", "1");
+            let result = run_bounded(command, vec![], Duration::from_secs(5), &cancelled, None);
+            signal_thread.join().unwrap();
+            assert!(started.is_file(), "the owned descendant must really start");
+            assert!(
+                matches!(result, Err(ScriptError::Worker(error)) if error.contains("cancelled"))
+            );
+            thread::sleep(Duration::from_millis(550));
+            assert!(!completed.exists());
+            assert!(
+                !artifacts.path().join("descendant/completed").exists(),
+                "cancelled descendant continued executing after its owner returned"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_job_kills_children_after_host_process_exits_without_running_drop() {
+        use std::os::windows::process::CommandExt;
+        let artifacts =
+            TestArtifactGuard::new(&std::env::temp_dir(), "module-abrupt-owner").unwrap();
+        // Deliberately do not put this owner in our OwnedChild. Only its own
+        // last-handle-close protection can terminate the started descendant.
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+            .env("MODULE_ENGINE_CLEANUP_CHILD", artifacts.path())
+            .env("MODULE_ENGINE_CLEANUP_CHILD_ABRUPT_OWNER", "1")
+            .creation_flags(0x08000000)
+            .spawn().unwrap();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = owner.try_wait().unwrap() {
+                break status;
+            }
+            if start.elapsed() > Duration::from_secs(4) {
+                let _ = owner.kill();
+                let _ = owner.wait();
+                panic!("abrupt owner fixture did not exit");
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert!(status.success());
+        assert!(artifacts.path().join("started").is_file());
+        assert!(artifacts.path().join("abrupt-descendant/started").is_file());
+        thread::sleep(Duration::from_millis(550));
+        assert!(
+            !artifacts
+                .path()
+                .join("abrupt-descendant/completed")
+                .exists(),
+            "child survived its owner's process exit"
+        );
+    }
+
     #[test]
     fn worker_builds_use_a_separate_target_under_both_default_and_explicit_bases() {
         let root = Path::new("engine");
@@ -1165,11 +1889,9 @@ fn update(ctx: &mut ScriptContext) {
 
     #[test]
     fn cache_selection_follows_project_then_sibling_then_portable_then_environment() {
-        let directory = std::env::temp_dir().join(format!(
-            "module-script-cache-{}-{}",
-            std::process::id(),
-            NEXT_WORKER.fetch_add(1, Ordering::Relaxed)
-        ));
+        let artifacts =
+            TestArtifactGuard::new(&std::env::temp_dir(), "module-script-cache").unwrap();
+        let directory = artifacts.path();
         let project = directory.join("project");
         fs::create_dir_all(project.join(".tools/cargo")).unwrap();
         let inherited = directory.join("other-cache");
@@ -1204,6 +1926,5 @@ fn update(ctx: &mut ScriptContext) {
         assert!(resolve_tool_program(&project, "rustc", None).is_none());
         assert_eq!(compiler_tool_root(&project.join(".sdk")), project);
         assert_eq!(compiler_tool_root(&project), project);
-        // Tests retain scratch evidence rather than recursively deleting paths.
     }
 }

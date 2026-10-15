@@ -1,0 +1,124 @@
+{
+  "module_versions": {
+    "clock.time": "0.4.0",
+    "custom.rust": "0.4.0",
+    "custom.rust.update": "0.4.0",
+    "example.spin": "0.4.0",
+    "game.ai": "0.4.0",
+    "game.audio": "0.4.0",
+    "game.collision": "0.4.0",
+    "game.combat": "0.4.0",
+    "game.health": "0.4.0",
+    "game.input": "0.4.0",
+    "game.motion": "0.4.0",
+    "game.movement": "0.4.0",
+    "game.portals": "0.4.0",
+    "gpu.color_encode": "0.4.0",
+    "gpu.custom": "0.4.0",
+    "gpu.deferred": "0.4.0",
+    "gpu.depth_normal": "0.4.0",
+    "gpu.forward": "0.4.0",
+    "gpu.fxaa": "0.4.0",
+    "gpu.gbuffer": "0.4.0",
+    "gpu.ssao": "0.4.0",
+    "gpu.tonemap": "0.4.0",
+    "interface.input": "0.4.0",
+    "interface.output": "0.4.0",
+    "puzzle.result": "0.4.0",
+    "puzzle.turn": "0.4.0",
+    "render.rasterize": "0.4.0",
+    "render.software3d": "0.4.0",
+    "render.vulkan": "0.4.0",
+    "scalar.value": "0.4.0",
+    "scene.extract": "0.4.0",
+    "viewport.output": "0.4.0",
+    "world.ecs": "0.4.0",
+    "world.objects": "0.4.0"
+  },
+  "component_schemas": {
+    "actor": {
+      "owner_module": "game.movement",
+      "version": "1",
+      "contract_hash": "ff11f2db523fc916d8ee3e58dfb7709d4b9ec963912fbdff3253b05c08fb120d"
+    },
+    "ai": {
+      "owner_module": "game.ai",
+      "version": "1",
+      "contract_hash": "59518e0b7445ed67baba909cb68da729597ef9c22e925c7558fd095d9525202c"
+    },
+    "boss": {
+      "owner_module": "game.health",
+      "version": "1",
+      "contract_hash": "ecfa2f104f7cfcd1989217aff29bcf29c5cb41c90374c7a9afc8df5b9d435dde"
+    },
+    "example.spin": {
+      "owner_module": "example.spin",
+      "version": "1",
+      "contract_hash": "e8505fc8859c3152af3406880a795c4112dff227ab8aee1f847658cec7631573"
+    },
+    "health": {
+      "owner_module": "game.health",
+      "version": "1",
+      "contract_hash": "3352bd6bf8b15f18447408f950fbb5f2b4e26497820a9b6469e6961a8c0d942f"
+    },
+    "material": {
+      "owner_module": "scene.extract",
+      "version": "1",
+      "contract_hash": "43c87a9c77d77045613c60f6e2d3e17341ffb3d99fa34f8eb5f15b15e537060b"
+    },
+    "melee": {
+      "owner_module": "game.combat",
+      "version": "1",
+      "contract_hash": "9c7725c43c88cae63269b4143d9a17392c5f2433fa9ec691e6fa6dbb97cd2890"
+    },
+    "mesh": {
+      "owner_module": "scene.extract",
+      "version": "1",
+      "contract_hash": "d93061cb532cc3d96581fa3a461186a9a014a5b3af415344f38dab831e37b69f"
+    },
+    "obstacle": {
+      "owner_module": "game.collision",
+      "version": "1",
+      "contract_hash": "67037276a6dadde46c3f81a3d27df7b9bb09ff7334837a825ba6d8c522ea8a97"
+    },
+    "persistent": {
+      "owner_module": "game.portals",
+      "version": "1",
+      "contract_hash": "a51f236f2d8e9e78270f9f84c466cfe968b8507d3e2ecb4652fccd7b12ba4244"
+    },
+    "player": {
+      "owner_module": "game.input",
+      "version": "1",
+      "contract_hash": "efb0517cfc7d4b714efa07722b32acfe634ab368e637cf2b5a4b3501d270c598"
+    },
+    "portal": {
+      "owner_module": "game.portals",
+      "version": "1",
+      "contract_hash": "58882a8921fb8c2f361ab42f1cf3c9d1ba0c63051dad27fb487aa926aab7d899"
+    },
+    "puzzle.board": {
+      "owner_module": "puzzle.turn",
+      "version": "1",
+      "contract_hash": "f3879fdd17166f469d4db6ec5bcfc5127f62200252107bb49711f60b9f5579db"
+    },
+    "puzzle.cell": {
+      "owner_module": "puzzle.turn",
+      "version": "1",
+      "contract_hash": "606bcfcee0991eddb180e95490b83b312c33719a5a164ed401772c0b6545fde0"
+    }
+  },
+  "system_state_schemas": {
+    "custom.rust.update": "owned-rust-state-v1",
+    "example.spin": "example.spin/1",
+    "game.ai": "game.ai/1",
+    "game.audio": "game.audio/1",
+    "game.collision": "game.collision/1",
+    "game.combat": "game.combat/1",
+    "game.health": "game.health/1",
+    "game.input": "game.input/1",
+    "game.movement": "game.movement/1",
+    "game.portals": "game.portals/1",
+    "puzzle.result": "puzzle.result/1",
+    "puzzle.turn": "puzzle.turn/1"
+  }
+}

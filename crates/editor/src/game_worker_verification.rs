@@ -230,7 +230,7 @@ fn host(
     compile: &Path,
 ) -> Result<GameHost, String> {
     let mut host =
-        crate::game_host::new_at(document, root, backend, Some(compile), WorldKind::Objects)?;
+        crate::game_host::new_at(document, root, backend, Some(compile), WorldKind::Custom)?;
     host.services.set_enabled(false);
     Ok(host)
 }

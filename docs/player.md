@@ -1,15 +1,15 @@
 # Самостоятельная игра и проверки
 
-Рабочая папка проекта: `E:\ModuleEngine`. Авторский пример хранится в `game-project.json`; прежний `project.json` сохраняется отдельно.
+Рабочая папка проекта: `E:\ModuleEngine`. Авторский пример хранится в `game-project-v4.json` после [явной миграции в копию](engine-profiles.md); исходный `game-project.json` и прежний `project.json` сохраняется отдельно.
 
 ## Запуск
 
 Исполнение игры работает в [постоянном фоновом GameWorker](game-worker.md). Окно отображает завершённые снимки, обрабатывает ввод и не ждёт медленный Rust Custom. При перегрузке отдельно показываются стоимость tick и отставание симуляции; скорость самой игры зависит от её кода.
 
 ```powershell
-.\outputs\ModuleEngine.exe game-project.json
+.\outputs\ModuleEngine.exe game-project-v4.json
 # Окно редактора: выберите Game / Scene. Engine → Gameplay Systems редактирует исполнение.
-.\outputs\ModuleEngine.exe --play game-project.json
+.\outputs\ModuleEngine.exe --play game-project-v4.json
 # Игровое окно без редакторских панелей.
 ```
 
@@ -32,9 +32,11 @@ WASD перемещает игрока. ЛКМ наносит удар в нап
 ## Экспорт
 
 ```powershell
-.\outputs\ModuleEngine.exe --export-game game-project.json outputs\my-game
+.\outputs\ModuleEngine.exe --export-game game-project-v4.json outputs\my-game
 .\outputs\my-game\Player.exe
 ```
+
+Player собирается отдельным пакетом с выбранными native features; редакторский exe в него не копируется. `player.json` v2 закрепляет точный набор features и SDK API. См. [профили и совместимость](engine-profiles.md).
 
 Папка назначения должна быть новой или пустой. Экспорт создаёт Player.exe, project.json, player.json с контрольными суммами, зависимости моделей/материалов/звуков и `.spirv` для выбранных графов. Rust workers находятся в scripts/<source-id>. После копирования папки на другую Windows-машину запуск не использует исходный рабочий каталог, SDK или компиляторы.
 
@@ -47,8 +49,8 @@ WASD перемещает игрока. ЛКМ наносит удар в нап
 ## Воспроизводимая проверка
 
 ```powershell
-.\outputs\ModuleEngine.exe --game-check game-project.json outputs\game-verification
-.\outputs\my-game\Player.exe --game-check outputs\my-game\project.json outputs\player-verification
+.\outputs\ModuleEngine.exe --game-check game-project-v4.json outputs\game-verification
+.\outputs\my-game\Player.exe --verify-package outputs\my-game outputs\player-verification
 ```
 
 Проверяются Object/ECS состояния/события/изображения, откат отказавшего Custom, смерть и Restart, переход и победа. Автопрохождение использует отдельную сохранённую проверочную копию с повышенным здоровьем игрока; поведение врагов, удары и переходы исполняются настоящими системами. Оно проверяет маршрут исполнения, а не баланс сложности поставляемой игры.
@@ -64,13 +66,13 @@ WASD перемещает игрока. ЛКМ наносит удар в нап
 ## Измерение настоящего окна Player
 
 ```powershell
-.\outputs\ModuleEngine.exe --player-benchmark game-project.json outputs\native-window-verification
-.\outputs\my-game\Player.exe --player-benchmark outputs\my-game\project.json outputs\my-game-native-window-verification
+.\outputs\ModuleEngine.exe --player-benchmark game-project-v4.json outputs\native-window-verification
+.\outputs\my-game\Player.exe --benchmark outputs\my-game-native-window-verification
 ```
 
 Замер использует тот же Player, GPU-рендер 1920×1080, RGBA→egui conversion, передачу изображения OpenGL, игровой UI и оконный цикл. Он не увеличивает здоровье и не заменяет сцены или поведение. Ввод обычный, без синтетического прохождения: двадцать противников продолжают действовать. После 30 прогретых UI-кадров собираются как минимум 120 callback и 120 различных завершённых игровых кадров. Затем окно закрывается; отчёт сохраняется в `native-frame-report.json`.
 
-В схеме отчёта 2 callback start-to-start измеряет оконный цикл: conversion, egui tessellation, OpenGL upload/draw, swap/vsync и планирование ОС. Симуляция, Rust IPC и Vulkan/readback выполняются на отдельном worker. `mean_fps` считается по различным `Frame` и времени их завершения; `ui_mean_fps` — по callback окна. Повтор старого изображения не увеличивает игровой FPS. Поля стоимости step/render содержат последние завершённые значения, наблюдаемые на UI-кадрах, поэтому их распределение нельзя считать независимой выборкой worker-кадров.
+В схеме отчёта 3 callback start-to-start измеряет оконный цикл: conversion, egui tessellation, OpenGL upload/draw, swap/vsync и планирование ОС. Симуляция, Rust IPC и Vulkan/readback выполняются на отдельном worker. `mean_fps` считается по различным `Frame` и времени их завершения; `ui_mean_fps` — по callback окна. Повтор старого изображения не увеличивает игровой FPS. Отдельно записаны интервалы завершения увиденных worker-кадров, интервалы их первого наблюдения UI и возраст снимка; пропущенные между наблюдениями кадры не считаются измеренными. Все проходы egui включаются в затраты UI/HUD. Поля стоимости step/render содержат последние завершённые значения, наблюдаемые на UI-кадрах, поэтому их распределение нельзя считать независимой выборкой worker-кадров.
 
 Дополнительно `eframe::Frame.info().cpu_usage` измеряет CPU-работу UI и нативного представления за предыдущий кадр, исключая ожидание vsync. Отдельные цифры conversion/enqueue описывают подготовку текстуры; фактический OpenGL upload выполняется позже framework и включён в framework CPU и общий период. Это измерение оконного цикла, не времени появления фотонов на мониторе и не отдельный GPU timestamp OpenGL.
 

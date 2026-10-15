@@ -856,6 +856,14 @@ mod tests {
         renderer.module = "render.source".into();
         renderer.params = json!({"tint":37});
         renderer.subgraph = None;
+        let composition =
+            crate::CompositionContext::new(registry.clone(), crate::SystemRegistry::builtin())
+                .unwrap();
+        let profile = document.engine_lock.as_ref().unwrap().profile.clone();
+        composition
+            .capture_lock(&document, profile, Some(crate::SdkIdentity::current()))
+            .unwrap()
+            .apply_to(&mut document);
         let runtime = Runtime::from_document(&document, &registry).unwrap();
         assert_eq!(runtime.backend_name(), "Source CPU");
         let frame = runtime.render(64, 48, Camera::default()).unwrap();
