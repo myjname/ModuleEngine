@@ -704,7 +704,17 @@ impl Editor {
                             self.dirty = false;
                             self.assets.invalidate();
                             self.game_workbench.invalidate_assets();
-                            self.status = label;
+                            if operation.diagnostics.is_empty() {
+                                self.status = label;
+                            } else {
+                                self.status = format!(
+                                    "{label}; {} предупреждений — см. отчёт",
+                                    operation.diagnostics.len()
+                                );
+                                self.workflow.report =
+                                    format!("{label}\n\n{}", operation.diagnostics.join("\n\n"));
+                                self.workflow.show_report = true;
+                            }
                         }
                         Ok(Outcome::Report(report)) => {
                             self.status = "Операция завершена".into();

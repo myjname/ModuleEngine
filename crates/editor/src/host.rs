@@ -55,6 +55,7 @@ pub fn asset_workspace_at(
     let composition = composition_at(resource_root)?;
     Ok(
         module_engine_project::AssetWorkspace::new(asset_root, protected)?
+            .with_composition(composition.clone())
             .with_validator(move |candidate| composition.validate_game(candidate)),
     )
 }

@@ -5,10 +5,11 @@
 //! A transaction validates all source/target files before writing, stores durable
 //! snapshots, and rolls back touched files on failure. Its record must accompany
 //! the editor's corresponding document-history boundary.
+use crate::asset_fields::{AssetFields, remove_field};
 use crate::{
     AssetEntry, AssetManifest, hash_bytes, hash_file, normalize_relative, resolve_relative,
 };
-use module_engine_core::GraphDocument;
+use module_engine_core::{CompositionContext, GraphDocument};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -106,6 +107,9 @@ pub struct AssetOperationRecord {
 pub struct AssetOperation {
     pub document: GraphDocument,
     pub record: AssetOperationRecord,
+    /// Exact old references in opaque archived data were preserved rather than
+    /// guessed. Hosts must display these diagnostics after a successful edit.
+    pub diagnostics: Vec<String>,
 }
 
 impl AssetOperationRecord {
@@ -197,11 +201,13 @@ pub struct AssetWorkspace {
     root: PathBuf,
     protected: Vec<String>,
     validator: Option<DocumentValidator>,
+    composition: Option<CompositionContext>,
 }
 type DocumentValidator = Arc<dyn Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static>;
 impl AssetWorkspace {
-    /// Construct a workspace with structural scene preflight only. A host with
-    /// installed source contracts should also provide with_validator.
+    /// Construct a workspace with structural scene preflight and builtin render
+    /// resource contracts only. Hosts must provide with_composition for source
+    /// fields and with_validator for their installed semantic preflight.
     pub fn new(
         root: impl AsRef<Path>,
         protected: impl IntoIterator<Item = String>,
@@ -221,6 +227,7 @@ impl AssetWorkspace {
             root,
             protected,
             validator: None,
+            composition: None,
         })
     }
     /// Add the host's installed schema/policy validation to every candidate
@@ -231,6 +238,12 @@ impl AssetWorkspace {
         F: Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static,
     {
         self.validator = Some(Arc::new(validator));
+        self
+    }
+    /// Supply installed, pinned source contracts explicitly. A validation
+    /// callback alone cannot establish which arbitrary strings are resources.
+    pub fn with_composition(mut self, composition: CompositionContext) -> Self {
+        self.composition = Some(composition);
         self
     }
     fn validate_candidate(&self, document: &GraphDocument) -> Result<(), String> {
@@ -303,6 +316,7 @@ impl AssetWorkspace {
         Ok(AssetOperation {
             document: document.clone(),
             record,
+            diagnostics: vec![],
         })
     }
     /// Adopt files freshly created by the import worker. Caller must pass only
@@ -370,6 +384,7 @@ impl AssetWorkspace {
             Ok(AssetOperation {
                 document: candidate,
                 record,
+                diagnostics: vec![],
             })
         })
     }
@@ -632,7 +647,11 @@ impl AssetWorkspace {
         #[cfg(test)]
         USAGE_DOCUMENT_WALKS.with(|walks| walks.set(walks.get() + 1));
         let value = serde_json::to_value(document).map_err(|e| e.to_string())?;
-        visit_values(&value, "", &mut |location, text| {
+        let fields = AssetFields::collect(document, self.composition.as_ref())?;
+        for location in fields.references {
+            let Some(text) = value.pointer(&location).and_then(Value::as_str) else {
+                continue;
+            };
             let id = if let Some(id) = text.strip_prefix("asset://") {
                 manifest.assets.contains_key(id).then(|| id.to_owned())
             } else {
@@ -642,11 +661,11 @@ impl AssetWorkspace {
             };
             if let Some(usages) = id.and_then(|id| result.get_mut(&id)) {
                 usages.push(AssetUsage {
-                    location: location.into(),
+                    location,
                     reference: text.into(),
                 });
             }
-        });
+        }
         for (owner, asset) in &manifest.assets {
             for dependency in asset.dependencies.iter().collect::<BTreeSet<_>>() {
                 if dependency != owner
@@ -714,10 +733,8 @@ impl AssetWorkspace {
                 "Asset is referenced by protected backend files; mutation is forbidden".into(),
             );
         }
-        let mut candidate = document.clone();
-        let mut value = serde_json::to_value(&candidate).map_err(|e| e.to_string())?;
-        rewrite_values(&mut value, &old, id, Some(&new), false);
-        candidate = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        let (mut candidate, diagnostics) =
+            self.rewrite_references(document, &old, id, Some(&new), false)?;
         let mut updated = manifest.clone();
         updated.assets.get_mut(id).unwrap().path = new.clone();
         let mut changes = BTreeMap::new();
@@ -752,13 +769,15 @@ impl AssetWorkspace {
         }
         rewrite_inline_includes(document, &mut candidate, &self.root, &old, &new)?;
         candidate.asset_manifest = serde_json::to_value(updated).map_err(|e| e.to_string())?;
-        self.commit(
+        let mut operation = self.commit(
             document,
             candidate,
             changes,
             format!("Move asset: {old} → {new}"),
             None,
-        )
+        )?;
+        operation.diagnostics = diagnostics;
+        Ok(operation)
     }
     pub fn delete_asset(
         &self,
@@ -823,9 +842,8 @@ impl AssetWorkspace {
         } else {
             None
         };
-        let mut value = serde_json::to_value(document).map_err(|e| e.to_string())?;
-        rewrite_values(
-            &mut value,
+        let (mut candidate, diagnostics) = self.rewrite_references(
+            document,
             &path,
             id,
             replacement
@@ -833,12 +851,7 @@ impl AssetWorkspace {
                 .map(|(other, _)| asset_reference(other))
                 .as_deref(),
             true,
-        );
-        let mut candidate: GraphDocument =
-            serde_json::from_value(value).map_err(|e| e.to_string())?;
-        // A mesh override with a removed path must disappear as a component,
-        // rather than leave invalid `mesh:{}` data in authored objects/prefabs.
-        remove_detached_meshes(&mut candidate);
+        )?;
         let mut changes = BTreeMap::from([(path.clone(), None)]);
         if let Some((_, target)) = &replacement {
             let file_assets: Vec<_> = manifest
@@ -881,13 +894,15 @@ impl AssetWorkspace {
             }
         }
         candidate.asset_manifest = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
-        self.commit(
+        let mut operation = self.commit(
             document,
             candidate,
             changes,
             format!("Delete asset: {path}"),
             Some((id.into(), entry)),
-        )
+        )?;
+        operation.diagnostics = diagnostics;
+        Ok(operation)
     }
     /// Trash records survive restarts. Restore recovers the original ID/file;
     /// document links intentionally remain as currently authored. Undo restores
@@ -1036,7 +1051,54 @@ impl AssetWorkspace {
         Ok(AssetOperation {
             document: after,
             record,
+            diagnostics: vec![],
         })
+    }
+    fn rewrite_references(
+        &self,
+        document: &GraphDocument,
+        old: &str,
+        id: &str,
+        replacement: Option<&str>,
+        rewrite_id: bool,
+    ) -> Result<(GraphDocument, Vec<String>), String> {
+        let fields = AssetFields::collect(document, self.composition.as_ref())?;
+        let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+        let matches =
+            |text: &str| same_path(text, old) || (rewrite_id && text == asset_reference(id));
+        let diagnostics = fields.ambiguous(&value, matches);
+        for path in &fields.references {
+            if value
+                .pointer(path)
+                .and_then(Value::as_str)
+                .is_some_and(matches)
+            {
+                if let Some(replacement) = replacement {
+                    *value.pointer_mut(path).expect("existing asset field") =
+                        Value::String(replacement.into());
+                } else {
+                    remove_field(&mut value, path);
+                    // The builtin mesh has only an optional path. Drop its
+                    // now-empty attachment, but only when this exact typed
+                    // field was detached; opaque/inactive mesh payloads and
+                    // unrelated metadata must never be swept globally.
+                    if path.ends_with("/components/mesh/path") {
+                        let parent = path.strip_suffix("/path").expect("mesh path");
+                        if value
+                            .pointer(parent)
+                            .and_then(Value::as_object)
+                            .is_some_and(|fields| fields.is_empty())
+                        {
+                            remove_field(&mut value, parent);
+                        }
+                    }
+                }
+            }
+        }
+        Ok((
+            serde_json::from_value(value).map_err(|error| error.to_string())?,
+            diagnostics,
+        ))
     }
     fn validate_mutation_dependencies(
         &self,
@@ -1201,102 +1263,6 @@ fn write_current(path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
         fs::remove_file(path).map_err(|e| e.to_string())
     } else {
         Ok(())
-    }
-}
-fn skipped_key(key: &str) -> bool {
-    matches!(
-        key,
-        "asset_manifest"
-            | "custom_sources"
-            | "shader_sources"
-            | "source_id"
-            | "id"
-            | "module"
-            | "from_node"
-            | "to_node"
-            | "entry_scene"
-            | "prefab"
-            | "dependencies"
-    )
-}
-fn visit_values(value: &Value, location: &str, visit: &mut impl FnMut(&str, &str)) {
-    match value {
-        Value::String(s) => visit(location, s),
-        Value::Array(items) => {
-            for (i, v) in items.iter().enumerate() {
-                visit_values(v, &format!("{location}/{i}"), visit);
-            }
-        }
-        Value::Object(items) => {
-            for (k, v) in items {
-                if !skipped_key(k) {
-                    visit_values(v, &format!("{location}/{k}"), visit);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-fn rewrite_values(
-    value: &mut Value,
-    old: &str,
-    id: &str,
-    replacement: Option<&str>,
-    rewrite_id: bool,
-) {
-    match value {
-        Value::String(s) if same_path(s, old) || (rewrite_id && s == &asset_reference(id)) => {
-            if let Some(new) = replacement {
-                *s = new.into();
-            } else {
-                *value = Value::Null;
-            }
-        }
-        Value::Array(items) => {
-            for v in items {
-                rewrite_values(v, old, id, replacement, rewrite_id);
-            }
-        }
-        Value::Object(items) => {
-            let keys: Vec<_> = items.keys().filter(|k| !skipped_key(k)).cloned().collect();
-            for key in keys {
-                let remove = items.get(&key).and_then(Value::as_str).is_some_and(|s| {
-                    replacement.is_none()
-                        && (same_path(s, old) || (rewrite_id && s == asset_reference(id)))
-                });
-                if remove {
-                    items.remove(&key);
-                } else {
-                    rewrite_values(
-                        items.get_mut(&key).unwrap(),
-                        old,
-                        id,
-                        replacement,
-                        rewrite_id,
-                    );
-                }
-            }
-        }
-        _ => {}
-    }
-}
-fn remove_detached_meshes(document: &mut GraphDocument) {
-    if let Some(game) = &mut document.game {
-        for prefab in game.prefabs.values_mut() {
-            prefab
-                .components
-                .retain(|k, v| k != "mesh" || v.get("path").is_some());
-        }
-        for scene in game.scenes.values_mut() {
-            for object in &mut scene.objects {
-                object
-                    .components
-                    .retain(|k, v| k != "mesh" || v.get("path").is_some());
-                object
-                    .overrides
-                    .retain(|k, v| k != "mesh.path" || !v.is_null());
-            }
-        }
     }
 }
 fn reject_hardcoded_source(document: &GraphDocument, path: &str) -> Result<(), String> {
@@ -1756,7 +1722,7 @@ mod tests {
         };
         let owner = schema.owner_module.clone();
         let component = schema.id.clone();
-        let mut registry = SystemRegistry::default();
+        let mut registry = SystemRegistry::builtin();
         registry
             .components_mut()
             .register_with_validator(schema, validator)
@@ -1786,23 +1752,40 @@ mod tests {
                 }],
             }],
         };
-        workspace.with_validator(move |candidate| {
-            if let Some(game) = &candidate.game {
-                let modules = registry.installed_modules();
-                let active = registry.active_components(&game.execution)?;
-                let assets = AssetManifest::from_value(&candidate.asset_manifest)?.asset_paths();
-                game.validate_with_context(
-                    &registry,
-                    &ComponentValidationContext {
-                        scenes: &game.scenes,
-                        modules: &modules,
-                        asset_paths: Some(&assets),
-                        active_components: Some(&active),
-                    },
-                )?;
-            }
-            Ok(())
-        })
+        let composition = module_engine_core::CompositionContext::new(
+            module_engine_core::ModuleRegistry::builtin(),
+            registry.clone(),
+        )
+        .unwrap();
+        let snapshot = composition
+            .capture_lock(
+                document,
+                document.engine_lock.as_ref().unwrap().profile.clone(),
+                Some(module_engine_core::SdkIdentity::current()),
+            )
+            .unwrap();
+        document.module_versions = snapshot.module_versions;
+        document.engine_lock = Some(snapshot.engine_lock);
+        workspace
+            .with_composition(composition)
+            .with_validator(move |candidate| {
+                if let Some(game) = &candidate.game {
+                    let modules = registry.installed_modules();
+                    let active = registry.active_components(&game.execution)?;
+                    let assets =
+                        AssetManifest::from_value(&candidate.asset_manifest)?.asset_paths();
+                    game.validate_with_context(
+                        &registry,
+                        &ComponentValidationContext {
+                            scenes: &game.scenes,
+                            modules: &modules,
+                            asset_paths: Some(&assets),
+                            active_components: Some(&active),
+                        },
+                    )?;
+                }
+                Ok(())
+            })
     }
     #[test]
     fn batched_usages_walk_document_once_and_keep_all_references() {
@@ -1812,7 +1795,30 @@ mod tests {
         }
         workspace.synchronize(&mut doc).unwrap();
         let manifest = AssetManifest::from_value(&doc.asset_manifest).unwrap();
+        let mut registry = module_engine_core::ModuleRegistry::builtin();
+        let mut descriptor = module_engine_core::ModuleDescriptor {
+            id: "fixture.resources".into(),
+            label: "Resources".into(),
+            description: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+            properties: vec![],
+        };
         for (index, (id, entry)) in manifest.assets.iter().enumerate() {
+            descriptor
+                .properties
+                .push(module_engine_core::PropertySchema {
+                    id: format!("resource-{index}"),
+                    label: "Resource".into(),
+                    scope: module_engine_core::PropertyScope::Global,
+                    value_type: module_engine_core::PropertyType::AssetReference {
+                        kinds: vec![],
+                        optional: true,
+                    },
+                    default: Value::Null,
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                });
             doc.properties.active.global.insert(
                 format!("resource-{index}"),
                 json!(if index.is_multiple_of(2) {
@@ -1822,6 +1828,17 @@ mod tests {
                 }),
             );
         }
+        registry.register_module(descriptor).unwrap();
+        doc.engine
+            .enabled_modules
+            .insert("fixture.resources".into());
+        let workspace = workspace.with_composition(
+            module_engine_core::CompositionContext::new(
+                registry,
+                module_engine_core::SystemRegistry::builtin(),
+            )
+            .unwrap(),
+        );
         USAGE_DOCUMENT_WALKS.with(|walks| walks.set(0));
         let started = std::time::Instant::now();
         let batched = workspace.usages_batch(&doc).unwrap();
@@ -1838,6 +1855,382 @@ mod tests {
         assert_eq!(USAGE_DOCUMENT_WALKS.with(|walks| walks.get()), 128);
         eprintln!(
             "128 asset reverse references: one batch {batched_time:?}, per-tile rebuilds {repeated_time:?}; full document walks 1 vs 128"
+        );
+        crate::history::remove_test_directory(&root);
+    }
+
+    fn typed_links_workspace(workspace: AssetWorkspace, doc: &mut GraphDocument) -> AssetWorkspace {
+        use module_engine_core::{ComponentSchema, PropertySchema, PropertyScope, PropertyType};
+        let defaults = json!({"id":null,"module":null,"slots":[{"path":null}],"archive":{"path":null},"text":""});
+        let fields = ["id", "module", "slots.0.path", "archive.path", "text"]
+            .into_iter()
+            .map(|path| PropertySchema {
+                id: format!("audit.links.{path}"),
+                label: path.into(),
+                scope: PropertyScope::Component {
+                    component: "audit.links".into(),
+                },
+                value_type: if path == "text" {
+                    PropertyType::Text { max_len: 1024 }
+                } else {
+                    PropertyType::AssetReference {
+                        kinds: vec!["png".into()],
+                        optional: true,
+                    }
+                },
+                default: module_engine_core::component_field(&defaults, path)
+                    .unwrap()
+                    .clone(),
+                requires_modules: vec![],
+                requires_components: vec![],
+            })
+            .collect();
+        with_source_contract(
+            workspace,
+            doc,
+            ComponentSchema {
+                id: "audit.links".into(),
+                owner_module: "audit.links.owner".into(),
+                version: "1".into(),
+                label: "Typed asset links".into(),
+                defaults,
+                fields,
+                requires_modules: vec![],
+                requires_components: vec![],
+            },
+            |_, _| Ok(()),
+        )
+    }
+
+    #[test]
+    fn typed_move_keeps_text_and_opaque_archives_and_persists_true_references() {
+        let (root, workspace, mut doc) = fixture();
+        write(&root, "assets/textures/a.png", b"a");
+        workspace.synchronize(&mut doc).unwrap();
+        let asset = id(&doc, "assets/textures/a.png");
+        let game = doc.game.as_mut().unwrap();
+        game.prefabs.get_mut("asset-template").unwrap().components.insert("audit.links".into(), json!({
+            "id":"assets/textures/a.png", "module":asset_reference(&asset), "slots":[{"path":"assets/textures/a.png"}], "text":"assets/textures/a.png"
+        }));
+        let object = &mut game.scenes.get_mut("arena").unwrap().objects[0];
+        object.components.insert(
+            "audit.links".into(),
+            json!({"module":"assets/textures/a.png","text":"assets/textures/a.png"}),
+        );
+        object.components.insert(
+            "unknown.payload".into(),
+            json!({"id":"assets/textures/a.png","nested":[{"path":"assets/textures/a.png"}]}),
+        );
+        object
+            .overrides
+            .insert("audit.links.id".into(), json!("assets/textures/a.png"));
+        object.overrides.insert(
+            "unknown.payload.path".into(),
+            json!("assets/textures/a.png"),
+        );
+        doc.properties
+            .inactive
+            .global
+            .insert("audit.links.id".into(), json!("assets/textures/a.png"));
+        doc.legacy_archive
+            .insert("opaque".into(), json!({"module":"assets/textures/a.png"}));
+        let workspace = typed_links_workspace(workspace, &mut doc);
+        workspace.validate_candidate(&doc).unwrap();
+        assert_eq!(workspace.usages(&doc, &asset).unwrap().len(), 5);
+        let op = workspace
+            .move_asset(&doc, &asset, "assets/textures/moved.png")
+            .unwrap();
+        workspace.validate_candidate(&op.document).unwrap();
+        let game = op.document.game.as_ref().unwrap();
+        let prefab = &game.prefabs["asset-template"].components["audit.links"];
+        assert_eq!(prefab["id"], "assets/textures/moved.png");
+        assert_eq!(prefab["module"], asset_reference(&asset));
+        assert_eq!(prefab["slots"][0]["path"], "assets/textures/moved.png");
+        assert_eq!(prefab["text"], "assets/textures/a.png");
+        let object = &game.scenes["arena"].objects[0];
+        assert_eq!(
+            object.components["audit.links"]["module"],
+            "assets/textures/moved.png"
+        );
+        assert_eq!(
+            object.components["audit.links"]["text"],
+            "assets/textures/a.png"
+        );
+        assert_eq!(
+            object.overrides["audit.links.id"],
+            "assets/textures/moved.png"
+        );
+        assert_eq!(
+            object.components["unknown.payload"],
+            doc.game.as_ref().unwrap().scenes["arena"].objects[0].components["unknown.payload"]
+        );
+        assert_eq!(
+            object.overrides["unknown.payload.path"],
+            "assets/textures/a.png"
+        );
+        assert_eq!(op.document.properties.inactive, doc.properties.inactive);
+        assert_eq!(op.document.legacy_archive, doc.legacy_archive);
+        assert_eq!(op.diagnostics.len(), 5);
+        assert!(
+            op.diagnostics
+                .iter()
+                .all(|message| !message.contains("/audit.links/text"))
+        );
+        let path = root.join("project.json");
+        crate::save_document_with_backup(&path, &op.document).unwrap();
+        let reopened = crate::read_document_strict(&path).unwrap();
+        workspace.validate_candidate(&reopened).unwrap();
+        assert_eq!(reopened, op.document);
+        assert_eq!(op.record.undo(&root, &reopened).unwrap(), doc);
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn typed_delete_relinks_prefab_local_overrides_and_stable_ids_without_text_changes() {
+        let (root, workspace, mut doc) = fixture();
+        write(&root, "assets/textures/a.png", b"a");
+        write(&root, "assets/textures/b.png", b"b");
+        workspace.synchronize(&mut doc).unwrap();
+        let old = id(&doc, "assets/textures/a.png");
+        let new = id(&doc, "assets/textures/b.png");
+        let game = doc.game.as_mut().unwrap();
+        game.prefabs
+            .get_mut("asset-template")
+            .unwrap()
+            .components
+            .insert(
+                "audit.links".into(),
+                json!({"id":asset_reference(&old),"text":"assets/textures/a.png"}),
+            );
+        let object = &mut game.scenes.get_mut("arena").unwrap().objects[0];
+        object.components.insert(
+            "audit.links".into(),
+            json!({"module":"assets/textures/a.png","slots":[{"path":asset_reference(&old)}]}),
+        );
+        object
+            .overrides
+            .insert("audit.links.id".into(), json!(asset_reference(&old)));
+        let workspace = typed_links_workspace(workspace, &mut doc);
+        assert!(
+            workspace
+                .delete_asset(&doc, &old, DeletePolicy::RefuseUsed)
+                .unwrap_err()
+                .contains("Asset is used")
+        );
+        let op = workspace
+            .delete_asset(&doc, &old, DeletePolicy::ReplaceWith(new.clone()))
+            .unwrap();
+        workspace.validate_candidate(&op.document).unwrap();
+        let game = op.document.game.as_ref().unwrap();
+        assert_eq!(
+            game.prefabs["asset-template"].components["audit.links"]["id"],
+            asset_reference(&new)
+        );
+        assert_eq!(
+            game.prefabs["asset-template"].components["audit.links"]["text"],
+            "assets/textures/a.png"
+        );
+        let object = &game.scenes["arena"].objects[0];
+        assert_eq!(
+            object.components["audit.links"]["module"],
+            asset_reference(&new)
+        );
+        assert_eq!(
+            object.components["audit.links"]["slots"][0]["path"],
+            asset_reference(&new)
+        );
+        assert_eq!(object.overrides["audit.links.id"], asset_reference(&new));
+        assert!(op.diagnostics.is_empty());
+        crate::save_document_with_backup(&root.join("project.json"), &op.document).unwrap();
+        assert_eq!(
+            crate::read_document_strict(&root.join("project.json")).unwrap(),
+            op.document
+        );
+        let original = op.record.undo(&root, &op.document).unwrap();
+        assert_eq!(original, doc);
+        let detached = workspace
+            .delete_asset(&original, &old, DeletePolicy::Detach)
+            .unwrap();
+        workspace.validate_candidate(&detached.document).unwrap();
+        assert!(detached.document.game.as_ref().unwrap().scenes["arena"].objects[0].components["audit.links"]["slots"][0].get("path").is_none());
+        assert!(
+            !detached.document.game.as_ref().unwrap().scenes["arena"].objects[0]
+                .overrides
+                .contains_key("audit.links.id")
+        );
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn known_but_inactive_or_stale_components_are_preserved_and_reported() {
+        for stale in [false, true] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", b"a");
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            doc.game
+                .as_mut()
+                .unwrap()
+                .scenes
+                .get_mut("arena")
+                .unwrap()
+                .objects[0]
+                .components
+                .insert("audit.links".into(), json!({"id":"assets/textures/a.png"}));
+            let workspace = typed_links_workspace(workspace, &mut doc);
+            if stale {
+                doc.module_versions
+                    .insert("audit.links.owner".into(), "archived-version".into());
+            }
+            doc.game.as_mut().unwrap().execution.stages.clear();
+            workspace.validate_candidate(&doc).unwrap();
+            let moved = workspace
+                .move_asset(&doc, &asset, "assets/textures/new.png")
+                .unwrap();
+            assert_eq!(
+                moved.document.game.as_ref().unwrap().scenes["arena"].objects[0].components["audit.links"]
+                    ["id"],
+                "assets/textures/a.png"
+            );
+            assert_eq!(moved.diagnostics.len(), 1);
+            assert!(
+                workspace
+                    .usages(&moved.document, &asset)
+                    .unwrap()
+                    .is_empty()
+            );
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn opaque_longer_attachment_owns_override_before_shorter_registered_asset_field() {
+        for inherited in [false, true] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", b"a");
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let game = doc.game.as_mut().unwrap();
+            if inherited {
+                game.prefabs
+                    .get_mut("asset-template")
+                    .unwrap()
+                    .components
+                    .insert(
+                        "audit.links.archive".into(),
+                        json!({"path":"assets/textures/a.png"}),
+                    );
+            }
+            let object = &mut game.scenes.get_mut("arena").unwrap().objects[0];
+            object
+                .components
+                .insert("audit.links".into(), json!({"id":"assets/textures/a.png"}));
+            object.prefab = Some("asset-template".into());
+            if !inherited {
+                object.components.insert(
+                    "audit.links.archive".into(),
+                    json!({"path":"assets/textures/a.png"}),
+                );
+            }
+            object.overrides.insert(
+                "audit.links.archive.path".into(),
+                json!("assets/textures/a.png"),
+            );
+            let workspace = typed_links_workspace(workspace, &mut doc);
+            workspace.validate_candidate(&doc).unwrap();
+            let moved = workspace
+                .move_asset(&doc, &asset, "assets/textures/new.png")
+                .unwrap();
+            let object = &moved.document.game.as_ref().unwrap().scenes["arena"].objects[0];
+            assert_eq!(
+                object.components["audit.links"]["id"],
+                "assets/textures/new.png"
+            );
+            assert_eq!(
+                object.overrides["audit.links.archive.path"],
+                "assets/textures/a.png"
+            );
+            assert!(
+                moved
+                    .diagnostics
+                    .iter()
+                    .any(|message| message.contains("/overrides/audit.links.archive.path"))
+            );
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn inactive_component_property_and_stale_mesh_are_not_mutated_by_delete() {
+        use module_engine_core::{
+            CompositionContext, ModuleDescriptor, ModuleRegistry, PropertySchema, PropertyScope,
+            PropertyType, SystemRegistry,
+        };
+        let (root, workspace, mut doc) = fixture();
+        write(&root, "assets/textures/a.png", b"a");
+        workspace.synchronize(&mut doc).unwrap();
+        let asset = id(&doc, "assets/textures/a.png");
+        let mut modules = ModuleRegistry::builtin();
+        modules
+            .register_module(ModuleDescriptor {
+                id: "fixture.property".into(),
+                label: "Property".into(),
+                description: String::new(),
+                inputs: vec![],
+                outputs: vec![],
+                properties: vec![PropertySchema {
+                    id: "fixture.path".into(),
+                    label: "Path".into(),
+                    scope: PropertyScope::Component {
+                        component: "inactive.component".into(),
+                    },
+                    value_type: PropertyType::AssetReference {
+                        kinds: vec!["png".into()],
+                        optional: true,
+                    },
+                    default: Value::Null,
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                }],
+            })
+            .unwrap();
+        doc.engine.enabled_modules.insert("fixture.property".into());
+        doc.module_versions
+            .insert("scene.extract".into(), "opaque-old-version".into());
+        doc.properties
+            .active
+            .components
+            .entry(1)
+            .or_default()
+            .insert(
+                "inactive.component".into(),
+                BTreeMap::from([("fixture.path".into(), json!("assets/textures/a.png"))]),
+            );
+        doc.game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("mesh".into(), json!({"opaque":"saved payload"}));
+        let workspace = workspace
+            .with_composition(CompositionContext::new(modules, SystemRegistry::builtin()).unwrap());
+        let deleted = workspace
+            .delete_asset(&doc, &asset, DeletePolicy::Detach)
+            .unwrap();
+        assert_eq!(deleted.document.properties, doc.properties);
+        assert_eq!(
+            deleted.document.game.as_ref().unwrap().scenes["arena"].objects[0].components["mesh"],
+            json!({"opaque":"saved payload"})
+        );
+        assert_eq!(deleted.diagnostics.len(), 1);
+        assert!(deleted.diagnostics[0].contains("/inactive.component/fixture.path"));
+        crate::save_document_with_backup(&root.join("project.json"), &deleted.document).unwrap();
+        assert_eq!(
+            crate::read_document_strict(&root.join("project.json")).unwrap(),
+            deleted.document
         );
         crate::history::remove_test_directory(&root);
     }
@@ -2003,7 +2396,12 @@ mod tests {
         assert_eq!(json["images"][0]["uri"], "../textures/a.png");
         assert_eq!(
             op.document.properties.inactive.global["archived.resource"],
-            "assets/renamed/model.gltf"
+            "assets/models/a.gltf"
+        );
+        assert!(
+            op.diagnostics
+                .iter()
+                .any(|message| message.contains("archived.resource"))
         );
         assert_eq!(id(&op.document, "assets/renamed/model.gltf"), asset);
         let game = op.document.game.as_ref().unwrap();
@@ -2132,10 +2530,18 @@ mod tests {
         workspace.synchronize(&mut doc).unwrap();
         let old = id(&doc, "assets/textures/a.png");
         let new = id(&doc, "assets/textures/b.png");
-        doc.properties
-            .active
-            .global
-            .insert("material.image".into(), json!(asset_reference(&old)));
+        doc.game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert(
+                "material".into(),
+                json!({"base_color":[1.,1.,1.,1.],"base_color_texture":asset_reference(&old)}),
+            );
         assert!(
             workspace
                 .delete_asset(&doc, &old, DeletePolicy::Detach)
@@ -2145,7 +2551,7 @@ mod tests {
             .delete_asset(&doc, &old, DeletePolicy::ReplaceWith(new.clone()))
             .unwrap();
         assert_eq!(
-            op.document.properties.active.global["material.image"],
+            op.document.game.as_ref().unwrap().scenes["arena"].objects[0].components["material"]["base_color_texture"],
             asset_reference(&new)
         );
         let model: Value =
@@ -2331,15 +2737,18 @@ mod tests {
             owner_module: "source.required-resource-owner".into(),
             version: "required-resource/1".into(),
             label: "Required resource".into(),
-            defaults: json!({"path":""}),
+            defaults: json!({"path":null}),
             fields: vec![PropertySchema {
                 id: "source.required-resource.path".into(),
                 label: "Path".into(),
                 scope: PropertyScope::Component {
                     component: "source.required-resource".into(),
                 },
-                value_type: PropertyType::Text { max_len: 1024 },
-                default: json!(""),
+                value_type: PropertyType::AssetReference {
+                    kinds: vec!["png".into()],
+                    optional: true,
+                },
+                default: Value::Null,
                 requires_modules: vec![],
                 requires_components: vec![],
             }],

@@ -61,6 +61,22 @@ pub struct GameEntity {
     pub references: BTreeMap<String, u64>,
 }
 
+/// Resolve a dot override against the complete local and inherited attachment
+/// set, before editing or stripping anything. Longer component IDs own their
+/// namespace even when their contract is unavailable or inactive.
+pub fn component_override_owner<'a>(
+    path: &str,
+    attachments: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    attachments
+        .into_iter()
+        .filter(|id| {
+            path.strip_prefix(*id)
+                .is_some_and(|tail| tail.starts_with('.'))
+        })
+        .max_by_key(|id| id.len())
+}
+
 impl AuthoredObject {
     /// Make a scene object without imposing any gameplay component.
     pub fn new(object: WorldObject) -> Self {
@@ -178,16 +194,10 @@ impl GameProject {
                         .map_err(|e| format!("Invalid color override: {e}"))?;
                     continue;
                 }
-                let component = entity
-                    .components
-                    .keys()
-                    .filter(|name| {
-                        path.strip_prefix(name.as_str())
-                            .is_some_and(|rest| rest.starts_with('.'))
-                    })
-                    .max_by_key(|name| name.len())
-                    .cloned()
-                    .ok_or_else(|| format!("Override '{path}' targets missing component"))?;
+                let component =
+                    component_override_owner(path, entity.components.keys().map(String::as_str))
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("Override '{path}' targets missing component"))?;
                 let fields = &path[component.len() + 1..];
                 if fields.split('.').any(str::is_empty) {
                     return Err(format!("Override '{path}' needs component.field"));
@@ -300,13 +310,7 @@ impl GameProject {
                 entity.components.retain(|name, _| active.contains(name));
                 entity.overrides.retain(|path, _| {
                     path == "color"
-                        || component_ids
-                            .iter()
-                            .filter(|name| {
-                                path.strip_prefix(name.as_str())
-                                    .is_some_and(|rest| rest.starts_with('.'))
-                            })
-                            .max_by_key(|name| name.len())
+                        || component_override_owner(path, component_ids.iter().map(String::as_str))
                             .is_some_and(|owner| active.contains(owner))
                 });
             }

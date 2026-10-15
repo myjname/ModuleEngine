@@ -2046,12 +2046,6 @@ impl GameWorkbench {
         }
     }
     pub fn inspector_ui(&mut self, ui: &mut egui::Ui, document: &mut GraphDocument) -> bool {
-        let Some(original) = document.game.clone() else {
-            ui.label("No authored scene");
-            return false;
-        };
-        let mut game = original.clone();
-        self.normalize_selection(&game);
         let composition = match crate::host::composition_at(
             self.backend_root.as_deref().unwrap_or(Path::new(".")),
         ) {
@@ -2062,6 +2056,20 @@ impl GameWorkbench {
                 return false;
             }
         };
+        self.inspector_ui_with_composition(ui, document, &composition)
+    }
+    fn inspector_ui_with_composition(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut GraphDocument,
+        composition: &CompositionContext,
+    ) -> bool {
+        let Some(original) = document.game.clone() else {
+            ui.label("No authored scene");
+            return false;
+        };
+        let mut game = original.clone();
+        self.normalize_selection(&game);
         let activity = match composition.activity(document) {
             Ok(activity) => activity,
             Err(error) => {
@@ -2142,8 +2150,8 @@ impl GameWorkbench {
                         ui.horizontal(|ui|{
                             if ui.button("Apply fields").clicked(){apply_component(object,prefab,&name,value);self.field_key=None;}
                             if prefab.is_some_and(|prefab|prefab.components.contains_key(&name)){
-                                if ui.button("Inherit defaults").clicked(){reset_component(object,&name);self.field_key=None;}
-                            }else if ui.button("Remove component").clicked(){object.components.remove(&name);self.component_drafts.remove(&name);self.field_key=None;}
+                                if ui.button("Inherit defaults").clicked(){reset_component(object,prefab,&name);self.field_key=None;}
+                            }else if ui.button("Remove component").clicked(){reset_component(object,prefab,&name);self.component_drafts.remove(&name);self.field_key=None;}
                         });
                     });});}
                     egui::ComboBox::from_id_salt("add-game-component").selected_text("+ Component from active modules").show_ui(ui,|ui|{
@@ -3178,11 +3186,20 @@ fn create_template(
     object.overrides.clear();
     Ok(name)
 }
-fn reset_component(object: &mut AuthoredObject, name: &str) {
-    object.components.remove(name);
+fn component_attachments(object: &AuthoredObject, prefab: Option<&Prefab>) -> BTreeSet<String> {
     object
-        .overrides
-        .retain(|key, _| !key.starts_with(&format!("{name}.")));
+        .components
+        .keys()
+        .chain(prefab.into_iter().flat_map(|p| p.components.keys()))
+        .cloned()
+        .collect()
+}
+fn reset_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &str) {
+    let attachments = component_attachments(object, prefab);
+    object.components.remove(name);
+    object.overrides.retain(|key, _| {
+        component_override_owner(key, attachments.iter().map(String::as_str)) != Some(name)
+    });
 }
 fn link_template(
     object: &mut AuthoredObject,
@@ -3201,14 +3218,8 @@ fn link_template(
         if path == "color" {
             continue;
         }
-        let Some(component) = resolved
-            .components
-            .keys()
-            .filter(|component| {
-                path.strip_prefix(component.as_str())
-                    .is_some_and(|rest| rest.starts_with('.'))
-            })
-            .max_by_key(|component| component.len())
+        let Some(component) =
+            component_override_owner(&path, resolved.components.keys().map(String::as_str))
         else {
             continue;
         };
@@ -3229,7 +3240,7 @@ fn link_template(
         if !exists {
             let local = object
                 .components
-                .entry(component.clone())
+                .entry(component.to_owned())
                 .or_insert_with(|| {
                     resolved
                         .components
@@ -3254,8 +3265,10 @@ fn component_value(object: &AuthoredObject, prefab: Option<&Prefab>, name: &str)
             value = local.clone();
         }
     }
+    let attachments = component_attachments(object, prefab);
     for (path, field) in &object.overrides {
-        if let Some(path) = path.strip_prefix(&format!("{name}.")) {
+        if component_override_owner(path, attachments.iter().map(String::as_str)) == Some(name) {
+            let path = &path[name.len() + 1..];
             put_field(&mut value, path, field.clone());
         }
     }
@@ -3338,6 +3351,7 @@ fn put_field(value: &mut Value, path: &str, new: Value) {
     }
 }
 fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &str, value: Value) {
+    reset_component(object, prefab, name);
     let Some(base) = prefab.and_then(|p| p.components.get(name)) else {
         object.components.insert(name.into(), value);
         return;
@@ -3346,7 +3360,6 @@ fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &
     let mut edited = BTreeMap::new();
     value_leaves(base, "", &mut defaults);
     value_leaves(&value, "", &mut edited);
-    reset_component(object, name);
     let mut local = json!({});
     for (field, value) in edited {
         if let Some(default) = defaults.get(&field) {
@@ -4938,6 +4951,218 @@ mod tests {
     }
 
     #[test]
+    fn inspector_apply_and_inherit_preserve_longer_component_owners_after_save() {
+        struct Noop;
+        impl ExecutableSystem for Noop {
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-prefix-owners",
+        )
+        .unwrap();
+        for availability in ["active", "inactive", "unknown"] {
+            let mut installed = crate::host::composition_at(Path::new(".")).unwrap();
+            for (id, owner) in [("foo", "review.foo"), ("foo.bar", "review.bar")] {
+                if id == "foo.bar" && availability == "unknown" {
+                    continue;
+                }
+                installed
+                    .systems
+                    .components_mut()
+                    .register(ComponentSchema {
+                        id: id.into(),
+                        owner_module: owner.into(),
+                        version: "1".into(),
+                        label: id.into(),
+                        defaults: json!({"value":1.}),
+                        fields: vec![PropertySchema {
+                            id: format!("{id}.value"),
+                            label: "Value".into(),
+                            scope: PropertyScope::Component {
+                                component: id.into(),
+                            },
+                            value_type: PropertyType::Number { min: 0., max: 20. },
+                            default: json!(1.),
+                            requires_modules: vec![],
+                            requires_components: vec![],
+                        }],
+                        requires_modules: vec![],
+                        requires_components: vec![],
+                    })
+                    .unwrap();
+                installed
+                    .systems
+                    .register(
+                        SystemDescriptor {
+                            id: owner.into(),
+                            state_schema: format!("{owner}/1"),
+                            components: vec![id.into()],
+                            ports: vec![],
+                            requires: vec![],
+                        },
+                        |_| Ok(Box::new(Noop)),
+                    )
+                    .unwrap();
+            }
+            let composition =
+                CompositionContext::new(installed.modules, installed.systems).unwrap();
+            for location in ["prefab", "local", "mixed"] {
+                for action in ["Apply fields", "Inherit defaults"] {
+                    let mut document = source_document();
+                    let game = document.game.as_mut().unwrap();
+                    game.execution.stages[0].nodes = ["review.foo", "review.bar"]
+                        .into_iter()
+                        .filter(|owner| *owner == "review.foo" || availability == "active")
+                        .map(|owner| SystemNode {
+                            id: owner.into(),
+                            module: owner.into(),
+                            params: json!({}),
+                            bindings: BTreeMap::new(),
+                            after: vec![],
+                        })
+                        .collect();
+                    let mut prefab = Prefab {
+                        color: [255; 4],
+                        components: BTreeMap::from([("foo".into(), json!({"value":1.}))]),
+                    };
+                    if location != "local" {
+                        prefab
+                            .components
+                            .insert("foo.bar".into(), json!({"value":2.,"archive":"preserved"}));
+                    }
+                    game.prefabs.insert("prefix".into(), prefab);
+                    let object = &mut game.scenes.get_mut("empty").unwrap().objects[0];
+                    object.prefab = Some("prefix".into());
+                    object.components.insert("foo".into(), json!({"value":4.}));
+                    if location != "prefab" {
+                        object
+                            .components
+                            .insert("foo.bar".into(), json!({"value":6.,"local_archive":[7,8]}));
+                    }
+                    object.overrides = BTreeMap::from([
+                        ("foo.value".into(), json!(5.)),
+                        ("foo.bar.value".into(), json!(9.)),
+                        ("color".into(), json!([42, 43, 44, 255])),
+                    ]);
+                    let sibling_local = object.components.get("foo.bar").cloned();
+                    assert_eq!(
+                        component_value(object, game.prefabs.get("prefix"), "foo"),
+                        json!({"value":5.}),
+                        "the longer override must not leak into the shorter draft"
+                    );
+                    composition.validate_game(&document).unwrap();
+                    let mut workbench = GameWorkbench::default();
+                    workbench.scene = "empty".into();
+                    workbench.select(Some(1));
+                    let ctx = egui::Context::default();
+                    ctx.all_styles_mut(|style| style.animation_time = 0.);
+                    let frame = |workbench: &mut GameWorkbench,
+                                 document: &mut GraphDocument,
+                                 events| {
+                        ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(1200., 1600.),
+                                )),
+                                events,
+                                ..Default::default()
+                            },
+                            |ui| {
+                                workbench.inspector_ui_with_composition(ui, document, &composition);
+                            },
+                        )
+                    };
+                    let output = frame(&mut workbench, &mut document, vec![]);
+                    assert!(workbench.error.is_none(), "{:?}", workbench.error);
+                    let point = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.text() == action => {
+                                Some(text.pos + text.galley.size() * 0.5)
+                            }
+                            _ => None,
+                        })
+                        .expect("ordinary Inspector action");
+                    output.drop_without_applying_deltas();
+                    workbench.component_drafts.get_mut("foo").unwrap()["value"] = json!(3.);
+                    for pressed in [true, false] {
+                        frame(
+                            &mut workbench,
+                            &mut document,
+                            vec![
+                                egui::Event::PointerMoved(point),
+                                egui::Event::PointerButton {
+                                    pos: point,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: Default::default(),
+                                },
+                            ],
+                        )
+                        .drop_without_applying_deltas();
+                    }
+                    composition.validate_game(&document).unwrap();
+                    let path = artifacts
+                        .path()
+                        .join(format!("{availability}-{location}-{action}.json"));
+                    module_engine_project::save_document_with_backup(&path, &document).unwrap();
+                    let reopened = module_engine_project::read_document_strict(&path).unwrap();
+                    composition.validate_game(&reopened).unwrap();
+                    let game = reopened.game.as_ref().unwrap();
+                    let object = &game.scenes["empty"].objects[0];
+                    assert_eq!(
+                        object.overrides["foo.bar.value"],
+                        json!(9.),
+                        "{availability} {location} {action}"
+                    );
+                    assert_eq!(object.overrides["color"], json!([42, 43, 44, 255]));
+                    assert_eq!(object.components.get("foo.bar"), sibling_local.as_ref());
+                    let entity = game.resolve_scene("empty").unwrap().remove(0);
+                    assert_eq!(entity.components["foo.bar"]["value"], json!(9.));
+                    assert_eq!(
+                        entity.components["foo"]["value"],
+                        json!(if action == "Apply fields" { 3. } else { 1. })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_component_apply_and_remove_clear_only_their_owned_overrides() {
+        let mut object = AuthoredObject::new(WorldObject {
+            id: 1,
+            parent: None,
+            transform: Transform::default(),
+            color: [255; 4],
+        });
+        object.components = BTreeMap::from([
+            ("foo".into(), json!({"value":1.})),
+            ("foo.bar".into(), json!({"value":2.})),
+        ]);
+        object.overrides = BTreeMap::from([
+            ("foo.value".into(), json!(5.)),
+            ("foo.bar.value".into(), json!(9.)),
+        ]);
+        apply_component(&mut object, None, "foo", json!({"value":3.}));
+        assert_eq!(component_value(&object, None, "foo"), json!({"value":3.}));
+        reset_component(&mut object, None, "foo");
+        assert_eq!(
+            object.overrides,
+            BTreeMap::from([("foo.bar.value".into(), json!(9.))])
+        );
+        assert_eq!(
+            object.components,
+            BTreeMap::from([("foo.bar".into(), json!({"value":2.}))])
+        );
+    }
+
+    #[test]
     fn namespaced_vector_field_overrides_preserve_other_template_defaults_and_unknown_data() {
         let composition = source_composition();
         let mut document = source_document();
@@ -4983,7 +5208,7 @@ mod tests {
         );
         assert_eq!(entity.components["future.archive"], json!({"keep":[9,8,7]}));
         let mut object = restored.game.as_ref().unwrap().scenes["empty"].objects[0].clone();
-        reset_component(&mut object, "example.stats");
+        reset_component(&mut object, Some(&base), "example.stats");
         assert!(
             !object
                 .overrides

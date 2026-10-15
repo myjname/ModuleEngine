@@ -1,4 +1,5 @@
 //! Local authoring history, conflict-preserving merges, and portable resources.
+mod asset_fields;
 mod asset_workspace;
 mod assets;
 mod engine_migration;

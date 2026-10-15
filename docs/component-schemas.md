@@ -26,6 +26,11 @@ unambiguous: `foo.speed` and component `foo.bar` can coexist, but schema `foo`
 cannot declare `foo.bar.x` alongside component `foo.bar`. Registration rejects
 that collision in either order because dot overrides select the longest
 component ID.
+Inspector Apply/Inherit/Remove and resource mutation use the same
+`component_override_owner` rule as resolution and runtime stripping. Ownership
+uses all inherited and local attachments before removal, including unavailable
+schemas. Editing `foo` therefore preserves `foo.bar.value` when `foo.bar` is
+attached; its visibility or activation does not transfer ownership to `foo`.
 Aggregate defaults preserve nested object/array structure and must agree with
 each field default. Resolution fills missing values in attached active components
 without changing authored records or overwriting present values. Prefab values,
