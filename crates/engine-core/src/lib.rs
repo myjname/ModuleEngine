@@ -6,6 +6,8 @@
 //! does not interpret arbitrary Rust or silently approximate unsupported routes.
 
 mod backend;
+mod component_schema;
+mod composition;
 mod control;
 mod game;
 mod graph;
@@ -18,6 +20,8 @@ mod systems;
 mod world;
 
 pub use backend::*;
+pub use component_schema::*;
+pub use composition::*;
 pub use control::*;
 pub use game::*;
 pub use graph::*;

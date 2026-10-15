@@ -1985,15 +1985,26 @@ impl GameWorkbench {
         };
         let mut game = original.clone();
         self.normalize_selection(&game);
-        let resolved = game.resolve_scene(&self.scene).unwrap_or_default();
-        let active = active_components(
-            &game.execution,
-            &SystemRegistry::builtin(),
-            renderer_active(
-                document,
-                self.backend_root.as_deref().unwrap_or(Path::new(".")),
-            ),
-        );
+        let composition = match crate::host::composition_at(
+            self.backend_root.as_deref().unwrap_or(Path::new(".")),
+        ) {
+            Ok(composition) => composition,
+            Err(error) => {
+                ui.colored_label(Color32::LIGHT_RED, &error);
+                self.error = Some(error);
+                return false;
+            }
+        };
+        let activity = match composition.activity(document) {
+            Ok(activity) => activity,
+            Err(error) => {
+                ui.colored_label(Color32::LIGHT_RED, &error);
+                self.error = Some(error);
+                return false;
+            }
+        };
+        let active = &activity.components;
+        let schemas = composition.systems.components();
         let manifest =
             match module_engine_project::AssetManifest::from_value(&document.asset_manifest) {
                 Ok(manifest) => manifest,
@@ -2002,6 +2013,28 @@ impl GameWorkbench {
                     return false;
                 }
             };
+        let asset_paths = manifest.asset_paths();
+        let validation = ComponentValidationContext {
+            scenes: &game.scenes,
+            modules: &activity.modules,
+            asset_paths: Some(&asset_paths),
+            active_components: Some(&activity.components),
+        };
+        let resolved =
+            match game.resolve_scene_with_context(&self.scene, &composition.systems, &validation) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    ui.colored_label(Color32::LIGHT_RED, &error);
+                    self.error = Some(error);
+                    return false;
+                }
+            };
+        let fields = ComponentEditorContext {
+            modules: &activity.modules,
+            components: &activity.components,
+            entities: &resolved,
+            manifest: &manifest,
+        };
         ui.heading("Inspector");
         if self.selected.is_none() {
             ui.label("Select an object in Scene or Hierarchy.");
@@ -2011,12 +2044,13 @@ impl GameWorkbench {
         }
         egui::ScrollArea::vertical().show(ui,|ui|{
             if let Some(id)=self.selected && let Some(entity)=resolved.iter().find(|entity|entity.object.id==id).cloned(){
-                let templates=game.prefabs.clone();let defaults=component_examples(&game);
+                let templates=game.prefabs.clone();
+                let attached=entity.components.keys().cloned().collect::<BTreeSet<_>>();
                 let parents=game.scenes[&self.scene].objects.iter().filter(|object|object.object.id!=id).map(|object|object.object.id).collect::<Vec<_>>();
                 let object=game.scenes.get_mut(&self.scene).unwrap().objects.iter_mut().find(|object|object.object.id==id).unwrap();
                 let prefab=object.prefab.as_ref().and_then(|name|templates.get(name));
                 if self.field_key.as_ref()!=Some(&(self.scene.clone(),id)){
-                    self.component_drafts=entity.components.clone();
+                    self.component_drafts=entity.components.iter().map(|(name,value)|(name.clone(),schemas.resolve_component(name,value))).collect();
                     self.advanced=serde_json::to_string_pretty(&json!({"components":object.components,"overrides":object.overrides,"references":object.references})).unwrap_or_default();
                     self.field_key=Some((self.scene.clone(),id));
                 }
@@ -2035,9 +2069,9 @@ impl GameWorkbench {
                         ui.selectable_value(&mut object.prefab,None,"No template");for name in templates.keys(){ui.selectable_value(&mut object.prefab,Some(name.clone()),name);}
                     });
                     if object.prefab!=before{link_template(object,&entity,&templates);self.field_key=None;}
-                    let visible=self.component_drafts.keys().filter(|name|active.contains(*name)).cloned().collect::<Vec<_>>();
-                    for name in visible{ui.push_id(&name,|ui|{ui.collapsing(&name,|ui|{
-                        let draft=self.component_drafts.get_mut(&name).unwrap();edit_value(ui,draft);let value=draft.clone();
+                    let visible=self.component_drafts.keys().filter(|name|active.contains(*name)&&schemas.schema(name).is_some()).cloned().collect::<Vec<_>>();
+                    for name in visible{let schema=schemas.schema(&name).unwrap();ui.push_id(&name,|ui|{egui::CollapsingHeader::new(&schema.label).default_open(true).show(ui,|ui|{
+                        let draft=self.component_drafts.get_mut(&name).unwrap();component_editor(ui,schema,draft,&attached,&fields);let value=draft.clone();
                         ui.horizontal(|ui|{
                             if ui.button("Apply fields").clicked(){apply_component(object,prefab,&name,value);self.field_key=None;}
                             if prefab.is_some_and(|prefab|prefab.components.contains_key(&name)){
@@ -2046,9 +2080,9 @@ impl GameWorkbench {
                         });
                     });});}
                     egui::ComboBox::from_id_salt("add-game-component").selected_text("+ Component from active modules").show_ui(ui,|ui|{
-                        for name in &active{if !self.component_drafts.contains_key(name)&&ui.button(name).clicked(){self.component_drafts.insert(name.clone(),defaults.get(name).cloned().unwrap_or_else(||match name.as_str(){"mesh"=>json!({"path":""}),"material"=>json!({"base_color":[1.,1.,1.,1.]}),_=>json!({})}));}}
+                        for name in active{if let Some(schema)=schemas.schema(name)&&!self.component_drafts.contains_key(name)&&ui.button(&schema.label).clicked(){self.component_drafts.insert(name.clone(),schema.defaults.clone());}}
                     });
-                    let hidden=entity.components.keys().filter(|name|!active.contains(*name)).count();if hidden>0{ui.label(format!("{hidden} inactive component records preserved; see Advanced"));}
+                    let hidden=entity.components.keys().filter(|name|!active.contains(*name)||schemas.schema(name).is_none()).count();if hidden>0{ui.label(format!("{hidden} inactive or unknown component records preserved; see Advanced"));}
                     ui.collapsing("Advanced: components / overrides / references",|ui|{
                         ui.add(egui::TextEdit::multiline(&mut self.advanced).code_editor().desired_rows(12).desired_width(f32::INFINITY));
                         if ui.button("Apply raw JSON").clicked(){match apply_raw_object(object,&self.advanced){Ok(())=>self.field_key=None,Err(error)=>self.error=Some(error)}}
@@ -2056,12 +2090,12 @@ impl GameWorkbench {
                 });
                 if active.contains("mesh")||active.contains("material"){self.asset_ui(ui,&manifest,object,prefab,!self.play_session);}
                 ui.add_enabled_ui(!self.play_session,|ui|{ui.horizontal_wrapped(|ui|{ui.label("New linked template");ui.text_edit_singleline(&mut self.template_name);});});
-                if ui.add_enabled(!self.play_session,egui::Button::new("Create template from selected")).clicked(){match create_template(&mut game,&self.scene,id,&self.template_name){Ok(_)=>{self.template_name.clear();self.template_key=None;self.field_key=None;},Err(error)=>self.error=Some(error)}}
+                if ui.add_enabled(!self.play_session,egui::Button::new("Create template from selected")).clicked(){match create_template(&mut game,&self.scene,&entity,&self.template_name){Ok(_)=>{self.template_name.clear();self.template_key=None;self.field_key=None;},Err(error)=>self.error=Some(error)}}
                 let template_name=game.scenes[&self.scene].objects.iter().find(|object|object.object.id==id).and_then(|object|object.prefab.clone());
                 if let Some(name)=template_name&&let Some(template)=game.prefabs.get(&name){
                     if self.template_key.as_deref()!=Some(&name){self.template_draft=Some(template.clone());self.template_key=Some(name.clone());}
                     ui.collapsing(format!("Linked template source: {name}"),|ui|{ui.add_enabled_ui(!self.play_session,|ui|{
-                        if let Some(draft)=&mut self.template_draft{ui.color_edit_button_srgba_unmultiplied(&mut draft.color);for(component,value)in&mut draft.components{if active.contains(component){ui.push_id(format!("template-{component}"),|ui|{ui.collapsing(component,|ui|edit_value(ui,value));});}}}
+                        if let Some(draft)=&mut self.template_draft{ui.color_edit_button_srgba_unmultiplied(&mut draft.color);let attached=draft.components.keys().cloned().collect::<BTreeSet<_>>();for(component,value)in&mut draft.components{if active.contains(component)&&let Some(schema)=schemas.schema(component){ui.push_id(format!("template-{component}"),|ui|{ui.collapsing(&schema.label,|ui|{*value=schemas.resolve_component(component,value);component_editor(ui,schema,value,&attached,&fields);});});}}}
                         if ui.button("Apply template defaults to instances").clicked()&&let Some(draft)=&self.template_draft{game.prefabs.insert(name.clone(),draft.clone());self.field_key=None;}
                     });});
                 }
@@ -2460,26 +2494,14 @@ impl GameWorkbench {
                 .unwrap_or_default();
             self.positions_root = Some(root.into());
         }
-        let mut copy = document.clone();
-        copy.game = None;
-        let slots = self
-            .host
-            .as_ref()
-            .map(|h| h.slots.clone())
-            .unwrap_or_default();
-        let registry = match game_host::game_registry_at(
-            &copy,
-            root,
-            self.backend_root.as_deref().unwrap_or(root),
-            &slots,
-            std::sync::Arc::new(std::sync::Mutex::new(RenderOverrides::default())),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                ui.colored_label(Color32::LIGHT_RED, e);
-                return false;
-            }
-        };
+        let registry =
+            match crate::host::composition_at(self.backend_root.as_deref().unwrap_or(root)) {
+                Ok(composition) => composition.systems,
+                Err(e) => {
+                    ui.colored_label(Color32::LIGHT_RED, e);
+                    return false;
+                }
+            };
         if self.graph_text_dirty {
             ui.label("Load edited JSON into the draft before applying.");
         }
@@ -2777,49 +2799,190 @@ if ui.button("+ Resource").clicked(){let name=unique_name("resource",draft.resou
         }
     }
 }
-fn renderer_active(document: &GraphDocument, root: &Path) -> bool {
-    let Ok(registry) = crate::host::registry_at(root) else {
-        return false;
-    };
-    document
-        .root
-        .nodes
-        .iter()
-        .filter_map(|n| registry.descriptor(&n.module))
-        .any(|d| {
-            d.inputs.iter().any(|p| p.data_type == "Scene3D")
-                && d.outputs.iter().any(|p| p.data_type == "Frame3D")
-        })
+struct ComponentEditorContext<'a> {
+    modules: &'a BTreeSet<String>,
+    components: &'a BTreeSet<String>,
+    entities: &'a [GameEntity],
+    manifest: &'a module_engine_project::AssetManifest,
 }
-fn active_components(
-    graph: &ExecutionGraph,
-    registry: &SystemRegistry,
-    renderer: bool,
-) -> BTreeSet<String> {
-    let mut names = graph
-        .stages
-        .iter()
-        .flat_map(|s| &s.nodes)
-        .flat_map(|n| {
-            registry
-                .descriptor(&n.module)
-                .into_iter()
-                .flat_map(|d| d.components.iter().cloned())
-                .chain(
-                    n.params
-                        .get("components")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned),
-                )
-        })
-        .collect::<BTreeSet<_>>();
-    if renderer {
-        names.extend(["mesh".into(), "material".into()]);
+
+fn component_editor(
+    ui: &mut egui::Ui,
+    schema: &ComponentSchema,
+    component: &mut Value,
+    attached: &BTreeSet<String>,
+    context: &ComponentEditorContext<'_>,
+) {
+    if schema.fields.is_empty() {
+        ui.label("Marker component (no fields)");
     }
-    names
+    for field in &schema.fields {
+        if !field
+            .requires_modules
+            .iter()
+            .all(|id| context.modules.contains(id))
+            || !field
+                .requires_components
+                .iter()
+                .all(|id| attached.contains(id) && context.components.contains(id))
+        {
+            continue;
+        }
+        let Some(path) = schema.field_path(field) else {
+            continue;
+        };
+        let mut value = component_field(component, path)
+            .unwrap_or(&field.default)
+            .clone();
+        let changed = reference_editor(ui, field, &mut value, context).unwrap_or_else(|| {
+            crate::app::properties::value_editor(
+                ui,
+                &field.id,
+                &field.label,
+                &field.value_type,
+                &mut value,
+            )
+        });
+        if changed && let Err(error) = set_component_field(component, path, value.clone()) {
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+        if let Err(error) = field.value_type.validate(&value) {
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+    }
+}
+
+fn object_reference_choices(
+    entities: &[GameEntity],
+    required: &[String],
+    active: &BTreeSet<String>,
+) -> Vec<u64> {
+    if required.iter().any(|id| !active.contains(id)) {
+        return vec![];
+    }
+    entities
+        .iter()
+        .filter(|entity| required.iter().all(|id| entity.components.contains_key(id)))
+        .map(|entity| entity.object.id)
+        .collect()
+}
+
+fn asset_reference_choices(
+    manifest: &module_engine_project::AssetManifest,
+    kinds: &[String],
+) -> Vec<(String, String)> {
+    manifest
+        .assets
+        .iter()
+        .filter(|(_, entry)| {
+            kinds.is_empty()
+                || Path::new(&entry.path)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|extension| {
+                        kinds
+                            .iter()
+                            .any(|kind| kind.eq_ignore_ascii_case(extension))
+                    })
+        })
+        .map(|(id, entry)| (format!("asset://{id}"), entry.path.clone()))
+        .collect()
+}
+
+fn reference_editor(
+    ui: &mut egui::Ui,
+    field: &PropertySchema,
+    value: &mut Value,
+    context: &ComponentEditorContext<'_>,
+) -> Option<bool> {
+    match &field.value_type {
+        PropertyType::ObjectReference {
+            required_components,
+            optional,
+        } => {
+            let choices =
+                object_reference_choices(context.entities, required_components, context.components);
+            let before = value.clone();
+            ui.push_id(&field.id, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(&field.label);
+                    let selected = value.as_u64().map_or_else(
+                        || {
+                            if *optional {
+                                "None".into()
+                            } else {
+                                "Choose object".into()
+                            }
+                        },
+                        |id| {
+                            if choices.contains(&id) {
+                                format!("Object {id}")
+                            } else {
+                                format!("Unavailable object {id}")
+                            }
+                        },
+                    );
+                    egui::ComboBox::from_id_salt("reference")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            if *optional {
+                                ui.selectable_value(value, Value::Null, "None");
+                            }
+                            for id in choices {
+                                ui.selectable_value(value, json!(id), format!("Object {id}"));
+                            }
+                        });
+                })
+            });
+            Some(*value != before)
+        }
+        PropertyType::AssetReference { kinds, optional } => {
+            let choices = asset_reference_choices(context.manifest, kinds);
+            let before = value.clone();
+            let response = ui
+                .push_id(&field.id, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(&field.label);
+                        let selected = value.as_str().map_or_else(
+                            || {
+                                if *optional {
+                                    "None".into()
+                                } else {
+                                    "Choose asset".into()
+                                }
+                            },
+                            |reference| {
+                                choices
+                                    .iter()
+                                    .find(|(id, _)| id == reference)
+                                    .map_or_else(|| reference.to_owned(), |(_, path)| path.clone())
+                            },
+                        );
+                        egui::ComboBox::from_id_salt("reference")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                if *optional {
+                                    ui.selectable_value(value, Value::Null, "None");
+                                }
+                                for (reference, path) in &choices {
+                                    ui.selectable_value(value, json!(reference), path);
+                                }
+                            });
+                    })
+                })
+                .inner
+                .response;
+            if let Some(payload) = response.dnd_release_payload::<crate::assets_ui::AssetDrag>()
+                && choices
+                    .iter()
+                    .any(|(reference, _)| reference == &payload.reference)
+            {
+                *value = json!(payload.reference);
+            }
+            Some(*value != before)
+        }
+        _ => None,
+    }
 }
 fn merge_view_input(current: &mut GameInput, next: GameInput, active: bool) {
     if !active {
@@ -2832,20 +2995,6 @@ fn merge_view_input(current: &mut GameInput, next: GameInput, active: bool) {
     current.attack = attack;
     current.interact = interact;
     current.restart = restart;
-}
-fn component_examples(game: &GameProject) -> BTreeMap<String, Value> {
-    let mut values = BTreeMap::new();
-    for components in game.prefabs.values().map(|p| &p.components).chain(
-        game.scenes
-            .values()
-            .flat_map(|s| &s.objects)
-            .map(|o| &o.components),
-    ) {
-        for (name, value) in components {
-            values.entry(name.clone()).or_insert(value.clone());
-        }
-    }
-    values
 }
 fn unique_name<'a>(base: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let names = existing.into_iter().collect::<BTreeSet<_>>();
@@ -2911,14 +3060,17 @@ fn delete_object(scene: &mut AuthoredScene, id: u64) {
 fn create_template(
     game: &mut GameProject,
     scene: &str,
-    id: u64,
+    entity: &GameEntity,
     name: &str,
 ) -> Result<String, String> {
-    let entity = game
-        .resolve_scene(scene)?
-        .into_iter()
-        .find(|e| e.object.id == id)
-        .ok_or("Selected object missing")?;
+    let id = entity.object.id;
+    if !game
+        .scenes
+        .get(scene)
+        .is_some_and(|scene| scene.objects.iter().any(|object| object.object.id == id))
+    {
+        return Err("Selected object missing".into());
+    }
     let name = if name.trim().is_empty() {
         unique_name("template", game.prefabs.keys().map(String::as_str))
     } else {
@@ -2931,7 +3083,7 @@ fn create_template(
         name.clone(),
         Prefab {
             color: entity.object.color,
-            components: entity.components,
+            components: entity.components.clone(),
         },
     );
     let object = game
@@ -2970,18 +3122,35 @@ fn link_template(
         if path == "color" {
             continue;
         }
-        let Some((component, field)) = path.split_once('.') else {
+        let Some(component) = resolved
+            .components
+            .keys()
+            .filter(|component| {
+                path.strip_prefix(component.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+            .max_by_key(|component| component.len())
+        else {
             continue;
         };
-        let base = component_value(object, Some(template), component);
-        let exists = field
-            .split('.')
-            .try_fold(&base, |v, key| v.get(key))
-            .is_some();
+        let field = &path[component.len() + 1..];
+        let mut base = template
+            .components
+            .get(component)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let Some(local) = object.components.get(component) {
+            if let (Some(base), Some(local)) = (base.as_object_mut(), local.as_object()) {
+                base.extend(local.clone());
+            } else {
+                base = local.clone();
+            }
+        }
+        let exists = component_field(&base, field).is_some();
         if !exists {
             let local = object
                 .components
-                .entry(component.into())
+                .entry(component.clone())
                 .or_insert_with(|| {
                     resolved
                         .components
@@ -3014,7 +3183,9 @@ fn component_value(object: &AuthoredObject, prefab: Option<&Prefab>, name: &str)
     value
 }
 fn value_leaves(value: &Value, prefix: &str, result: &mut BTreeMap<String, Value>) {
-    if let Value::Object(fields) = value {
+    if let Value::Object(fields) = value
+        && !fields.is_empty()
+    {
         for (field, v) in fields {
             let path = if prefix.is_empty() {
                 field.clone()
@@ -3022,6 +3193,12 @@ fn value_leaves(value: &Value, prefix: &str, result: &mut BTreeMap<String, Value
                 format!("{prefix}.{field}")
             };
             value_leaves(v, &path, result);
+        }
+    } else if let Value::Array(values) = value
+        && !values.is_empty()
+    {
+        for (index, value) in values.iter().enumerate() {
+            value_leaves(value, &format!("{prefix}.{index}"), result);
         }
     } else {
         result.insert(prefix.into(), value.clone());
@@ -3031,21 +3208,54 @@ fn put_field(value: &mut Value, path: &str, new: Value) {
     let (head, tail) = path
         .split_once('.')
         .map_or((path, None), |(h, t)| (h, Some(t)));
-    if !value.is_object() {
-        *value = json!({});
-    }
-    if let Some(tail) = tail {
-        put_field(
-            value
+    if let Value::Array(values) = value {
+        let Ok(index) = head.parse::<usize>() else {
+            return;
+        };
+        if index > 65535 {
+            return;
+        }
+        values.resize_with(values.len().max(index + 1), || Value::Null);
+        if let Some(tail) = tail {
+            if values[index].is_null() {
+                values[index] = if tail
+                    .split('.')
+                    .next()
+                    .is_some_and(|part| part.parse::<usize>().is_ok())
+                {
+                    json!([])
+                } else {
+                    json!({})
+                };
+            }
+            put_field(&mut values[index], tail, new);
+        } else {
+            values[index] = new;
+        }
+    } else {
+        if !value.is_object() {
+            *value = json!({});
+        }
+        if let Some(tail) = tail {
+            let child = value
                 .as_object_mut()
                 .unwrap()
                 .entry(head)
-                .or_insert_with(|| json!({})),
-            tail,
-            new,
-        );
-    } else {
-        value.as_object_mut().unwrap().insert(head.into(), new);
+                .or_insert_with(|| {
+                    if tail
+                        .split('.')
+                        .next()
+                        .is_some_and(|part| part.parse::<usize>().is_ok())
+                    {
+                        json!([])
+                    } else {
+                        json!({})
+                    }
+                });
+            put_field(child, tail, new);
+        } else {
+            value.as_object_mut().unwrap().insert(head.into(), new);
+        }
     }
 }
 fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &str, value: Value) {
@@ -3340,49 +3550,6 @@ fn connect_pins(
     n.bindings.insert(input.into(), resource);
     Ok(())
 }
-fn edit_value(ui: &mut egui::Ui, value: &mut Value) {
-    match value {
-        Value::Object(fields) => {
-            if fields.is_empty() {
-                ui.label("Marker component (no fields)");
-            }
-            for (name, value) in fields {
-                ui.push_id(name, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(name);
-                        edit_value(ui, value);
-                    });
-                });
-            }
-        }
-        Value::Array(values) => {
-            ui.horizontal_wrapped(|ui| {
-                for (i, value) in values.iter_mut().enumerate() {
-                    ui.push_id(i, |ui| edit_value(ui, value));
-                }
-            });
-        }
-        Value::Number(n) => {
-            let mut v = n.as_f64().unwrap_or(0.);
-            if ui
-                .add(egui::DragValue::new(&mut v).speed(0.1).max_decimals(3))
-                .changed()
-            {
-                *value = json!(v);
-            }
-        }
-        Value::Bool(v) => {
-            ui.checkbox(v, "");
-        }
-        Value::String(v) => {
-            ui.add(egui::TextEdit::singleline(v).desired_width(150.));
-        }
-        Value::Null => {
-            ui.label("null (edit type in Advanced JSON)");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -4236,21 +4403,486 @@ mod tests {
         assert_eq!(workbench.input, GameInput::default());
     }
     #[test]
-    fn custom_declared_components_are_visible_only_while_the_module_is_active() {
-        let mut graph = ExecutionGraph::gameplay();
-        graph.stages[0].nodes[0].params["components"] = json!(["inventory", "quest", 42]);
-        let registry = SystemRegistry::builtin();
-        let visible = active_components(&graph, &registry, false);
-        assert!(visible.contains("inventory"));
-        assert!(visible.contains("quest"));
-        graph.stages[0].nodes[0]
-            .params
-            .as_object_mut()
+    fn source_component_defaults_create_real_runtime_fields_in_an_empty_scene() {
+        let composition = source_composition();
+        let mut document = source_document();
+        let defaults = composition
+            .systems
+            .components()
+            .defaults("example.stats")
             .unwrap()
-            .remove("components");
-        assert!(!active_components(&graph, &registry, false).contains("inventory"));
+            .clone();
+        let object = &mut document
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("empty")
+            .unwrap()
+            .objects[0];
+        let mut edited = defaults;
+        set_component_field(&mut edited, "speed", json!(5.)).unwrap();
+        set_component_field(&mut edited, "mode", json!("run")).unwrap();
+        apply_component(object, None, "example.stats", edited);
+        assert!(
+            composition
+                .activity(&document)
+                .unwrap()
+                .components
+                .contains("example.stats")
+        );
+        assert!(
+            !composition
+                .validate_document(&document)
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error)
+        );
+        let saved = serde_json::to_vec(&document).unwrap();
+        let restored: GraphDocument = serde_json::from_slice(&saved).unwrap();
+        let session = GameSession::new_with_registry(
+            restored.game.unwrap(),
+            WorldKind::Ecs,
+            composition.systems.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            session.state().entities[&1].components["example.stats"]["speed"],
+            json!(5.)
+        );
+        assert_eq!(
+            session.state().entities[&1].components["example.stats"]["mode"],
+            json!("run")
+        );
+        assert_eq!(
+            session.state().entities[&1].components["example.stats"]["offset"],
+            json!([1., 2., 3.])
+        );
+        document.game.as_mut().unwrap().execution.stages[0]
+            .nodes
+            .clear();
+        assert!(
+            !composition
+                .activity(&document)
+                .unwrap()
+                .components
+                .contains("example.stats")
+        );
+        assert_eq!(
+            document.game.as_ref().unwrap().scenes["empty"].objects[0].components["example.stats"]
+                ["speed"],
+            json!(5.)
+        );
     }
     use super::*;
+
+    fn source_schema() -> ComponentSchema {
+        let id = "example.stats";
+        let defaults = json!({"speed":2.,"mode":"walk","enabled":true,"title":"Scout","offset":[1.,2.,3.],"target":null,"icon":null});
+        let fields = vec![
+            (
+                "speed",
+                "Travel speed",
+                PropertyType::Number { min: 0., max: 10. },
+            ),
+            (
+                "mode",
+                "Movement mode",
+                PropertyType::Enum {
+                    choices: vec!["walk".into(), "run".into()],
+                },
+            ),
+            ("enabled", "Enabled", PropertyType::Boolean),
+            ("title", "Title", PropertyType::Text { max_len: 32 }),
+            (
+                "offset.0",
+                "Offset X",
+                PropertyType::Number {
+                    min: -10.,
+                    max: 10.,
+                },
+            ),
+            (
+                "offset.1",
+                "Offset Y",
+                PropertyType::Number {
+                    min: -10.,
+                    max: 10.,
+                },
+            ),
+            (
+                "offset.2",
+                "Offset Z",
+                PropertyType::Number {
+                    min: -10.,
+                    max: 10.,
+                },
+            ),
+            (
+                "target",
+                "Target",
+                PropertyType::ObjectReference {
+                    required_components: vec![id.into()],
+                    optional: true,
+                },
+            ),
+            (
+                "icon",
+                "Portrait",
+                PropertyType::AssetReference {
+                    kinds: vec!["png".into()],
+                    optional: true,
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(path, label, value_type)| PropertySchema {
+            id: format!("{id}.{path}"),
+            label: label.into(),
+            scope: PropertyScope::Component {
+                component: id.into(),
+            },
+            default: component_field(&defaults, path).unwrap().clone(),
+            value_type,
+            requires_modules: vec![],
+            requires_components: vec![],
+        })
+        .collect();
+        ComponentSchema {
+            id: id.into(),
+            owner_module: "example.stats.system".into(),
+            version: "1".into(),
+            label: "Character settings".into(),
+            defaults,
+            fields,
+            requires_modules: vec![],
+            requires_components: vec![],
+        }
+    }
+
+    fn source_composition() -> CompositionContext {
+        struct SourceSystem;
+        impl ExecutableSystem for SourceSystem {
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut composition = crate::host::composition_at(Path::new(".")).unwrap();
+        composition
+            .systems
+            .components_mut()
+            .register(source_schema())
+            .unwrap();
+        composition
+            .systems
+            .register(
+                SystemDescriptor {
+                    id: "example.stats.system".into(),
+                    state_schema: "example.stats/1".into(),
+                    components: vec!["example.stats".into()],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(SourceSystem)),
+            )
+            .unwrap();
+        CompositionContext::new(composition.modules, composition.systems).unwrap()
+    }
+
+    fn source_document() -> GraphDocument {
+        let mut document = demo_document(WorldKind::Objects);
+        document.game = Some(GameProject {
+            entry_scene: "empty".into(),
+            scenes: BTreeMap::from([(
+                "empty".into(),
+                AuthoredScene {
+                    name: "Empty".into(),
+                    objects: vec![AuthoredObject::new(WorldObject {
+                        id: 1,
+                        parent: None,
+                        transform: Transform::default(),
+                        color: [255; 4],
+                    })],
+                },
+            )]),
+            prefabs: BTreeMap::new(),
+            audio_cues: BTreeMap::new(),
+            execution: ExecutionGraph {
+                resources: vec![],
+                stages: vec![SystemStage {
+                    name: "Source".into(),
+                    nodes: vec![SystemNode {
+                        id: "source".into(),
+                        module: "example.stats.system".into(),
+                        params: json!({}),
+                        bindings: BTreeMap::new(),
+                        after: vec![],
+                    }],
+                }],
+            },
+        });
+        document
+    }
+
+    #[test]
+    fn inspector_renders_registered_source_fields_and_apply_changes_the_running_component() {
+        let root = crate::project::source_root();
+        let composition = crate::host::composition_at(&root).unwrap();
+        let mut document = crate::source_modules::tests::document();
+        let defaults = composition
+            .systems
+            .components()
+            .defaults("example.spin")
+            .unwrap()
+            .clone();
+        document
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("empty")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("example.spin".into(), defaults);
+        let mut workbench = GameWorkbench::default();
+        workbench.scene.clone_from(&"empty".into());
+        workbench.select(Some(1));
+        workbench.set_engine_context(None, &root);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.);
+        let frame = |workbench: &mut GameWorkbench, document: &mut GraphDocument, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1200., 1200.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    workbench.inspector_ui(ui, document);
+                },
+            )
+        };
+        let output = frame(&mut workbench, &mut document, vec![]);
+        assert!(workbench.error.is_none(), "{:?}", workbench.error);
+        for label in ["Rotation", "Radians per second", "Axis", "Enabled"] {
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)), "missing schema label {label}");
+        }
+        let point = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Apply fields" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("source component has the ordinary Apply fields action");
+        output.drop_without_applying_deltas();
+        set_component_field(
+            workbench.component_drafts.get_mut("example.spin").unwrap(),
+            "speed",
+            json!(3.),
+        )
+        .unwrap();
+        for pressed in [true, false] {
+            frame(
+                &mut workbench,
+                &mut document,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            document.game.as_ref().unwrap().scenes["empty"].objects[0].components["example.spin"]["speed"],
+            json!(3.)
+        );
+        assert!(
+            workbench.host.is_none() && workbench.preview_host.is_none(),
+            "schema inspection must not initialize rendering"
+        );
+        let reopened: GraphDocument =
+            serde_json::from_slice(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let mut session = GameSession::new_with_registry(
+            reopened.game.unwrap(),
+            WorldKind::Ecs,
+            composition.systems,
+        )
+        .unwrap();
+        session.step(1. / 60., &GameInput::default()).unwrap();
+        assert!((session.state().entities[&1].object.transform.rotation[1] - 0.05).abs() < 0.00001);
+    }
+
+    #[test]
+    fn namespaced_vector_field_overrides_preserve_other_template_defaults_and_unknown_data() {
+        let composition = source_composition();
+        let mut document = source_document();
+        let game = document.game.as_mut().unwrap();
+        let base = Prefab {
+            color: [255; 4],
+            components: BTreeMap::from([("example.stats".into(), source_schema().defaults)]),
+        };
+        game.prefabs.insert("stats".into(), base.clone());
+        let object = &mut game.scenes.get_mut("empty").unwrap().objects[0];
+        object.prefab = Some("stats".into());
+        object
+            .components
+            .insert("future.archive".into(), json!({"keep":[9,8,7]}));
+        let mut value = component_value(object, Some(&base), "example.stats");
+        value["unregistered"] = json!({"preserve":true});
+        set_component_field(&mut value, "offset.1", json!(9.)).unwrap();
+        apply_component(object, Some(&base), "example.stats", value);
+        assert_eq!(object.overrides["example.stats.offset.1"], json!(9.));
+        assert!(!object.overrides.contains_key("example.stats.offset"));
+        game.prefabs
+            .get_mut("stats")
+            .unwrap()
+            .components
+            .get_mut("example.stats")
+            .unwrap()["offset"] = json!([7., 2., 8.]);
+        let restored: GraphDocument =
+            serde_json::from_slice(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let entity = restored
+            .game
+            .as_ref()
+            .unwrap()
+            .resolve_scene_with_registry("empty", &composition.systems)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            entity.components["example.stats"]["offset"],
+            json!([7., 9., 8.])
+        );
+        assert_eq!(
+            entity.components["example.stats"]["unregistered"],
+            json!({"preserve":true})
+        );
+        assert_eq!(entity.components["future.archive"], json!({"keep":[9,8,7]}));
+        let mut object = restored.game.as_ref().unwrap().scenes["empty"].objects[0].clone();
+        reset_component(&mut object, "example.stats");
+        assert!(
+            !object
+                .overrides
+                .keys()
+                .any(|key| key.starts_with("example.stats."))
+        );
+        assert_eq!(object.components["future.archive"], json!({"keep":[9,8,7]}));
+    }
+
+    #[test]
+    fn schema_reference_choices_filter_actual_components_and_declared_file_kinds() {
+        let entity = |id, components| GameEntity {
+            object: WorldObject {
+                id,
+                parent: None,
+                transform: Transform::default(),
+                color: [255; 4],
+            },
+            components,
+            references: BTreeMap::new(),
+        };
+        let entities = vec![
+            entity(1, BTreeMap::new()),
+            entity(
+                2,
+                BTreeMap::from([("example.stats".into(), source_schema().defaults)]),
+            ),
+        ];
+        assert_eq!(
+            object_reference_choices(
+                &entities,
+                &["example.stats".into()],
+                &BTreeSet::from(["example.stats".into()])
+            ),
+            vec![2]
+        );
+        assert!(
+            object_reference_choices(&entities, &["example.stats".into()], &BTreeSet::new())
+                .is_empty()
+        );
+        let mut manifest = module_engine_project::AssetManifest::default();
+        for (id, path) in [
+            ("portrait", "assets/portrait.PNG"),
+            ("sound", "assets/hit.wav"),
+            ("other", "assets/data.custom"),
+        ] {
+            manifest.assets.insert(
+                id.into(),
+                module_engine_project::AssetEntry {
+                    path: path.into(),
+                    sha256: "hash".into(),
+                    dependencies: vec![],
+                },
+            );
+        }
+        assert_eq!(
+            asset_reference_choices(&manifest, &["png".into()]),
+            vec![("asset://portrait".into(), "assets/portrait.PNG".into())]
+        );
+        assert_eq!(
+            asset_reference_choices(&manifest, &["custom".into()]),
+            vec![("asset://other".into(), "assets/data.custom".into())]
+        );
+        assert_eq!(asset_reference_choices(&manifest, &[]).len(), 3);
+    }
+
+    #[test]
+    fn typed_schema_editor_renders_declared_fields_and_keeps_unknown_values_unchanged() {
+        let mut schema = source_schema();
+        let mut hidden = schema.fields[0].clone();
+        hidden.id = "example.stats.hidden".into();
+        hidden.label = "Unavailable field".into();
+        hidden.requires_modules = vec!["not.active".into()];
+        schema.fields.push(hidden);
+        let mut value = schema.defaults.clone();
+        value["unknown"] = json!({"preserve":[true,42]});
+        let original = value.clone();
+        let modules = BTreeSet::new();
+        let attached = BTreeSet::from([schema.id.clone()]);
+        let manifest = module_engine_project::AssetManifest::default();
+        let fields = ComponentEditorContext {
+            modules: &modules,
+            components: &attached,
+            entities: &[],
+            manifest: &manifest,
+        };
+        let output = egui::Context::default().run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1000., 1000.),
+                )),
+                ..Default::default()
+            },
+            |ui| component_editor(ui, &schema, &mut value, &attached, &fields),
+        );
+        for label in [
+            "Travel speed",
+            "Movement mode",
+            "Enabled",
+            "Title",
+            "Offset X",
+            "Offset Y",
+            "Offset Z",
+            "Target",
+            "Portrait",
+        ] {
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)), "missing schema label {label}");
+        }
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Unavailable field" || text.galley.text() == "unknown")));
+        assert_eq!(value, original);
+        output.drop_without_applying_deltas();
+    }
 
     #[test]
     fn game_rust_editor_shows_its_own_errors_and_applies_reset_and_migration_to_game_slots() {
@@ -4434,7 +5066,13 @@ mod tests {
         let mut game = GameProject::demo();
         let copied = create_scene(&mut game, "arena", "another", true).unwrap();
         assert_eq!(game.scenes[&copied].objects, game.scenes["arena"].objects);
-        let template = create_template(&mut game, "arena", 10, "linked").unwrap();
+        let entity = game
+            .resolve_scene("arena")
+            .unwrap()
+            .into_iter()
+            .find(|entity| entity.object.id == 10)
+            .unwrap();
+        let template = create_template(&mut game, "arena", &entity, "linked").unwrap();
         let base = game.prefabs[&template].clone();
         let object = game
             .scenes
@@ -4511,9 +5149,12 @@ mod tests {
             .insert("material.base_color".into(), json!([0.2, 0.3, 0.4, 1.]));
         attach_asset(&mut object, Some(&prefab), "assets/new.png").unwrap();
         assert_eq!(
-            object.overrides["material.base_color"],
+            component_value(&object, Some(&prefab), "material")["base_color"],
             json!([0.2, 0.3, 0.4, 1.])
         );
+        assert_eq!(object.overrides["material.base_color.0"], json!(0.2));
+        assert_eq!(object.overrides["material.base_color.1"], json!(0.3));
+        assert_eq!(object.overrides["material.base_color.2"], json!(0.4));
         assert_eq!(
             object.overrides["material.base_color_texture"],
             "assets/new.png"
@@ -4533,18 +5174,17 @@ mod tests {
         link_template(&mut object, &resolved, &BTreeMap::new());
         assert_eq!(object.components, resolved.components);
         assert!(object.overrides.is_empty());
-        let visible = active_components(
-            &ExecutionGraph::gameplay(),
-            &SystemRegistry::builtin(),
-            true,
-        );
+        let composition = crate::host::composition_at(Path::new(".")).unwrap();
+        let mut document = demo_document(WorldKind::Objects);
+        document.game = Some(GameProject::demo());
+        let visible = composition.activity(&document).unwrap().components;
         assert!(visible.contains("material"));
         assert!(!visible.contains("network"));
         assert_eq!(object.components["network"]["replication"], true);
     }
     #[test]
     fn disconnected_graph_can_be_repaired_and_wrong_pin_or_execution_order_is_rejected() {
-        let registry = SystemRegistry::builtin();
+        let registry = crate::host::composition_at(Path::new(".")).unwrap().systems;
         let mut graph = ExecutionGraph::gameplay();
         graph.stages[0].nodes[0].bindings.remove("input");
         assert!(registry.validate(&graph).is_err());

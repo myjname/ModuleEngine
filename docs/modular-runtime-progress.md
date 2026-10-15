@@ -10,7 +10,7 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | --- | --- | --- | --- |
 | 0 | Source/tool/content inventory and independent audit reproduction | SHA-256 inventory, baseline tests and repro logs | Complete |
 | 1 | Hierarchical death, scene transfer, system replacement, tool doctor | Regression tests; unchanged failure candidates | Complete |
-| 2 | Shared composition and component schemas | Source module defaults/Inspector/validation/save/runtime/export share contracts | Pending |
+| 2 | Shared composition and component schemas | Source module defaults/Inspector/validation/save/runtime/export share contracts | Complete |
 | 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Pending |
 | 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Pending |
 | 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Pending |
@@ -80,3 +80,39 @@ The authored `game-project.json` (including removed AA/AO passes) is not silentl
 rewritten. Full/Team authoring policy remains explicit and is not a native-code
 security sandbox. No project copy is used as source version control; Git records
 accepted stages.
+
+## Stage 2 result
+
+The native composition now shares root/system registries, component schemas,
+implementation versions and derived activity. Schema owners contribute data
+without being scheduled as systems; their availability dependencies and pins are
+checked separately from authored execution order. Root-only schema owners share
+their existing implementation version with system metadata.
+
+Inspector creates fields/defaults from registered schemas, including typed object
+and asset references. Prefab overrides support namespaced component IDs and
+numeric array paths. Active values are validated before runtime publication;
+unknown/inactive author records remain archived. A headless composition does not
+activate mesh/material merely because a renderer is installed or enabled.
+
+`example.spin` is registered once from a separate source file. Actual Inspector
+Apply, save/reopen, execution and Full export checks verify it without a named
+panel branch. Export collects registered resource fields, including defaults;
+inactive raw mesh/audio records do not drive the active-content collector.
+
+AssetWorkspace accepts a host validation callback before file publication. Its
+standalone default checks structure only; the editor supplies the shared
+composition. Required source semantic data and rejected import policies are
+tested before file/trash/journal changes. Builtin defaults may deliberately make
+a detached field valid again; tests use explicit required source contracts for
+the rejection case.
+
+Checks across scoped runs: core 83, editor 190, content 4, visual Rust 15,
+project-tools 28, script 8 and Vulkan 22 passed. The 11 editor workflow cases were
+rerun after callback integration. Workspace/all-targets Clippy passed. Earlier
+full-run failures (unfinished graph editing, preserving incompatible author pins,
+and source-specific file preflight) led to fixes; original logs are retained.
+The two ignored wall-clock/isolated-UI cases are not included in these counts.
+Final end-to-end checks and performance remain stage 8. Persisted component-data
+version locks/migrations remain stage 7; registered schema versions alone are not
+claimed as that feature. The authored game file is unchanged.

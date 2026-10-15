@@ -738,6 +738,9 @@ pub fn package_compile_root() -> Result<PathBuf, String> {
 }
 
 const NATIVE_FILES: &[&str] = &[
+    "crates/editor/src/source_modules.rs",
+    "crates/engine-core/src/component_schema.rs",
+    "crates/engine-core/src/composition.rs",
     "crates/editor/src/workspace_files.rs",
     "crates/editor/src/native_dialogs.rs",
     "crates/editor/src/editor_workflow.rs",
@@ -948,6 +951,18 @@ mod delivery_tests {
         fs::remove_file(&p).unwrap();
         assert!(!inspect_full_sources(&root, &m, &doc).available);
         fs::write(&p, &original).unwrap();
+        for required in [
+            "crates/editor/src/source_modules.rs",
+            "crates/engine-core/src/component_schema.rs",
+            "crates/engine-core/src/composition.rs",
+        ] {
+            let mut incomplete = m.clone();
+            incomplete.files.remove(required);
+            assert!(
+                !inspect_full_sources(&root, &incomplete, &doc).available,
+                "required source contract omitted: {required}"
+            );
+        }
         let mut missing_module = m.clone();
         missing_module.module_sources.remove("game.motion");
         assert!(!inspect_full_sources(&root, &missing_module, &doc).available);

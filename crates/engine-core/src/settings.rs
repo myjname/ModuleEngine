@@ -22,10 +22,27 @@ pub enum PropertyScope {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum PropertyType {
-    Number { min: f64, max: f64 },
+    Number {
+        min: f64,
+        max: f64,
+    },
     Boolean,
-    Enum { choices: Vec<String> },
-    Text { max_len: usize },
+    Enum {
+        choices: Vec<String>,
+    },
+    Text {
+        max_len: usize,
+    },
+    /// Scene-local stable object ID. Referent checks use the resolved scene.
+    ObjectReference {
+        required_components: Vec<String>,
+        optional: bool,
+    },
+    /// Portable path or asset:// ID; kinds are allowed filename extensions.
+    AssetReference {
+        kinds: Vec<String>,
+        optional: bool,
+    },
 }
 
 impl PropertyType {
@@ -60,10 +77,67 @@ impl PropertyType {
             Self::Text { max_len } if !value.as_str().is_some_and(|s| s.len() <= *max_len) => {
                 return Err(format!("Expected text of at most {max_len} bytes"));
             }
+            Self::ObjectReference {
+                required_components,
+                optional,
+            } => {
+                if required_components.iter().any(|id| id.trim().is_empty())
+                    || required_components.iter().collect::<BTreeSet<_>>().len()
+                        != required_components.len()
+                {
+                    return Err("Object reference needs unique nonempty component IDs".into());
+                }
+                let valid =
+                    (*optional && value.is_null()) || value.as_u64().is_some_and(|id| id != 0);
+                if !valid {
+                    return Err("Expected nonzero object ID or optional null".into());
+                }
+            }
+            Self::AssetReference { kinds, optional } => {
+                let normalized = kinds
+                    .iter()
+                    .map(|kind| kind.to_ascii_lowercase())
+                    .collect::<BTreeSet<_>>();
+                if normalized.len() != kinds.len()
+                    || kinds.iter().any(|kind| {
+                        kind.is_empty()
+                            || !kind
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    })
+                {
+                    return Err("Asset kinds need unique filename extensions without dots".into());
+                }
+                if *optional && value.is_null() {
+                    return Ok(());
+                }
+                validate_asset_reference_syntax(
+                    value
+                        .as_str()
+                        .ok_or("Expected asset reference text or optional null")?,
+                )?;
+            }
             _ => {}
         }
         Ok(())
     }
+}
+
+/// Check the portable reference syntax without reading a filesystem or manifest.
+pub fn validate_asset_reference_syntax(reference: &str) -> Result<(), String> {
+    if let Some(id) = reference.strip_prefix("asset://") {
+        if id.trim().is_empty() || id.chars().any(char::is_control) {
+            return Err("Asset reference needs a nonempty stable ID".into());
+        }
+    } else if reference.trim().is_empty()
+        || reference.starts_with(['/', '\\'])
+        || reference.contains(':')
+        || reference.chars().any(char::is_control)
+        || reference.split(['/', '\\']).any(|part| part == "..")
+    {
+        return Err("Asset path must be project-relative without traversal".into());
+    }
+    Ok(())
 }
 
 /// A module contributes stable, namespaced field IDs and its own dependencies.
@@ -336,6 +410,13 @@ pub fn cleanup_removed_render_settings(
 /// Connected modules plus explicitly included features; an installed palette
 /// descriptor alone never activates a contribution.
 pub fn effective_modules(document: &GraphDocument) -> BTreeSet<String> {
+    let mut modules = connected_modules(document);
+    modules.extend(document.engine.enabled_modules.iter().cloned());
+    modules
+}
+
+/// Modules participating in the connected root graph, excluding feature toggles.
+pub fn connected_modules(document: &GraphDocument) -> BTreeSet<String> {
     fn visit(graph: &Graph, roots: Vec<String>, modules: &mut BTreeSet<String>) {
         let mut seen = BTreeSet::new();
         let mut pending = roots;
@@ -367,7 +448,7 @@ pub fn effective_modules(document: &GraphDocument) -> BTreeSet<String> {
             }
         }
     }
-    let mut modules = document.engine.enabled_modules.clone();
+    let mut modules = BTreeSet::new();
     visit(
         &document.root,
         document

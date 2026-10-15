@@ -73,6 +73,16 @@ pub fn stamp_module_versions(document: &mut GraphDocument, registry: &ModuleRegi
         }
     }
     visit(&document.root, registry, &mut document.module_versions);
+    if let Some(game) = &document.game {
+        for node in game.execution.stages.iter().flat_map(|stage| &stage.nodes) {
+            if let Some(version) = registry.module_version(&node.module) {
+                document
+                    .module_versions
+                    .entry(node.module.clone())
+                    .or_insert_with(|| version.into());
+            }
+        }
+    }
     for id in module_engine_core::effective_modules(document) {
         if let Some(version) = registry.module_version(&id) {
             document
@@ -83,11 +93,38 @@ pub fn stamp_module_versions(document: &mut GraphDocument, registry: &ModuleRegi
     }
 }
 
+/// Pin active schema owners independently of their scheduled consumers.
+pub fn stamp_composition_versions(
+    document: &mut GraphDocument,
+    composition: &module_engine_core::CompositionContext,
+) -> Result<(), String> {
+    stamp_module_versions(document, &composition.modules);
+    for name in composition.activity(document)?.components {
+        let schema = composition
+            .systems
+            .components()
+            .schema(&name)
+            .ok_or("Active component schema is missing")?;
+        if let Some(version) = composition.module_version(&schema.owner_module) {
+            document
+                .module_versions
+                .entry(schema.owner_module.clone())
+                .or_insert_with(|| version.into());
+        }
+    }
+    Ok(())
+}
+
 /// Save a complete document and retain exact old bytes in a unique backup.
 pub fn save(path: &Path, document: &GraphDocument) -> Result<(), String> {
-    crate::distribution::detect(path, document, None)?.validate_document(document)?;
+    let distribution = crate::distribution::detect(path, document, None)?;
+    distribution.validate_document(document)?;
+    crate::host::validate_game_at(document, &distribution.package_root)?;
     let mut saved = document.clone();
-    stamp_module_versions(&mut saved, &crate::host::registry()?);
+    stamp_composition_versions(
+        &mut saved,
+        &crate::host::composition_at(&distribution.package_root)?,
+    )?;
     save_document_with_backup(path, &saved).map(|_| ())
 }
 
@@ -187,9 +224,11 @@ pub fn export_with_package_root(
     asset_root: &Path,
     package_root: &Path,
 ) -> Result<PathBuf, String> {
-    let registry = crate::host::registry_at(package_root)?;
+    let composition = crate::host::composition_at(package_root)?;
+    let registry = composition.modules.clone();
     let mut packaged = document.clone();
-    stamp_module_versions(&mut packaged, &registry);
+    stamp_composition_versions(&mut packaged, &composition)?;
+    crate::host::validate_document_at(&packaged, package_root)?;
     let diagnostics = validate_graph(&packaged, &registry);
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
         return Err(format!(
@@ -214,7 +253,7 @@ pub fn export_with_package_root(
     let resource = package_root.to_path_buf();
     let mut assets =
         AssetManifest::from_value(&packaged.asset_manifest)?.with_hlsl_dependencies(asset_root)?;
-    add_game_assets(&packaged, asset_root, &mut assets)?;
+    add_game_assets_at(&packaged, asset_root, package_root, &mut assets)?;
     assets.verify(asset_root)?;
     let mut shader_dependencies = AssetManifest::default();
     for source in packaged.shader_sources.values() {
@@ -458,21 +497,15 @@ pub fn export_team_with_package_root(
     if !capability.can_author_engine() {
         return Err("Team export requires complete matching Full source package".into());
     }
-    let registry = crate::host::registry_at(package_root)?;
+    let composition = crate::host::composition_at(package_root)?;
+    let registry = composition.modules.clone();
     let mut normalized = document.clone();
     crate::host::ensure_authoring_configuration(&mut normalized);
-    stamp_module_versions(&mut normalized, &registry);
+    stamp_composition_versions(&mut normalized, &composition)?;
     let mut packaged = module_engine_core::prepare_team_document(&normalized);
-    let game_registry = crate::game_host::game_registry(
-        &packaged,
-        package_root,
-        &std::collections::BTreeMap::new(),
-        std::sync::Arc::new(std::sync::Mutex::new(
-            module_engine_core::RenderOverrides::default(),
-        )),
-    )?;
-    if let Some(game) = &packaged.game {
-        packaged.game = Some(game.prepare_runtime(&game_registry)?);
+    crate::host::validate_document_at(&packaged, package_root)?;
+    if packaged.game.is_some() {
+        packaged.game = Some(crate::host::prepare_game_at(&packaged, package_root)?);
     }
     // Disconnected authoring fragments do not belong in the runtime delivery.
     let mut active = std::collections::BTreeSet::new();
@@ -536,7 +569,13 @@ pub fn export_team_with_package_root(
     packaged
         .shader_sources
         .retain(|id, _| shader_ids.contains(id));
-    let modules = module_engine_core::effective_modules(&packaged);
+    let activity = composition.activity(&packaged)?;
+    let mut modules = activity.modules;
+    for component in activity.components {
+        if let Some(schema) = composition.systems.components().schema(&component) {
+            modules.insert(schema.owner_module.clone());
+        }
+    }
     packaged
         .module_versions
         .retain(|id, _| modules.contains(id));
@@ -560,7 +599,7 @@ pub fn export_team_with_package_root(
     let resource = package_root.to_path_buf();
     let mut assets =
         AssetManifest::from_value(&packaged.asset_manifest)?.with_hlsl_dependencies(asset_root)?;
-    add_game_assets(&packaged, asset_root, &mut assets)?;
+    add_game_assets_at(&packaged, asset_root, package_root, &mut assets)?;
     let mut headers = AssetManifest::default();
     for text in packaged.shader_sources.values() {
         for path in collect_hlsl_source_dependencies(&resource, "__inline__.hlsl", text)? {
@@ -613,9 +652,19 @@ pub fn export_team_with_package_root(
     Ok(target)
 }
 
+#[cfg(test)]
 fn add_game_assets(
     document: &GraphDocument,
     root: &Path,
+    manifest: &mut AssetManifest,
+) -> Result<(), String> {
+    add_game_assets_at(document, root, &source_root(), manifest)
+}
+
+fn add_game_assets_at(
+    document: &GraphDocument,
+    root: &Path,
+    backend_root: &Path,
     manifest: &mut AssetManifest,
 ) -> Result<(), String> {
     let Some(game) = &document.game else {
@@ -625,30 +674,37 @@ fn add_game_assets(
     library.set_asset_paths(manifest.asset_paths());
     let mut models = vec![];
     let mut paths = std::collections::BTreeSet::new();
-    for id in game.scenes.keys() {
-        for entity in game.resolve_scene(id)? {
-            if let Some(path) = entity
-                .components
-                .get("mesh")
-                .and_then(|m| m.get("path"))
-                .and_then(serde_json::Value::as_str)
-            {
-                models.push(path.to_owned());
-            }
-            if let Some(path) = entity
-                .components
-                .get("material")
-                .and_then(|m| m.get("base_color_texture"))
-                .and_then(serde_json::Value::as_str)
-            {
-                library.load_texture(path)?;
-                paths.insert(manifest.resolve_reference(path)?);
-            }
+    for reference in crate::host::component_asset_references(document, backend_root)? {
+        paths.insert(manifest.resolve_reference(&reference)?);
+    }
+    for entity in crate::host::active_game_entities_at(document, backend_root)? {
+        if let Some(path) = entity
+            .components
+            .get("mesh")
+            .and_then(|m| m.get("path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            models.push(path.to_owned());
+        }
+        if let Some(path) = entity
+            .components
+            .get("material")
+            .and_then(|m| m.get("base_color_texture"))
+            .and_then(serde_json::Value::as_str)
+        {
+            library.load_texture(path)?;
+            paths.insert(manifest.resolve_reference(path)?);
         }
     }
     paths.extend(library.dependencies(models)?);
-    for path in game.audio_cues.values() {
-        paths.insert(manifest.resolve_reference(path)?);
+    if crate::host::composition_at(backend_root)?
+        .activity(document)?
+        .modules
+        .contains("game.audio")
+    {
+        for path in game.audio_cues.values() {
+            paths.insert(manifest.resolve_reference(path)?);
+        }
     }
     for path in paths {
         if !manifest.assets.values().any(|a| a.path == path) {
@@ -931,6 +987,89 @@ mod tests {
         );
         cleanup(&temp);
     }
+    #[test]
+    fn composition_pins_schema_owner_independently_of_its_consumer() {
+        use module_engine_core::*;
+        struct Consumer;
+        impl ExecutableSystem for Consumer {
+            fn step(
+                &mut self,
+                _: &mut SystemContext<'_>,
+                _: &mut serde_json::Value,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut composition = crate::host::composition_at(&source_root()).unwrap();
+        composition
+            .systems
+            .install_module("fixture.owner", "0.7.0")
+            .unwrap();
+        composition
+            .systems
+            .components_mut()
+            .register(ComponentSchema {
+                id: "fixture.data".into(),
+                owner_module: "fixture.owner".into(),
+                version: "data/2".into(),
+                label: "Data".into(),
+                defaults: serde_json::json!({}),
+                fields: vec![],
+                requires_modules: vec![],
+                requires_components: vec![],
+            })
+            .unwrap();
+        composition
+            .systems
+            .register(
+                SystemDescriptor {
+                    id: "fixture.consumer".into(),
+                    state_schema: "consumer/1".into(),
+                    components: vec!["fixture.data".into()],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(Consumer)),
+            )
+            .unwrap();
+        let composition =
+            CompositionContext::new(composition.modules, composition.systems).unwrap();
+        let mut document = crate::source_modules::tests::document();
+        document.game.as_mut().unwrap().execution = ExecutionGraph {
+            resources: vec![],
+            stages: vec![SystemStage {
+                name: "Update".into(),
+                nodes: vec![SystemNode {
+                    id: "consumer".into(),
+                    module: "fixture.consumer".into(),
+                    params: serde_json::json!({}),
+                    bindings: Default::default(),
+                    after: vec![],
+                }],
+            }],
+        };
+        stamp_composition_versions(&mut document, &composition).unwrap();
+        assert_eq!(document.module_versions["fixture.owner"], "0.7.0");
+        assert_eq!(
+            document.module_versions["fixture.consumer"],
+            env!("CARGO_PKG_VERSION")
+        );
+        document
+            .module_versions
+            .insert("fixture.owner".into(), "0.6.0".into());
+        stamp_composition_versions(&mut document, &composition).unwrap();
+        assert_eq!(
+            document.module_versions["fixture.owner"], "0.6.0",
+            "conflicting pin must not be silently replaced"
+        );
+        assert!(
+            composition
+                .validate_document(&document)
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.message.contains("fixture.owner"))
+        );
+    }
+
     #[test]
     fn export_includes_new_packages_tools_and_relative_external_assets() {
         let temp = fixture("export");

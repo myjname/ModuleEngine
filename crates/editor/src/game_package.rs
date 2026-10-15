@@ -156,16 +156,9 @@ fn export_into_staging(
     destination: &Path,
 ) -> Result<PathBuf, String> {
     let mut prepared = document.clone();
-    let registry = crate::game_host::game_registry(
-        document,
-        backend_root,
-        &BTreeMap::new(),
-        std::sync::Arc::new(std::sync::Mutex::new(
-            module_engine_core::RenderOverrides::default(),
-        )),
-    )?;
-    if let Some(game) = &document.game {
-        prepared.game = Some(game.prepare_runtime(&registry)?);
+    crate::host::validate_document_at(document, backend_root)?;
+    if document.game.is_some() {
+        prepared.game = Some(crate::host::prepare_game_at(document, backend_root)?);
     }
     let document = &prepared;
     let game = document
@@ -360,30 +353,37 @@ fn prepare_files(
     library.set_asset_paths(manifest.asset_paths());
     let mut models = vec![];
     let mut assets = BTreeSet::new();
-    for scene in game.scenes.keys() {
-        for entity in game.resolve_scene(scene)? {
-            if let Some(path) = entity
-                .components
-                .get("mesh")
-                .and_then(|m| m.get("path"))
-                .and_then(|v| v.as_str())
-            {
-                models.push(path.to_owned());
-            }
-            if let Some(path) = entity
-                .components
-                .get("material")
-                .and_then(|m| m.get("base_color_texture"))
-                .and_then(|v| v.as_str())
-            {
-                library.load_texture(path)?;
-                assets.insert(manifest.resolve_reference(path)?);
-            }
+    for reference in crate::host::component_asset_references(document, backend_root)? {
+        assets.insert(manifest.resolve_reference(&reference)?);
+    }
+    for entity in crate::host::active_game_entities_at(document, backend_root)? {
+        if let Some(path) = entity
+            .components
+            .get("mesh")
+            .and_then(|m| m.get("path"))
+            .and_then(|v| v.as_str())
+        {
+            models.push(path.to_owned());
+        }
+        if let Some(path) = entity
+            .components
+            .get("material")
+            .and_then(|m| m.get("base_color_texture"))
+            .and_then(|v| v.as_str())
+        {
+            library.load_texture(path)?;
+            assets.insert(manifest.resolve_reference(path)?);
         }
     }
     assets.extend(library.dependencies(models)?);
-    for path in game.audio_cues.values() {
-        assets.insert(manifest.resolve_reference(path)?);
+    if crate::host::composition_at(backend_root)?
+        .activity(document)?
+        .modules
+        .contains("game.audio")
+    {
+        for path in game.audio_cues.values() {
+            assets.insert(manifest.resolve_reference(path)?);
+        }
     }
     manifest.verify(asset_root)?;
     assets.extend(manifest.assets.values().map(|e| e.path.clone()));

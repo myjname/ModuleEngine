@@ -23,6 +23,7 @@ mod scene_assets_verification;
 mod scene_tools;
 mod scene_view_ui;
 mod settings_verification;
+mod source_modules;
 mod ui_capture;
 mod verification;
 mod workspace_files;

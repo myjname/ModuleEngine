@@ -16,6 +16,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub fn asset_reference(id: &str) -> String {
@@ -195,8 +196,12 @@ impl AssetOperationRecord {
 pub struct AssetWorkspace {
     root: PathBuf,
     protected: Vec<String>,
+    validator: Option<DocumentValidator>,
 }
+type DocumentValidator = Arc<dyn Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static>;
 impl AssetWorkspace {
+    /// Construct a workspace with structural scene preflight only. A host with
+    /// installed source contracts should also provide with_validator.
     pub fn new(
         root: impl AsRef<Path>,
         protected: impl IntoIterator<Item = String>,
@@ -212,7 +217,28 @@ impl AssetWorkspace {
             .into_iter()
             .map(|p| normalize_relative(&p))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { root, protected })
+        Ok(Self {
+            root,
+            protected,
+            validator: None,
+        })
+    }
+    /// Add the host's installed schema/policy validation to every candidate
+    /// preflight, before transaction snapshots, trash or asset files are written.
+    /// The callback is retained by this workspace across its operations.
+    pub fn with_validator<F>(mut self, validator: F) -> Self
+    where
+        F: Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.validator = Some(Arc::new(validator));
+        self
+    }
+    fn validate_candidate(&self, document: &GraphDocument) -> Result<(), String> {
+        validate_candidate(document)?;
+        if let Some(validator) = &self.validator {
+            validator(document)?;
+        }
+        Ok(())
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -310,7 +336,7 @@ impl AssetWorkspace {
         }
         let mut candidate = document.clone();
         self.synchronize(&mut candidate)?;
-        validate_candidate(&candidate)?;
+        self.validate_candidate(&candidate)?;
         let id = crate::history::unique_id();
         self.with_import_journal(&id, || {
             let mut deltas = vec![];
@@ -943,7 +969,7 @@ impl AssetWorkspace {
         label: String,
         deleted: Option<(String, AssetEntry)>,
     ) -> Result<AssetOperation, String> {
-        validate_candidate(&after)?;
+        self.validate_candidate(&after)?;
         let id = crate::history::unique_id();
         let mut deltas = vec![];
         for (index, (path, bytes)) in changes.iter().enumerate() {
@@ -1667,6 +1693,85 @@ mod tests {
         fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
         fs::write(root.join(path), bytes).unwrap();
     }
+    struct SourceContract;
+    impl module_engine_core::ExecutableSystem for SourceContract {
+        fn step(
+            &mut self,
+            _: &mut module_engine_core::SystemContext<'_>,
+            _: &mut Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    fn with_source_contract<F>(
+        workspace: AssetWorkspace,
+        document: &mut GraphDocument,
+        schema: module_engine_core::ComponentSchema,
+        validator: F,
+    ) -> AssetWorkspace
+    where
+        F: Fn(
+                &module_engine_core::GameEntity,
+                &module_engine_core::ComponentValidationContext<'_>,
+            ) -> Result<(), String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        use module_engine_core::{
+            ComponentValidationContext, ExecutionGraph, SystemDescriptor, SystemNode,
+            SystemRegistry, SystemStage,
+        };
+        let owner = schema.owner_module.clone();
+        let component = schema.id.clone();
+        let mut registry = SystemRegistry::default();
+        registry
+            .components_mut()
+            .register_with_validator(schema, validator)
+            .unwrap();
+        registry
+            .register(
+                SystemDescriptor {
+                    id: owner.clone(),
+                    state_schema: "fixture/1".into(),
+                    components: vec![component],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(SourceContract)),
+            )
+            .unwrap();
+        document.game.as_mut().unwrap().execution = ExecutionGraph {
+            resources: vec![],
+            stages: vec![SystemStage {
+                name: "Source contract".into(),
+                nodes: vec![SystemNode {
+                    id: "source-contract".into(),
+                    module: owner,
+                    params: Value::Null,
+                    bindings: BTreeMap::new(),
+                    after: vec![],
+                }],
+            }],
+        };
+        workspace.with_validator(move |candidate| {
+            if let Some(game) = &candidate.game {
+                let modules = registry.installed_modules();
+                let active = registry.active_components(&game.execution)?;
+                let assets = AssetManifest::from_value(&candidate.asset_manifest)?.asset_paths();
+                game.validate_with_context(
+                    &registry,
+                    &ComponentValidationContext {
+                        scenes: &game.scenes,
+                        modules: &modules,
+                        asset_paths: Some(&assets),
+                        active_components: Some(&active),
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
     #[test]
     fn batched_usages_walk_document_once_and_keep_all_references() {
         let (root, workspace, mut doc) = fixture();
@@ -2152,7 +2257,7 @@ mod tests {
         crate::history::remove_test_directory(&root);
     }
     #[test]
-    fn detach_that_would_remove_required_component_data_is_rejected_before_files_change() {
+    fn source_actor_team_contract_rejects_detach_before_files_change() {
         let (root, workspace, mut doc) = fixture();
         write(&root, "assets/textures/a.png", b"image");
         workspace.synchronize(&mut doc).unwrap();
@@ -2170,13 +2275,133 @@ mod tests {
             .unwrap();
         player.components.get_mut("actor").unwrap()["team"] =
             serde_json::json!("assets/textures/a.png");
+        // Unlike the builtin neutral fallback, this source contract requires
+        // an explicit, nonempty team after default resolution.
+        let mut schema = module_engine_core::SystemRegistry::builtin()
+            .components()
+            .schema("actor")
+            .unwrap()
+            .clone();
+        schema.owner_module = "source.required-actor-team".into();
+        schema.version = "required-team/1".into();
+        schema.defaults["team"] = json!("");
+        schema
+            .fields
+            .iter_mut()
+            .find(|field| field.id == "actor.team")
+            .unwrap()
+            .default = json!("");
+        let workspace = with_source_contract(workspace, &mut doc, schema, |entity, _| {
+            if entity.components["actor"]["team"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            {
+                return Err("Source actor team must be nonempty".into());
+            }
+            Ok(())
+        });
         doc.game.as_ref().unwrap().validate_scene_data().unwrap();
-        assert!(
-            workspace
-                .delete_asset(&doc, &asset, DeletePolicy::Detach)
-                .is_err()
-        );
+        workspace.validate_candidate(&doc).unwrap();
+        let error = workspace
+            .delete_asset(&doc, &asset, DeletePolicy::Detach)
+            .unwrap_err();
+        assert!(error.contains("Source actor team must be nonempty"));
         assert!(root.join("assets/textures/a.png").is_file());
+        assert_eq!(
+            fs::read(root.join("assets/textures/a.png")).unwrap(),
+            b"image"
+        );
+        assert!(!root.join(".asset-history").exists());
+        assert!(workspace.list_deleted().unwrap().is_empty());
+        crate::history::remove_test_directory(&root);
+    }
+    #[test]
+    fn external_source_validator_rejects_import_and_remains_on_later_operations() {
+        use module_engine_core::{ComponentSchema, PropertySchema, PropertyScope, PropertyType};
+        let (root, workspace, mut doc) = fixture();
+        doc.game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("external.import-policy".into(), json!({}));
+        let workspace = with_source_contract(
+            workspace,
+            &mut doc,
+            ComponentSchema {
+                id: "external.import-policy".into(),
+                owner_module: "external.asset-policy".into(),
+                version: "1".into(),
+                label: "Source import approval".into(),
+                defaults: json!({"approved":false}),
+                fields: vec![PropertySchema {
+                    id: "external.import-policy.approved".into(),
+                    label: "Approved".into(),
+                    scope: PropertyScope::Component {
+                        component: "external.import-policy".into(),
+                    },
+                    value_type: PropertyType::Boolean,
+                    default: json!(false),
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                }],
+                requires_modules: vec![],
+                requires_components: vec![],
+            },
+            |entity, context| {
+                if context.asset_paths.is_some_and(|assets| !assets.is_empty())
+                    && entity.components["external.import-policy"]["approved"] != json!(true)
+                {
+                    return Err("External source requires asset approval".into());
+                }
+                Ok(())
+            },
+        );
+        workspace.validate_candidate(&doc).unwrap();
+        write(&root, "assets/imported.bin", b"imported");
+        let files = vec!["assets/imported.bin".into()];
+        let error = workspace.adopt_import(&doc, &files).unwrap_err();
+        assert!(error.contains("External source requires asset approval"));
+        assert_eq!(fs::read(root.join(&files[0])).unwrap(), b"imported");
+        assert!(!root.join(".asset-history").exists());
+        assert!(workspace.list_deleted().unwrap().is_empty());
+
+        doc.game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .get_mut("external.import-policy")
+            .unwrap()["approved"] = json!(true);
+        let mut accepted = workspace.adopt_import(&doc, &files).unwrap().document;
+        let asset = id(&accepted, &files[0]);
+        accepted
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .get_mut("external.import-policy")
+            .unwrap()["approved"] = json!(false);
+        let error = workspace
+            .move_asset(&accepted, &asset, "assets/moved.bin")
+            .unwrap_err();
+        assert!(error.contains("External source requires asset approval"));
+        assert_eq!(fs::read(root.join(&files[0])).unwrap(), b"imported");
+        assert!(!root.join("assets/moved.bin").exists());
+        assert_eq!(
+            fs::read_dir(root.join(".asset-history")).unwrap().count(),
+            1
+        );
         assert!(workspace.list_deleted().unwrap().is_empty());
         crate::history::remove_test_directory(&root);
     }

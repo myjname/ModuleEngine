@@ -134,7 +134,7 @@ pub(super) fn expose_new_gpu_pass(document: &mut GraphDocument, pass_id: &str) {
     }
 }
 
-fn value_editor(
+pub(crate) fn value_editor(
     ui: &mut egui::Ui,
     id: &str,
     label: &str,
@@ -193,6 +193,38 @@ fn value_editor(
                         *value = json!(text);
                     }
                     changed
+                }
+                PropertyType::ObjectReference { optional, .. } => {
+                    let mut object = value.as_u64().unwrap_or_default();
+                    let changed = ui
+                        .add(egui::DragValue::new(&mut object).range(1..=u64::MAX))
+                        .changed();
+                    if changed {
+                        *value = json!(object);
+                    }
+                    if *optional && ui.small_button("Clear").clicked() {
+                        *value = Value::Null;
+                        true
+                    } else {
+                        changed
+                    }
+                }
+                PropertyType::AssetReference { optional, .. } => {
+                    let mut reference = value.as_str().unwrap_or_default().to_owned();
+                    let changed = ui.text_edit_singleline(&mut reference).changed();
+                    if changed {
+                        *value = if *optional && reference.is_empty() {
+                            Value::Null
+                        } else {
+                            json!(reference)
+                        };
+                    }
+                    if *optional && ui.small_button("Clear").clicked() {
+                        *value = Value::Null;
+                        true
+                    } else {
+                        changed
+                    }
                 }
             }
         })

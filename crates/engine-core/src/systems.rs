@@ -240,13 +240,76 @@ type Factory = Arc<dyn Fn(&Value) -> Result<Box<dyn ExecutableSystem>, String> +
 #[derive(Clone, Default)]
 pub struct SystemRegistry {
     entries: BTreeMap<String, (SystemDescriptor, Factory)>,
+    components: crate::ComponentRegistry,
+    installed_versions: BTreeMap<String, String>,
+    module_dependencies: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl SystemRegistry {
     pub fn builtin() -> Self {
         let mut result = Self::default();
+        crate::register_builtin_component_schemas(result.components_mut())
+            .expect("Valid built-in component schemas");
+        result
+            .install_module("scene.extract", env!("CARGO_PKG_VERSION"))
+            .expect("Valid built-in scene module");
         crate::register_game_systems(&mut result);
         result
+    }
+    pub fn components(&self) -> &crate::ComponentRegistry {
+        &self.components
+    }
+    pub fn components_mut(&mut self) -> &mut crate::ComponentRegistry {
+        &mut self.components
+    }
+    /// Install a schema/service owner independently of executable consumers.
+    pub fn install_module(&mut self, id: &str, version: &str) -> Result<(), String> {
+        if id.trim().is_empty() || version.trim().is_empty() {
+            return Err("Installed module needs a nonempty ID and implementation version".into());
+        }
+        if let Some(installed) = self.installed_versions.get(id) {
+            if installed != version {
+                return Err(format!(
+                    "Module '{id}' is already installed at version '{installed}'"
+                ));
+            }
+        } else {
+            self.installed_versions.insert(id.into(), version.into());
+        }
+        Ok(())
+    }
+    pub fn module_version(&self, id: &str) -> Option<&str> {
+        self.installed_versions.get(id).map(String::as_str)
+    }
+    pub fn module_versions(&self) -> &BTreeMap<String, String> {
+        &self.installed_versions
+    }
+    pub fn installed_modules(&self) -> BTreeSet<String> {
+        self.installed_versions.keys().cloned().collect()
+    }
+    /// Installation/activity dependency, independent of execution order.
+    /// Root-graph modules may own these declarations without system factories.
+    pub fn require_module(&mut self, owner: &str, dependency: &str) -> Result<(), String> {
+        if owner.trim().is_empty() || dependency.trim().is_empty() || owner == dependency {
+            return Err(
+                "Module dependency needs distinct nonempty owner and dependency IDs".into(),
+            );
+        }
+        self.module_dependencies
+            .entry(owner.into())
+            .or_default()
+            .insert(dependency.into());
+        Ok(())
+    }
+    pub fn module_dependencies(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.module_dependencies
+    }
+    pub fn set_module_version(&mut self, id: &str, version: &str) -> Result<(), String> {
+        if !self.installed_versions.contains_key(id) || version.trim().is_empty() {
+            return Err("Version needs an installed module and a nonempty value".into());
+        }
+        self.installed_versions.insert(id.into(), version.into());
+        Ok(())
     }
     pub fn register<F>(&mut self, descriptor: SystemDescriptor, factory: F) -> Result<(), String>
     where
@@ -267,8 +330,24 @@ impl SystemRegistry {
                 return Err("System has invalid or duplicate resource ports".into());
             }
         }
+        self.installed_versions
+            .entry(descriptor.id.clone())
+            .or_insert_with(|| env!("CARGO_PKG_VERSION").into());
         self.entries
             .insert(descriptor.id.clone(), (descriptor, Arc::new(factory)));
+        Ok(())
+    }
+    /// Bind a host implementation to an installed contract without replacing
+    /// its ports, components, state schema or implementation version.
+    pub fn bind_factory<F>(&mut self, id: &str, factory: F) -> Result<(), String>
+    where
+        F: Fn(&Value) -> Result<Box<dyn ExecutableSystem>, String> + Send + Sync + 'static,
+    {
+        let (_, installed) = self
+            .entries
+            .get_mut(id)
+            .ok_or_else(|| format!("Cannot bind factory for unregistered system '{id}'"))?;
+        *installed = Arc::new(factory);
         Ok(())
     }
     pub fn descriptors(&self) -> impl Iterator<Item = &SystemDescriptor> {
@@ -281,7 +360,11 @@ impl SystemRegistry {
     /// declare additional component types through params.components.
     pub fn active_components(&self, graph: &ExecutionGraph) -> Result<BTreeSet<String>, String> {
         self.validate(graph)?;
-        let mut result = BTreeSet::from(["mesh".into(), "material".into()]);
+        let mut result: BTreeSet<String> = ["mesh", "material"]
+            .into_iter()
+            .filter(|name| self.components.schema(name).is_some())
+            .map(str::to_owned)
+            .collect();
         for node in graph.stages.iter().flat_map(|s| &s.nodes) {
             result.extend(
                 self.descriptor(&node.module)
@@ -303,7 +386,23 @@ impl SystemRegistry {
                 }
             }
         }
+        self.validate_active_components(&result)?;
         Ok(result)
+    }
+    pub fn validate_active_components(&self, active: &BTreeSet<String>) -> Result<(), String> {
+        for name in active {
+            let schema = self
+                .components
+                .schema(name)
+                .ok_or_else(|| format!("Active component '{name}' has no installed schema"))?;
+            if self.module_version(&schema.owner_module).is_none() {
+                return Err(format!(
+                    "Component '{name}' owner '{}' is not installed",
+                    schema.owner_module
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Reject missing modules/resources, wrong types, use-before-production and
@@ -853,6 +952,96 @@ impl ExecutionGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct BoundNoop;
+    impl ExecutableSystem for BoundNoop {
+        fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn installed_schema_owner_is_independent_from_consumers_and_factory_binding() {
+        let mut registry = SystemRegistry::default();
+        let descriptor = SystemDescriptor {
+            id: "fixture.consumer".into(),
+            state_schema: "fixture-state/2".into(),
+            components: vec!["fixture.component".into()],
+            ports: vec![],
+            requires: vec![],
+        };
+        registry
+            .register(descriptor.clone(), |_| Ok(Box::new(BoundNoop)))
+            .unwrap();
+        registry
+            .set_module_version("fixture.consumer", "4.2")
+            .unwrap();
+        registry
+            .components_mut()
+            .register(crate::ComponentSchema {
+                id: "fixture.component".into(),
+                owner_module: "fixture.owner".into(),
+                version: "2".into(),
+                label: "Fixture".into(),
+                defaults: json!({}),
+                fields: vec![],
+                requires_modules: vec![],
+                requires_components: vec![],
+            })
+            .unwrap();
+        let graph = ExecutionGraph {
+            resources: vec![],
+            stages: vec![SystemStage {
+                name: "Fixture".into(),
+                nodes: vec![SystemNode {
+                    id: "consumer".into(),
+                    module: "fixture.consumer".into(),
+                    params: Value::Null,
+                    bindings: BTreeMap::new(),
+                    after: vec![],
+                }],
+            }],
+        };
+        assert!(
+            registry
+                .active_components(&graph)
+                .unwrap_err()
+                .contains("owner")
+        );
+        registry.install_module("fixture.owner", "7.0").unwrap();
+        registry
+            .require_module("root.fixture", "fixture.owner")
+            .unwrap();
+        assert_eq!(
+            registry.module_dependencies()["root.fixture"],
+            BTreeSet::from(["fixture.owner".into()])
+        );
+        assert!(
+            registry
+                .require_module("fixture.owner", "fixture.owner")
+                .is_err()
+        );
+        assert!(registry.require_module("", "fixture.owner").is_err());
+        assert_eq!(
+            registry.active_components(&graph).unwrap(),
+            BTreeSet::from(["fixture.component".into()])
+        );
+        let bound = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let created = bound.clone();
+        registry
+            .bind_factory("fixture.consumer", move |_| {
+                created.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(BoundNoop))
+            })
+            .unwrap();
+        assert_eq!(registry.descriptor("fixture.consumer"), Some(&descriptor));
+        assert_eq!(registry.module_version("fixture.consumer"), Some("4.2"));
+        SystemExecutor::new(&graph, &registry).unwrap();
+        assert!(bound.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            registry
+                .bind_factory("fixture.missing", |_| Ok(Box::new(BoundNoop)))
+                .is_err()
+        );
+    }
     #[test]
     fn wrong_order_and_resource_type_are_rejected() {
         let r = SystemRegistry::builtin();

@@ -344,6 +344,12 @@ impl Editor {
                 &self.registry,
             )?;
         }
+        let backend_root = self
+            .distribution
+            .as_ref()
+            .map(|distribution| distribution.package_root.clone())
+            .unwrap_or_else(crate::project::source_root);
+        crate::host::validate_game_at(candidate, &backend_root)?;
         Ok(())
     }
     pub(super) fn available_editors(&self) -> Vec<EditorDescriptor> {

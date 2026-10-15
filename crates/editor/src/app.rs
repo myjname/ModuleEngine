@@ -36,7 +36,7 @@ mod panes;
 #[path = "editor_benchmark.rs"]
 pub(crate) mod performance;
 #[path = "properties.rs"]
-mod properties;
+pub(crate) mod properties;
 #[path = "scene_workspace.rs"]
 mod scene_workspace;
 #[path = "window_navigation.rs"]
@@ -1807,12 +1807,7 @@ impl Editor {
             kind,
             &mut self.playing,
         ) {
-            let validation = self
-                .document
-                .game
-                .as_ref()
-                .map(|g| g.validate_scene_data())
-                .unwrap_or(Ok(()));
+            let validation = self.validate_candidate(&self.document, false);
             if let Err(error) = validation {
                 self.document.game = old;
                 self.game_workbench.error = Some(format!("Scene change rejected: {error}"));
@@ -1909,7 +1904,13 @@ impl Editor {
             .descriptors()
             .iter()
             .filter(|descriptor| {
-                self.module_available_in_scope(&descriptor.id, path)
+                (!descriptor.inputs.is_empty()
+                    || !descriptor.outputs.is_empty()
+                    || matches!(
+                        descriptor.id.as_str(),
+                        "interface.input" | "interface.output"
+                    ))
+                    && self.module_available_in_scope(&descriptor.id, path)
                     && (search.is_empty()
                         || descriptor.label.to_lowercase().contains(&search)
                         || descriptor.id.to_lowercase().contains(&search))

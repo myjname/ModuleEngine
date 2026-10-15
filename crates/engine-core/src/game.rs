@@ -1,9 +1,9 @@
 //! Fixed-step, provider-neutral gameplay. Behaviors are separately registered
 //! systems; scene names, encounters and progression are authored data.
 use crate::{
-    EcsWorld, ExecutableSystem, GameEntity, GameProject, ObjectsWorld, ResourceAccess,
-    SceneSnapshot, SystemContext, SystemDescriptor, SystemExecutor, SystemPort, SystemRegistry,
-    TickTransaction, WorldCommand, WorldKind, WorldObject, WorldProvider,
+    ComponentValidationContext, EcsWorld, ExecutableSystem, GameEntity, GameProject, ObjectsWorld,
+    ResourceAccess, SceneSnapshot, SystemContext, SystemDescriptor, SystemExecutor, SystemPort,
+    SystemRegistry, TickTransaction, WorldCommand, WorldKind, WorldObject, WorldProvider,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -232,6 +232,8 @@ pub struct GameSession {
     pending_interact: bool,
     world_factory: GameWorldFactory,
     active_components: BTreeSet<String>,
+    validation_modules: BTreeSet<String>,
+    asset_paths: Option<BTreeMap<String, String>>,
 }
 
 type GameWorldFactory =
@@ -255,11 +257,32 @@ impl GameSession {
         kind: WorldKind,
         registry: SystemRegistry,
     ) -> Result<Self, String> {
+        let modules = registry.installed_modules();
         Self::build(
             project,
             kind,
             registry,
             Arc::new(move |objects| make_provider(kind, objects)),
+            modules,
+            None,
+            None,
+        )
+    }
+    /// Project-aware schema validation; copy reference context for later loads.
+    pub fn new_with_registry_and_context(
+        project: GameProject,
+        kind: WorldKind,
+        registry: SystemRegistry,
+        context: &ComponentValidationContext<'_>,
+    ) -> Result<Self, String> {
+        Self::build(
+            project,
+            kind,
+            registry,
+            Arc::new(move |objects| make_provider(kind, objects)),
+            context.modules.clone(),
+            context.asset_paths.cloned(),
+            context.active_components.cloned(),
         )
     }
     /// Install a third independently stored editable world from application
@@ -273,17 +296,63 @@ impl GameSession {
     where
         F: Fn(Vec<WorldObject>) -> Result<Box<dyn WorldProvider>, String> + Send + Sync + 'static,
     {
-        Self::build(project, kind, registry, Arc::new(factory))
+        let modules = registry.installed_modules();
+        Self::build(
+            project,
+            kind,
+            registry,
+            Arc::new(factory),
+            modules,
+            None,
+            None,
+        )
+    }
+    pub fn new_with_world_factory_and_context<F>(
+        project: GameProject,
+        kind: WorldKind,
+        registry: SystemRegistry,
+        factory: F,
+        context: &ComponentValidationContext<'_>,
+    ) -> Result<Self, String>
+    where
+        F: Fn(Vec<WorldObject>) -> Result<Box<dyn WorldProvider>, String> + Send + Sync + 'static,
+    {
+        Self::build(
+            project,
+            kind,
+            registry,
+            Arc::new(factory),
+            context.modules.clone(),
+            context.asset_paths.cloned(),
+            context.active_components.cloned(),
+        )
     }
     fn build(
         project: GameProject,
         kind: WorldKind,
         registry: SystemRegistry,
         world_factory: GameWorldFactory,
+        validation_modules: BTreeSet<String>,
+        asset_paths: Option<BTreeMap<String, String>>,
+        active_override: Option<BTreeSet<String>>,
     ) -> Result<Self, String> {
-        project.validate_with_registry(&registry)?;
-        let active_components = registry.active_components(&project.execution)?;
-        let state = Self::load_state(&project, &project.entry_scene, 0., 0, &active_components)?;
+        let context = ComponentValidationContext {
+            scenes: &project.scenes,
+            modules: &validation_modules,
+            asset_paths: asset_paths.as_ref(),
+            active_components: active_override.as_ref(),
+        };
+        project.validate_with_context(&registry, &context)?;
+        let active_components = project.active_components_with_context(&registry, &context)?;
+        let state = Self::load_state(
+            &project,
+            &project.entry_scene,
+            0.,
+            0,
+            &registry,
+            &active_components,
+            &context,
+        )?;
         let provider = Self::load_provider(&world_factory, &state)?;
         let executor = SystemExecutor::new(&project.execution, &registry)?;
         Ok(Self {
@@ -299,6 +368,8 @@ impl GameSession {
             pending_interact: false,
             world_factory,
             active_components,
+            validation_modules,
+            asset_paths,
         })
     }
     fn load_provider(
@@ -320,7 +391,9 @@ impl GameSession {
         id: &str,
         time: f64,
         tick: u64,
+        registry: &SystemRegistry,
         active_components: &BTreeSet<String>,
+        context: &ComponentValidationContext<'_>,
     ) -> Result<GameState, String> {
         Ok(GameState {
             scene: id.into(),
@@ -328,7 +401,7 @@ impl GameSession {
             tick,
             status: GameStatus::Playing,
             entities: project
-                .resolve_scene(id)?
+                .resolve_scene_with_context(id, registry, context)?
                 .into_iter()
                 .map(|mut e| {
                     e.components
@@ -388,7 +461,18 @@ impl GameSession {
     pub fn apply_commands(&mut self, commands: &[WorldCommand]) -> Result<(), String> {
         let mut candidate = self.state.clone();
         candidate.apply_commands(commands)?;
-        let mut transaction = WorldTickTransaction::new(self.provider.as_mut())?;
+        let context = ComponentValidationContext {
+            scenes: &self.project.scenes,
+            modules: &self.validation_modules,
+            asset_paths: self.asset_paths.as_ref(),
+            active_components: Some(&self.active_components),
+        };
+        let mut transaction = WorldTickTransaction::new(
+            self.provider.as_mut(),
+            self.registry.components(),
+            &self.active_components,
+            context,
+        )?;
         transaction.validate(&candidate)?;
         if let Err(error) = transaction.commit(&candidate) {
             transaction.rollback()?;
@@ -441,7 +525,18 @@ impl GameSession {
             self.pending_attack = false;
             self.pending_interact = false;
             let before_tick = self.state.clone();
-            let mut transaction = match WorldTickTransaction::new(self.provider.as_mut()) {
+            let context = ComponentValidationContext {
+                scenes: &self.project.scenes,
+                modules: &self.validation_modules,
+                asset_paths: self.asset_paths.as_ref(),
+                active_components: Some(&self.active_components),
+            };
+            let mut transaction = match WorldTickTransaction::new(
+                self.provider.as_mut(),
+                self.registry.components(),
+                &self.active_components,
+                context,
+            ) {
                 Ok(transaction) => transaction,
                 Err(error) => {
                     self.pending_attack |= fixed_input.attack;
@@ -500,12 +595,20 @@ impl GameSession {
             .cloned()
             .collect();
         let spawn = self.state.transition_spawn;
+        let context = ComponentValidationContext {
+            scenes: &self.project.scenes,
+            modules: &self.validation_modules,
+            asset_paths: self.asset_paths.as_ref(),
+            active_components: Some(&self.active_components),
+        };
         let mut next = Self::load_state(
             &self.project,
             id,
             self.state.time,
             self.state.tick,
+            &self.registry,
             &self.active_components,
+            &context,
         )?;
         for mut entity in carried {
             if let Some(destination) = next.entities.get(&entity.object.id) {
@@ -521,6 +624,11 @@ impl GameSession {
             }
             next.entities.insert(entity.object.id, entity);
         }
+        self.registry.components().validate_entities(
+            &next.entities.values().cloned().collect::<Vec<_>>(),
+            &self.active_components,
+            &context,
+        )?;
         let provider = Self::load_provider(&self.world_factory, &next)?;
         let executor = SystemExecutor::new(&self.project.execution, &self.registry)?;
         // Stop hooks can fail after mutating their context. Keep the visible
@@ -546,6 +654,9 @@ impl GameSession {
             self.kind,
             self.registry.clone(),
             self.world_factory.clone(),
+            self.validation_modules.clone(),
+            self.asset_paths.clone(),
+            Some(self.active_components.clone()),
         )?;
         let mut stopped_state = self.state.clone();
         let mut stopped_events = self.events.clone();
@@ -652,15 +763,26 @@ pub fn world_command_diff(
 
 struct WorldTickTransaction<'a> {
     provider: &'a mut dyn WorldProvider,
+    components: &'a crate::ComponentRegistry,
+    active: &'a BTreeSet<String>,
+    context: ComponentValidationContext<'a>,
     before: Vec<WorldObject>,
     commands: Vec<WorldCommand>,
     applied: bool,
 }
 impl<'a> WorldTickTransaction<'a> {
-    fn new(provider: &'a mut dyn WorldProvider) -> Result<Self, String> {
+    fn new(
+        provider: &'a mut dyn WorldProvider,
+        components: &'a crate::ComponentRegistry,
+        active: &'a BTreeSet<String>,
+        context: ComponentValidationContext<'a>,
+    ) -> Result<Self, String> {
         let before = provider.objects()?;
         Ok(Self {
             provider,
+            components,
+            active,
+            context,
             before,
             commands: vec![],
             applied: false,
@@ -672,6 +794,21 @@ impl TickTransaction for WorldTickTransaction<'_> {
         if candidate.entities.iter().any(|(id, e)| *id != e.object.id) {
             return Err("World entity keys must match stable object IDs".into());
         }
+        for entity in candidate.entities.values() {
+            for (name, target) in &entity.references {
+                if !candidate.entities.contains_key(target) {
+                    return Err(format!(
+                        "Object {} reference '{name}' points to missing {target}; clear references before removing their targets",
+                        entity.object.id
+                    ));
+                }
+            }
+        }
+        self.components.validate_entities(
+            &candidate.entities.values().cloned().collect::<Vec<_>>(),
+            self.active,
+            &self.context,
+        )?;
         self.commands = world_command_diff(
             &self.before,
             &candidate
@@ -778,99 +915,6 @@ fn attack_direction(center: [f32; 3], aim: [f32; 3]) -> [f32; 2] {
 }
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-}
-
-/// Component contracts belong to gameplay modules. Unknown component names are
-/// preserved for independently registered systems rather than stripped.
-pub(crate) fn validate_game_components(
-    e: &GameEntity,
-    scenes: &BTreeMap<String, crate::AuthoredScene>,
-) -> Result<(), String> {
-    let invalid = |name: &str| format!("Object {} has invalid '{name}' component", e.object.id);
-    if e.components.contains_key("actor") {
-        let a = component::<Actor>(e, "actor").ok_or_else(|| invalid("actor"))?;
-        if !a.radius.is_finite()
-            || a.radius <= 0.
-            || !a.speed.is_finite()
-            || a.speed < 0.
-            || a.team.is_empty()
-            || e.object.parent.is_some()
-        {
-            return Err(invalid(
-                "actor: root object, positive radius and nonnegative speed required",
-            ));
-        }
-    }
-    if e.components.contains_key("health") {
-        let h = component::<Health>(e, "health").ok_or_else(|| invalid("health"))?;
-        if !h.maximum.is_finite()
-            || h.maximum <= 0.
-            || !h.current.is_finite()
-            || h.current < 0.
-            || h.current > h.maximum
-        {
-            return Err(invalid("health"));
-        }
-    }
-    if e.components.contains_key("ai") {
-        let a = component::<Ai>(e, "ai").ok_or_else(|| invalid("ai"))?;
-        if !["chase", "boss"].contains(&a.kind.as_str())
-            || !a.aggro_radius.is_finite()
-            || a.aggro_radius < 0.
-        {
-            return Err(invalid("ai"));
-        }
-    }
-    if e.components.contains_key("melee") {
-        let a = component::<Melee>(e, "melee").ok_or_else(|| invalid("melee"))?;
-        if ![a.range, a.damage, a.cooldown, a.arc, a.duration, a.windup]
-            .iter()
-            .all(|n| n.is_finite())
-            || a.range <= 0.
-            || a.damage < 0.
-            || a.cooldown <= 0.
-            || a.arc <= 0.
-            || a.duration <= 0.
-            || a.windup < 0.
-        {
-            return Err(invalid("melee"));
-        }
-    }
-    if e.components.contains_key("obstacle") {
-        let a = component::<Obstacle>(e, "obstacle").ok_or_else(|| invalid("obstacle"))?;
-        if !a.half_extents.iter().all(|n| n.is_finite() && *n > 0.) || e.object.parent.is_some() {
-            return Err(invalid(
-                "obstacle: root object and positive extents required",
-            ));
-        }
-    }
-    if e.components.contains_key("portal") {
-        let p = component::<Portal>(e, "portal").ok_or_else(|| invalid("portal"))?;
-        if !scenes.contains_key(&p.scene)
-            || !p.radius.is_finite()
-            || p.radius <= 0.
-            || !p.spawn.iter().all(|n| n.is_finite())
-        {
-            return Err(invalid("portal"));
-        }
-    }
-    if let Some(mesh) = e.components.get("mesh") {
-        let path = mesh
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("mesh"))?;
-        let asset_id = path.strip_prefix("asset://");
-        if asset_id.is_some_and(|id| id.trim().is_empty() || id.chars().any(char::is_control))
-            || (asset_id.is_none()
-                && (path.is_empty()
-                    || std::path::Path::new(path).is_absolute()
-                    || path.split(['\\', '/']).any(|v| v == "..")
-                    || path.contains(':')))
-        {
-            return Err(invalid("mesh path must be project-relative"));
-        }
-    }
-    Ok(())
 }
 
 type TickFn = fn(&mut SystemContext<'_>, &mut Value) -> Result<(), String>;
@@ -1357,7 +1401,7 @@ mod tests {
             "mesh".into(),
             serde_json::json!({"path":"asset://stable-model-id"}),
         );
-        assert!(project.validate_scene_data().is_ok());
+        assert!(project.validate().is_ok());
         for path in [
             "asset://",
             "../outside.glb",
@@ -1367,7 +1411,7 @@ mod tests {
             project.scenes.get_mut("arena").unwrap().objects[0]
                 .components
                 .insert("mesh".into(), serde_json::json!({"path":path}));
-            assert!(project.validate_scene_data().is_err(), "accepted {path:?}");
+            assert!(project.validate().is_err(), "accepted {path:?}");
         }
     }
     fn project_without_enemies() -> GameProject {
@@ -1631,6 +1675,105 @@ mod tests {
                 24.
             );
             assert_eq!(session.project(), &authored);
+        }
+    }
+    #[test]
+    fn strict_session_asset_context_is_owned_across_transition_and_restart() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let mut project = persistent_hierarchy_project();
+            project.scenes.get_mut("source").unwrap().objects[0]
+                .components
+                .insert("mesh".into(), json!({"path":"asset://model"}));
+            let registry = SystemRegistry::builtin();
+            let modules = registry.installed_modules();
+            let mut paths = BTreeMap::from([("model".into(), "assets/model.glb".into())]);
+            let context = ComponentValidationContext {
+                scenes: &project.scenes,
+                modules: &modules,
+                asset_paths: Some(&paths),
+                active_components: None,
+            };
+            let mut session = GameSession::new_with_registry_and_context(
+                project.clone(),
+                kind,
+                registry.clone(),
+                &context,
+            )
+            .unwrap();
+            paths.clear();
+            session.transition("destination").unwrap();
+            session.restart().unwrap();
+            assert_eq!(session.state().scene, "source");
+            assert_eq!(session.asset_bindings()[&1], "asset://model");
+            let empty_context = ComponentValidationContext {
+                scenes: &project.scenes,
+                modules: &modules,
+                asset_paths: Some(&paths),
+                active_components: None,
+            };
+            let error = match GameSession::new_with_registry_and_context(
+                project.clone(),
+                kind,
+                registry,
+                &empty_context,
+            ) {
+                Ok(_) => panic!("Strict empty manifest accepted an unknown asset ID"),
+                Err(error) => error,
+            };
+            assert!(error.contains("Unknown asset ID"));
+        }
+    }
+    struct InvalidHealthWriter;
+    impl ExecutableSystem for InvalidHealthWriter {
+        fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            let entity = ctx.game.entities.get_mut(&10).unwrap();
+            entity.components.get_mut("health").unwrap()["current"] = json!(-1.);
+            entity.object.transform.translation = [9., 0., 0.];
+            ctx.events.push(GameEvent::Victory);
+            *state = json!("invalid candidate");
+            Ok(())
+        }
+    }
+    #[test]
+    fn schema_invalid_tick_and_dangling_runtime_references_do_not_publish() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let mut registry = SystemRegistry::builtin();
+            let mut descriptor = test_system_descriptor("test.invalid-health");
+            descriptor.components.push("health".into());
+            registry
+                .register(descriptor, |_| Ok(Box::new(InvalidHealthWriter)))
+                .unwrap();
+            let mut project = focused_project(vec![dead_object(10, None)], &[]);
+            append_test_system(&mut project, "test.invalid-health");
+            let mut session = GameSession::new_with_registry(project, kind, registry).unwrap();
+            let before = session.state().clone();
+            let snapshot = session.snapshot();
+            let systems = session.system_states();
+            assert!(
+                session
+                    .step(1. / 60., &GameInput::default())
+                    .unwrap_err()
+                    .contains("health.current")
+            );
+            assert_eq!(session.state(), &before);
+            assert_eq!(session.snapshot(), snapshot);
+            assert_eq!(session.system_states(), systems);
+            assert!(session.events().is_empty());
+
+            let mut survivor = test_object(20, None);
+            survivor.references.insert("target".into(), 10);
+            let project = focused_project(vec![test_object(10, None), survivor], &[]);
+            let mut session = GameSession::new(project, kind).unwrap();
+            let before = session.state().clone();
+            let snapshot = session.snapshot();
+            assert!(
+                session
+                    .apply_commands(&[WorldCommand::Remove { id: 10 }])
+                    .unwrap_err()
+                    .contains("clear references")
+            );
+            assert_eq!(session.state(), &before);
+            assert_eq!(session.snapshot(), snapshot);
         }
     }
     #[test]
@@ -2144,6 +2287,19 @@ mod tests {
                 after: vec![],
             }],
         });
+        registry
+            .components_mut()
+            .register(crate::ComponentSchema {
+                id: "replication".into(),
+                owner_module: "test.declared-data".into(),
+                version: "1".into(),
+                label: "Replication".into(),
+                defaults: json!({"enabled":true,"channel":0}),
+                fields: vec![],
+                requires_modules: vec![],
+                requires_components: vec![],
+            })
+            .unwrap();
         let restored =
             GameSession::new_with_registry(project.clone(), WorldKind::Ecs, registry.clone())
                 .unwrap();

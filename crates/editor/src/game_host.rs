@@ -391,58 +391,33 @@ fn game_registry_shared(
     slots: &BTreeMap<String, ScriptSlot>,
     overrides: Arc<Mutex<RenderOverrides>>,
 ) -> Result<SystemRegistry, String> {
-    let mut registry = SystemRegistry::builtin();
+    let mut registry = crate::host::composition_at(backend_root)?.systems;
     let slots = slots.clone();
     let root = root.to_path_buf();
     let backend_root = backend_root.to_path_buf();
-    registry.register(
-        SystemDescriptor {
-            id: "custom.rust.update".into(),
-            state_schema: "owned-rust-state-v1".into(),
-            ports: vec![
-                SystemPort {
-                    name: "world".into(),
-                    data_type: "GameWorld".into(),
-                    access: ResourceAccess::ReadWrite,
-                },
-                SystemPort {
-                    name: "input".into(),
-                    data_type: "GameInput".into(),
-                    access: ResourceAccess::Read,
-                },
-                SystemPort {
-                    name: "events".into(),
-                    data_type: "GameEvents".into(),
-                    access: ResourceAccess::ReadWrite,
-                },
-            ],
-            requires: vec![],
-            components: vec![],
-        },
-        move |params| {
-            let id = params
-                .get("source_id")
-                .and_then(Value::as_str)
-                .ok_or("Rust system needs params.source_id")?;
-            let instance = params
-                .get("__instance_id")
-                .and_then(Value::as_str)
-                .unwrap_or(id);
-            let slot = slots
-                .get(instance)
-                .ok_or_else(|| format!("No compiled Rust system '{id}' / '{instance}'"))?
-                .clone();
-            Ok(Box::new(RustSystem {
-                slot,
-                document: document.clone(),
-                root: root.clone(),
-                backend_root: backend_root.clone(),
-                overrides: overrides.clone(),
-                pending: None,
-                checkpoint: None,
-            }))
-        },
-    )?;
+    registry.bind_factory("custom.rust.update", move |params| {
+        let id = params
+            .get("source_id")
+            .and_then(Value::as_str)
+            .ok_or("Rust system needs params.source_id")?;
+        let instance = params
+            .get("__instance_id")
+            .and_then(Value::as_str)
+            .unwrap_or(id);
+        let slot = slots
+            .get(instance)
+            .ok_or_else(|| format!("No compiled Rust system '{id}' / '{instance}'"))?
+            .clone();
+        Ok(Box::new(RustSystem {
+            slot,
+            document: document.clone(),
+            root: root.clone(),
+            backend_root: backend_root.clone(),
+            overrides: overrides.clone(),
+            pending: None,
+            checkpoint: None,
+        }))
+    })?;
     Ok(registry)
 }
 
@@ -605,8 +580,9 @@ impl GameHost {
             .ok_or("Project has no authored game")?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
         let backend_root = backend_root.canonicalize().map_err(|e| e.to_string())?;
-        let registry = crate::host::registry_at(&backend_root)?;
-        let errors = validate_graph(&document, &registry)
+        let composition = crate::host::composition_at(&backend_root)?;
+        let errors = composition
+            .validate_document(&document)
             .into_iter()
             .filter(|d| d.severity == Severity::Error)
             .map(|d| d.message)
@@ -709,7 +685,22 @@ impl GameHost {
             &slots,
             overrides.clone(),
         )?;
-        let session = GameSession::new_with_registry(game.clone(), kind, registry)?;
+        let activity = composition.activity(&document)?;
+        let asset_paths =
+            module_engine_project::AssetManifest::from_value(&document.asset_manifest)?
+                .asset_paths();
+        let context = ComponentValidationContext {
+            scenes: &game.scenes,
+            modules: &activity.modules,
+            asset_paths: Some(&asset_paths),
+            active_components: Some(&activity.components),
+        };
+        let session = GameSession::new_with_registry_and_context(
+            game.clone(),
+            kind,
+            registry.clone(),
+            &context,
+        )?;
         let graph = selected_render_graph(&document)?.clone();
         if let Some(progress) = progress {
             progress.stage("Подготовка Vulkan и шейдеров");
@@ -725,7 +716,7 @@ impl GameHost {
         let assets = module_engine_project::AssetManifest::from_value(&document.asset_manifest)?;
         content.set_asset_paths(assets.asset_paths());
         for scene in game.scenes.keys() {
-            let resolved = game.resolve_scene(scene)?;
+            let resolved = game.resolve_scene_with_context(scene, &registry, &context)?;
             for e in resolved {
                 if let Some(path) = e
                     .components
@@ -832,8 +823,9 @@ impl GameHost {
                 ));
             }
         }
-        let registry = crate::host::registry_at(&self.backend_root)?;
-        let errors = validate_graph(document, &registry)
+        let composition = crate::host::composition_at(&self.backend_root)?;
+        let errors = composition
+            .validate_document(document)
             .into_iter()
             .filter(|d| d.severity == Severity::Error)
             .map(|d| d.message)
@@ -854,6 +846,14 @@ impl GameHost {
             validate_candidate_controls(document, &self.graph, &controls, 0., &self.backend_root)?;
         }
         let assets = module_engine_project::AssetManifest::from_value(&document.asset_manifest)?;
+        let asset_paths = assets.asset_paths();
+        let activity = composition.activity(document)?;
+        let context = ComponentValidationContext {
+            scenes: &game.scenes,
+            modules: &activity.modules,
+            asset_paths: Some(&asset_paths),
+            active_components: Some(&activity.components),
+        };
         let old_assets =
             module_engine_project::AssetManifest::from_value(&self.document.asset_manifest)?;
         let mut staged_content = if assets.asset_paths() != old_assets.asset_paths() {
@@ -865,7 +865,7 @@ impl GameHost {
         };
         let content = staged_content.as_mut().unwrap_or(&mut self.content);
         for scene in game.scenes.keys() {
-            for entity in game.resolve_scene(scene)? {
+            for entity in game.resolve_scene_with_context(scene, &composition.systems, &context)? {
                 if let Some(path) = entity
                     .components
                     .get("mesh")
@@ -931,7 +931,12 @@ impl GameHost {
         )?;
         // System construction does not initialize or execute Custom. Existing
         // accepted code/state remain in the retained slots until explicit Play.
-        let session = GameSession::new_with_registry(game, self.session.world_kind(), registry)?;
+        let session = GameSession::new_with_registry_and_context(
+            game.clone(),
+            self.session.world_kind(),
+            registry,
+            &context,
+        )?;
         let mut live = self
             .live_document
             .lock()
