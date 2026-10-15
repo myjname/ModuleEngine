@@ -21,6 +21,7 @@ mod native_dialogs;
 mod player;
 mod project;
 mod puzzle_verification;
+mod runtime_delivery;
 mod scalar;
 mod scene_assets_verification;
 mod scene_tools;

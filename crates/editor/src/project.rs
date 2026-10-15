@@ -1,7 +1,7 @@
 //! Project persistence, migration and complete editable source export.
 #[cfg(test)]
-use module_engine_core::ModuleRegistry;
-use module_engine_core::{Graph, GraphDocument, Runtime, Severity, validate_graph};
+use module_engine_core::{Graph, ModuleRegistry};
+use module_engine_core::{GraphDocument, Runtime, Severity, validate_graph};
 use module_engine_project::{
     AssetManifest, collect_hlsl_source_dependencies, export_assets, hash_file, resolve_relative,
     save_document_with_backup,
@@ -484,74 +484,10 @@ pub fn export_team_with_package_root(
     let registry = composition.modules.clone();
     let mut normalized = document.clone();
     crate::host::ensure_authoring_configuration(&mut normalized);
-    crate::engine_profiles::validate(&normalized, package_root)?;
-    let mut packaged = module_engine_core::prepare_team_document(&normalized);
-    crate::host::validate_document_at(&packaged, package_root)?;
-    if packaged.game.is_some() {
-        packaged.game = Some(crate::host::prepare_game_at(&packaged, package_root)?);
-    }
-    // Disconnected authoring fragments do not belong in the runtime delivery.
-    let mut active = std::collections::BTreeSet::new();
-    let mut pending = packaged
-        .root
-        .nodes
-        .iter()
-        .filter(|n| n.module == "viewport.output")
-        .map(|n| n.id.clone())
-        .collect::<Vec<_>>();
-    while let Some(id) = pending.pop() {
-        if active.insert(id.clone()) {
-            pending.extend(
-                packaged
-                    .root
-                    .edges
-                    .iter()
-                    .filter(|e| e.to_node == id)
-                    .map(|e| e.from_node.clone()),
-            );
-        }
-    }
-    packaged.root.nodes.retain(|n| active.contains(&n.id));
-    packaged
-        .root
-        .edges
-        .retain(|e| active.contains(&e.from_node) && active.contains(&e.to_node));
-    fn sources(
-        graph: &Graph,
-        rust: &mut std::collections::BTreeSet<String>,
-        hlsl: &mut std::collections::BTreeSet<String>,
-    ) {
-        for n in &graph.nodes {
-            if let Some(id) = n
-                .params
-                .get("source_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                if n.module == "gpu.custom" {
-                    hlsl.insert(id.into());
-                } else if n.module == "custom.rust" || n.module == "custom.rust.update" {
-                    rust.insert(id.into());
-                }
-            }
-            if let Some(inner) = &n.subgraph {
-                sources(inner, rust, hlsl);
-            }
-        }
-    }
-    let (mut rust_ids, mut shader_ids) = (
-        std::collections::BTreeSet::new(),
-        std::collections::BTreeSet::new(),
-    );
-    sources(&packaged.root, &mut rust_ids, &mut shader_ids);
-    if let Some(game) = &packaged.game {
-        rust_ids.extend(crate::game_host::script_ids(game));
-    }
-    packaged
-        .custom_sources
-        .retain(|id, _| rust_ids.contains(id));
-    packaged
-        .shader_sources
-        .retain(|id, _| shader_ids.contains(id));
+    let mut packaged = crate::runtime_delivery::prepare(
+        &module_engine_core::prepare_team_document(&normalized),
+        package_root,
+    )?;
     // Pins also archive inactive contracts. Removing them would change the
     // integrity lock without an explicit profile publication.
     let diagnostics = validate_graph(&packaged, &registry);
@@ -573,19 +509,20 @@ pub fn export_team_with_package_root(
     let native_players = crate::game_package::team_player_variants(&packaged, package_root)?;
     let source = package_root.to_path_buf();
     let resource = package_root.to_path_buf();
+    // Team authors can still place declared assets not used by the current
+    // scene. Unlike the standalone Player, retain their declared asset library;
+    // both deliveries use the same working graph/source closure.
     let mut assets =
         AssetManifest::from_value(&packaged.asset_manifest)?.with_hlsl_dependencies(asset_root)?;
     add_game_assets_at(&packaged, asset_root, package_root, &mut assets)?;
     let mut headers = AssetManifest::default();
-    for text in packaged.shader_sources.values() {
-        for path in collect_hlsl_source_dependencies(&resource, "__inline__.hlsl", text)? {
-            if !headers.assets.values().any(|a| a.path == path) {
-                headers.register(
-                    format!("shader-include-{}", headers.assets.len()),
-                    &path,
-                    &resource,
-                )?;
-            }
+    for path in crate::runtime_delivery::shader_dependencies(&packaged, &resource)? {
+        if !headers.assets.values().any(|a| a.path == path) {
+            headers.register(
+                format!("shader-include-{}", headers.assets.len()),
+                &path,
+                &resource,
+            )?;
         }
     }
     let complete = complete_manifest(&assets, &headers)?;

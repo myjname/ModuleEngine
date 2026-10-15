@@ -70,7 +70,24 @@ pub(crate) fn selected_features(
         &subset,
         Some(&module_engine_core::SdkIdentity::current()),
     )?;
+    validate_selected_document(document, &subset)?;
     Ok(features)
+}
+fn validate_selected_document(
+    document: &GraphDocument,
+    composition: &module_engine_core::CompositionContext,
+) -> Result<(), String> {
+    let errors = composition
+        .validate_document(document)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == module_engine_core::Severity::Error)
+        .map(|diagnostic| diagnostic.message)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 #[cfg(test)]
 pub fn native_feature_key(document: &GraphDocument, backend: &Path) -> Result<String, String> {
@@ -133,6 +150,7 @@ fn build_native_player_variant(
         &subset,
         Some(&module_engine_core::SdkIdentity::current()),
     )?;
+    validate_selected_document(document, &subset)?;
     let key = features.iter().cloned().collect::<Vec<_>>().join("-");
     let prebuilt = backend.join("players").join(&key).join(PLAYER_EXECUTABLE);
     if prebuilt.is_file() {
@@ -523,12 +541,7 @@ fn export_into_staging(
     compile_root: &Path,
     destination: &Path,
 ) -> Result<PathBuf, String> {
-    let mut prepared = document.clone();
-    crate::engine_profiles::validate(document, backend_root)?;
-    crate::host::validate_document_at(document, backend_root)?;
-    if document.game.is_some() {
-        prepared.game = Some(crate::host::prepare_game_at(document, backend_root)?);
-    }
+    let mut prepared = crate::runtime_delivery::prepare(document, backend_root)?;
     select_player_assets(&mut prepared, backend_root)?;
     let features = selected_features(&prepared, backend_root)?;
     require_native_service_support(&features)?;
@@ -606,7 +619,7 @@ fn export_into_staging(
             .export_precompiled(&destination.join("scripts").join(id))
             .map_err(|e| e.to_string())?;
     }
-    if features.contains("vulkan") {
+    if uses_vulkan_renderer(document, &backend_root)? {
         module_engine_vulkan::precompile_graph_at(
             &render_graph(document),
             &document.shader_sources,
@@ -651,6 +664,15 @@ fn export_into_staging(
     validate_package(&destination)?;
     verify_native_player(&destination)?;
     Ok(destination)
+}
+
+fn uses_vulkan_renderer(document: &GraphDocument, backend: &Path) -> Result<bool, String> {
+    Ok(crate::host::composition_at(backend)?
+        .modules
+        .render_route(document)?
+        .renderer
+        .module
+        == "render.vulkan")
 }
 
 /// Verify the copied binary itself, including its exact feature fingerprint.
@@ -828,14 +850,7 @@ fn prepare_files(
     }
     manifest.verify(asset_root)?;
     assets.extend(manifest.assets.values().map(|e| e.path.clone()));
-    let mut backend = BTreeSet::new();
-    for source in document.shader_sources.values() {
-        backend.extend(module_engine_project::collect_hlsl_source_dependencies(
-            backend_root,
-            "__inline__.hlsl",
-            source,
-        )?);
-    }
+    let backend = crate::runtime_delivery::shader_dependencies(document, backend_root)?;
     let mut files = BTreeMap::<String, PreparedFile>::new();
     for (root, paths) in [(asset_root, assets), (backend_root, backend)] {
         for path in paths {
@@ -961,6 +976,135 @@ mod tests {
             }
         }
         document
+    }
+
+    fn bind_include_source(document: &mut GraphDocument, source: &str) {
+        let graph = document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "renderer")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap();
+        let aa = graph.nodes.iter_mut().find(|node| node.id == "aa").unwrap();
+        aa.module = "gpu.custom".into();
+        aa.params = serde_json::json!({"source_id":"include-contract","manifest":module_engine_vulkan::builtin_manifest("gpu.fxaa").unwrap()});
+        document
+            .shader_sources
+            .insert("include-contract".into(), source.into());
+        crate::engine_profiles::finish_template(
+            document,
+            crate::engine_profiles::ProfileKind::Arpg,
+            &backend_root(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runtime_delivery_plans_only_retained_shader_files_and_precompiles_only_selected_vulkan() {
+        let backend = backend_root();
+        let mut authored = crate::runtime_delivery::tests::software_with_inactive_vulkan();
+        let prepared = crate::runtime_delivery::prepare(&authored, &backend).unwrap();
+        assert!(
+            prepare_files(
+                &prepared,
+                prepared.game.as_ref().unwrap(),
+                &backend,
+                &backend
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(!uses_vulkan_renderer(&prepared, &backend).unwrap());
+        assert!(
+            !selected_features(&prepared, &backend)
+                .unwrap()
+                .contains("vulkan")
+        );
+
+        // An explicitly available backend is a real contract/build dependency,
+        // but it is not the currently selected renderer's executable graph.
+        authored
+            .engine
+            .enabled_modules
+            .insert("render.vulkan".into());
+        crate::engine_profiles::finish_template(
+            &mut authored,
+            crate::engine_profiles::ProfileKind::Neutral,
+            &backend,
+        )
+        .unwrap();
+        let before = serde_json::to_vec(&authored).unwrap();
+        let prepared = crate::runtime_delivery::prepare(&authored, &backend).unwrap();
+        assert!(
+            selected_features(&prepared, &backend)
+                .unwrap()
+                .contains("vulkan")
+        );
+        assert!(!uses_vulkan_renderer(&prepared, &backend).unwrap());
+        assert!(
+            prepare_files(
+                &prepared,
+                prepared.game.as_ref().unwrap(),
+                &backend,
+                &backend
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(serde_json::to_vec(&authored).unwrap(), before);
+
+        let actual = crate::host::gpu_document(
+            module_engine_core::WorldKind::Ecs,
+            module_engine_vulkan::RenderPath::Forward,
+        );
+        assert!(uses_vulkan_renderer(&actual, &backend).unwrap());
+    }
+
+    #[test]
+    fn runtime_delivery_keeps_team_asset_library_and_player_prunes_unused_assets() {
+        let backend = backend_root();
+        let guard = module_engine_script::TestArtifactGuard::new(
+            &std::env::temp_dir(),
+            "runtime-asset-policy",
+        )
+        .unwrap();
+        fs::write(
+            guard.path().join("unused.txt"),
+            b"available to Team authors",
+        )
+        .unwrap();
+        let mut manifest = AssetManifest::default();
+        manifest
+            .register("library", "unused.txt", guard.path())
+            .unwrap();
+        let mut authored = crate::runtime_delivery::tests::software_with_inactive_vulkan();
+        authored.asset_manifest = serde_json::to_value(&manifest).unwrap();
+        let before = serde_json::to_vec(&authored).unwrap();
+        let team = crate::runtime_delivery::prepare(
+            &module_engine_core::prepare_team_document(&authored),
+            &backend,
+        )
+        .unwrap();
+        assert_eq!(
+            AssetManifest::from_value(&team.asset_manifest).unwrap(),
+            manifest
+        );
+        let mut player = crate::runtime_delivery::prepare(&authored, &backend).unwrap();
+        select_player_assets(&mut player, &backend).unwrap();
+        assert!(
+            AssetManifest::from_value(&player.asset_manifest)
+                .unwrap()
+                .assets
+                .is_empty()
+        );
+        assert_eq!(player.root, team.root);
+        assert_eq!(player.shader_sources, team.shader_sources);
+        assert_eq!(player.engine_profile, team.engine_profile);
+        assert_eq!(player.engine_lock, team.engine_lock);
+        assert_eq!(serde_json::to_vec(&authored).unwrap(), before);
     }
 
     #[test]
@@ -1144,10 +1288,7 @@ mod tests {
                 .unwrap();
         }
         let mut doc = no_resource_document();
-        doc.shader_sources.insert(
-            "include-contract".into(),
-            "#include \"forward.hlsl\"\n".into(),
-        );
+        bind_include_source(&mut doc, "#include \"forward.hlsl\"\n");
         doc.asset_manifest = serde_json::to_value(index).unwrap();
         let game = doc.game.as_mut().unwrap();
         let components = &mut game.scenes.get_mut("arena").unwrap().objects[0].components;
@@ -1323,10 +1464,7 @@ mod tests {
         .unwrap();
         let mut document = crate::game_host::demo_document();
         document.game.as_mut().unwrap().audio_cues.clear();
-        document.shader_sources.insert(
-            "include-contract".into(),
-            "#include \"forward.hlsl\"\n".into(),
-        );
+        bind_include_source(&mut document, "#include \"forward.hlsl\"\n");
         let mut manifest = AssetManifest::default();
         manifest
             .register("local", "assets/data/only-here.txt", &resources)
@@ -1398,10 +1536,7 @@ mod tests {
             .register("conflict", "assets/gpu/forward.hlsl", &resources)
             .unwrap();
         document.asset_manifest = serde_json::to_value(manifest).unwrap();
-        document.shader_sources.insert(
-            "include-contract".into(),
-            "#include \"forward.hlsl\"\n".into(),
-        );
+        bind_include_source(&mut document, "#include \"forward.hlsl\"\n");
         let destination = folder.join("backend-player");
         assert!(
             export(&document, &resources, &backend, &backend, &destination)
