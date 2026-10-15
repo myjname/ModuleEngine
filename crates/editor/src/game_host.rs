@@ -198,12 +198,8 @@ impl ExecutableSystem for RustSystem {
             .lock()
             .map_err(|_| "Game configuration poisoned")?
             .clone();
-        let objects: Vec<_> = ctx
-            .game
-            .entities
-            .values()
-            .map(|e| e.object.clone())
-            .collect();
+        let entities = ctx.game.world.entities_snapshot();
+        let objects: Vec<_> = entities.iter().map(|e| e.object.clone()).collect();
         let mut input = ScriptContext::new(ctx.game.time, ctx.dt as f64, objects.clone());
         input.asset_paths =
             module_engine_project::AssetManifest::from_value(&document.asset_manifest)?
@@ -215,13 +211,18 @@ impl ExecutableSystem for RustSystem {
             .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
             .collect();
         input.parameters = module_engine_core::resolved_parameters(&document);
-        for (id, entity) in &ctx.game.entities {
+        for entity in &entities {
             for (name, value) in &entity.components {
                 if let Some(fields) = value.as_object() {
-                    input.properties.components.entry(*id).or_default().insert(
-                        name.clone(),
-                        fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                    );
+                    input
+                        .properties
+                        .components
+                        .entry(entity.object.id)
+                        .or_default()
+                        .insert(
+                            name.clone(),
+                            fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                        );
                 }
             }
         }
@@ -246,8 +247,8 @@ impl ExecutableSystem for RustSystem {
             (world, render)
         };
         // Both targets validate before publishing the candidate script state.
-        let mut provider = ObjectsWorld::from_objects(objects)?;
-        provider.apply_commands(&world)?;
+        let mut candidate_world = ctx.game.world.clone();
+        candidate_world.apply_commands(&world)?;
         let mut overrides = self
             .overrides
             .lock()
@@ -271,24 +272,8 @@ impl ExecutableSystem for RustSystem {
             })
             .collect::<Result<Vec<_>, _>>();
         let events = events?;
-        let final_objects = provider.objects()?;
-        let mut entities = BTreeMap::new();
-        for object in final_objects {
-            let mut entity = ctx
-                .game
-                .entities
-                .get(&object.id)
-                .cloned()
-                .unwrap_or(GameEntity {
-                    object: object.clone(),
-                    components: BTreeMap::new(),
-                    references: BTreeMap::new(),
-                });
-            entity.object = object;
-            entities.insert(entity.object.id, entity);
-        }
         self.checkpoint = Some((checkpoint, overrides.clone()));
-        ctx.game.entities = entities;
+        ctx.game.world = candidate_world;
         *overrides = candidate;
         *state = tick.state.clone();
         ctx.events.extend(events);
@@ -990,13 +975,7 @@ impl GameHost {
         self.presentation_revision = next_presentation_revision();
         self.last_step_ms = started.elapsed().as_secs_f64() * 1000.;
         self.audio.consume(self.session.events())?;
-        if let Some(player) = self
-            .session
-            .state()
-            .entities
-            .values()
-            .find(|e| e.components.contains_key("player"))
-        {
+        if let Some(player) = self.session.state().player() {
             self.camera.target = player.object.transform.translation;
         }
         Ok(ticks)
@@ -1024,13 +1003,7 @@ impl GameHost {
         *controls = RenderOverrides::default();
         drop(controls);
         self.audio.reset_playback();
-        if let Some(player) = self
-            .session
-            .state()
-            .entities
-            .values()
-            .find(|entity| entity.components.contains_key("player"))
-        {
+        if let Some(player) = self.session.state().player() {
             self.camera.target = player.object.transform.translation;
         }
         self.last_step_ms = 0.;
@@ -1045,13 +1018,7 @@ impl GameHost {
         self.content
             .enrich_snapshot(&mut snapshot, &self.session.asset_bindings())?;
         for item in &mut snapshot.items {
-            if let Some(material) = self
-                .session
-                .state()
-                .entities
-                .get(&item.id)
-                .and_then(|entity| entity.components.get("material"))
-            {
+            if let Some(material) = self.session.state().world.component(item.id, "material") {
                 if let Some(color) = material.get("base_color") {
                     item.material.base_color = serde_json::from_value(color.clone())
                         .map_err(|error| format!("Material color: {error}"))?;
@@ -1573,7 +1540,7 @@ pub fn aim_at(camera: Camera, normalized: [f32; 2], aspect: f32) -> [f32; 3] {
 }
 
 pub fn demo_document() -> GraphDocument {
-    let mut document = crate::host::gpu_document(WorldKind::Objects, RenderPath::Forward);
+    let mut document = crate::host::gpu_document(WorldKind::Ecs, RenderPath::Forward);
     crate::host::ensure_authoring_configuration(&mut document);
     document.root.nodes.retain(|n| {
         !matches!(
@@ -2292,15 +2259,18 @@ fn update(ctx: &mut ScriptContext) {
             .unwrap();
         for kind in [WorldKind::Objects, WorldKind::Ecs] {
             let mut document = demo_document();
-            if kind == WorldKind::Ecs {
-                document
-                    .root
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.module == "world.objects")
-                    .unwrap()
-                    .module = "world.ecs".into();
+            document
+                .root
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.module.as_str(), "world.objects" | "world.ecs"))
+                .unwrap()
+                .module = match kind {
+                WorldKind::Objects => "world.objects",
+                WorldKind::Ecs => "world.ecs",
+                WorldKind::Custom => unreachable!(),
             }
+            .into();
             let mut host = GameHost::new(document.clone(), &root, Some(&root), kind).unwrap();
             host.audio.enabled = false;
             host.camera.target = [1., 0., 1.];
@@ -2385,7 +2355,7 @@ fn update(ctx: &mut ScriptContext) {
                 host.refresh_author_preview(&document).unwrap();
                 assert_ne!(host.presentation_revision(), previous_revision);
                 assert_eq!(
-                    host.session.state().entities[&1].object.transform,
+                    host.session.state().world.object(1).unwrap().transform,
                     expected_transform
                 );
                 assert!(Arc::ptr_eq(
@@ -2452,7 +2422,10 @@ fn update(ctx: &mut ScriptContext) {
                     .object
                     .parent = parent;
                 host.refresh_author_preview(&document).unwrap();
-                assert_eq!(host.session.state().entities[&5001].object.parent, parent);
+                assert_eq!(
+                    host.session.state().world.object(5001).unwrap().parent,
+                    parent
+                );
             }
             let edited_scene = document.game.as_ref().unwrap().scenes["arena"].clone();
             document

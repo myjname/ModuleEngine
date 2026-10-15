@@ -1,8 +1,6 @@
 # Gameplay storage decision
 
-Status: design selected for stage 3; implementation and acceptance are still
-pending. The existing `GameState.entities` gameplay map remains authoritative
-until that stage passes its checks.
+Status: implemented and checked in stage 3. `GameState.world` owns gameplay; the old entity map remains only as a serialized DTO representation. See [the API and lifetime contract](ecs-world.md) and the stage evidence log.
 
 ## Requirements
 

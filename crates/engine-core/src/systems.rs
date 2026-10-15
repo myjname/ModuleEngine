@@ -170,14 +170,7 @@ impl SystemContext<'_> {
         if resource.data_type == "GameWorld" {
             let candidate: GameState = serde_json::from_value(value.clone())
                 .map_err(|e| format!("Invalid GameWorld: {e}"))?;
-            crate::validate_world_commands(
-                &candidate
-                    .entities
-                    .values()
-                    .map(|e| e.object.clone())
-                    .collect::<Vec<_>>(),
-                &[],
-            )?;
+            crate::validate_world_commands(&crate::WorldProvider::objects(&candidate.world)?, &[])?;
             *self.game = candidate;
         }
         resource.value = value;

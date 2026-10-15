@@ -761,6 +761,7 @@ const NATIVE_FILES: &[&str] = &[
     "crates/editor/src/game_verification.rs",
     "crates/editor/src/player.rs",
     "crates/engine-core/src/game.rs",
+    "crates/engine-core/src/builtin_game_systems.rs",
     "crates/engine-core/src/scenes.rs",
     "crates/engine-core/src/systems.rs",
     "crates/engine-content/Cargo.toml",

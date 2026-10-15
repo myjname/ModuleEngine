@@ -1267,7 +1267,7 @@ mod tests {
             .is_err()
         );
         let mut illegal = saved.document.clone();
-        illegal.root.nodes[0].module = "world.ecs".into();
+        illegal.root.nodes[0].module = "world.objects".into();
         assert!(distribution::detect(&saved.path, &illegal, None).is_err());
         let saved = new_project(
             &source.join("project.json"),

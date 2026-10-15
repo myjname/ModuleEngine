@@ -11,7 +11,7 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | 0 | Source/tool/content inventory and independent audit reproduction | SHA-256 inventory, baseline tests and repro logs | Complete |
 | 1 | Hierarchical death, scene transfer, system replacement, tool doctor | Regression tests; unchanged failure candidates | Complete |
 | 2 | Shared composition and component schemas | Source module defaults/Inspector/validation/save/runtime/export share contracts | Complete |
-| 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Pending |
+| 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Complete |
 | 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Pending |
 | 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Pending |
 | 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Pending |
@@ -39,10 +39,10 @@ Clippy success for this exact commit and executable. Its reported native Player
 performance criterion remains **not met**; mean FPS does not establish frame
 stability. No clean-machine or physical-display validation is claimed.
 
-The current `GameState.entities` map owns gameplay mutations; the selected world
-provider is synchronized from it. The present ECS provider therefore does not
-make gameplay ECS based. The current Player package copies the editor binary.
-Both are migration requirements, not completed features.
+At baseline, the `GameState.entities` map owned gameplay mutations; the selected world
+provider was synchronized from it. That ECS provider therefore did not
+make gameplay ECS based. The baseline Player package copied the editor binary.
+ECS ownership is addressed in stage 3 below; the separate Player remains stage 7.
 
 ## Stage 1 result
 
@@ -116,3 +116,33 @@ The two ignored wall-clock/isolated-UI cases are not included in these counts.
 Final end-to-end checks and performance remain stage 8. Persisted component-data
 version locks/migrations remain stage 7; registered schema versions alone are not
 claimed as that feature. The authored game file is unchanged.
+
+## Stage 3 result
+
+`GameState.world` is the canonical ECS. Transform, hierarchy, color, references
+and dynamic components share that owner; native systems use membership queries
+and columns. Rust receives a boundary DTO and applies commands to an ECS
+candidate. Default new game graphs select ECS; a default ECS session creates no
+secondary world. Object and explicitly registered third-party providers remain
+validated compatibility projections and keep their private caches between ticks.
+
+The serialized entity-map adapter preserves the old wire shape and rejects
+invalid/duplicate/zero IDs. Complete checkpoints include all columns and runtime
+incarnation tokens. Ordinary edits/upserts retain a token; remove/spawn, clear
+and deserialization create a new incarnation. Failed publication restores the
+old token. Commands, intentions, collision start positions, combat cooldowns,
+hit suppression and presentation distinguish a fresh entity from a reused ID.
+Recorded old action shapes keep their captured role without controlling the
+replacement's preview or target queries. Legacy state/position records remain
+readable. See `ecs-world.md` and `ecs-storage-decision.md`.
+
+Checks: a complete serial workspace run passed 359 tests (core 92, editor 190,
+content 4, visual Rust 15, project-tools 28, script 8, Vulkan 22). Two old fixture
+assumptions about the default world were corrected; original failures remain in
+the run directory. Independent code review then found more per-tick incarnation
+leaks. After those fixes, all 96 core tests, seven headless combat-presentation
+tests and five Player UI tests passed; workspace/all-targets Clippy passed with
+warnings denied. These scoped rechecks are recorded separately from the earlier
+full run. The two isolated/diagnostic tests remain excluded until stage 8.
+No release performance or complete migration acceptance is claimed here. The
+authored game file remains byte-identical.

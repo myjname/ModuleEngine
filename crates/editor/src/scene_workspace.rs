@@ -834,10 +834,10 @@ mod tests {
         editor.tick_simulation(1. / 60.);
         let host = editor.game_workbench.host.as_mut().unwrap();
         assert_eq!(
-            host.session.state().entities[&1].object.transform,
+            host.session.state().world.object(1).unwrap().transform,
             first_pose
         );
-        assert!(host.session.state().entities.contains_key(&model_id));
+        assert!(host.session.state().world.contains(model_id));
         assert_eq!(host.session.state().tick, 0);
         assert_eq!(host.camera.target, first_pose.translation);
         assert_eq!(
@@ -891,10 +891,10 @@ mod tests {
         assert!(editor.game_workbench.is_play_session());
         let host = editor.game_workbench.host.as_ref().unwrap();
         assert_eq!(
-            host.session.state().entities[&1].object.transform,
+            host.session.state().world.object(1).unwrap().transform,
             start_pose
         );
-        assert!(host.session.state().entities.contains_key(&model_id));
+        assert!(host.session.state().world.contains(model_id));
         assert_eq!(
             editor.document, authored,
             "Game never writes its running state into the author document"
@@ -926,8 +926,9 @@ mod tests {
                 .unwrap()
                 .session
                 .state()
-                .entities[&1]
-                .object
+                .world
+                .object(1)
+                .unwrap()
                 .transform
                 .translation,
             runtime_position
@@ -942,10 +943,10 @@ mod tests {
             .unwrap();
         let host = editor.game_workbench.host.as_ref().unwrap();
         assert_eq!(
-            host.session.state().entities[&1].object.transform,
+            host.session.state().world.object(1).unwrap().transform,
             start_pose
         );
-        assert!(host.session.state().entities.contains_key(&model_id));
+        assert!(host.session.state().world.contains(model_id));
         assert_eq!(host.session.state().tick, 0);
         assert_eq!(
             editor.game_workbench.preview_host.as_ref().unwrap().camera,

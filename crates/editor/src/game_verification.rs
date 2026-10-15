@@ -57,8 +57,9 @@ struct TransactionValidator {
 }
 impl ExecutableSystem for TransactionValidator {
     fn step(&mut self, context: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-        if let Some(entity) = context.game.entities.values_mut().next() {
+        if let Some(mut entity) = context.game.world.entities_snapshot().into_iter().next() {
             entity.object.color = [251, 3, 4, 255];
+            context.game.world.upsert_entity(entity)?;
         }
         Ok(())
     }
@@ -326,12 +327,12 @@ fn progression(
     for index in 0..9000 {
         let input = autopilot(host.session.state(), index)?;
         if !host.session.state().telegraphs.is_empty() {
-            if host
+            if !host
                 .session
                 .state()
-                .entities
-                .values()
-                .any(|e| e.components.contains_key("boss"))
+                .world
+                .entities_with(&["boss"])
+                .is_empty()
             {
                 warning_seen = true;
             }
@@ -361,9 +362,9 @@ fn progression(
                         && host
                             .session
                             .state()
-                            .entities
-                            .get(attacker)
-                            .is_some_and(|e| e.components.contains_key("boss"))
+                            .world
+                            .component(*attacker, "boss")
+                            .is_some()
                     {
                         boss_hits += 1;
                     }
@@ -513,10 +514,10 @@ fn number(e: &GameEntity, component: &str, field: &str, default: f32) -> f32 {
 fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
     let player = state.player().ok_or("Acceptance game has no player")?;
     let p = player.object.transform.translation;
-    let radius = number(player, "actor", "radius", 0.35);
-    let obstacles: Vec<_> = state
-        .entities
-        .values()
+    let radius = number(&player, "actor", "radius", 0.35);
+    let entities = state.world.entities_snapshot();
+    let obstacles: Vec<_> = entities
+        .iter()
         .filter_map(|e| {
             let half = e
                 .components
@@ -532,9 +533,8 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
             ))
         })
         .collect();
-    let target = state
-        .entities
-        .values()
+    let target = entities
+        .iter()
         .filter(|e| {
             e.components
                 .get("actor")
@@ -571,7 +571,7 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
             });
         }
         let target_radius = number(target, "actor", "radius", 0.4);
-        let desired = (number(player, "melee", "range", 2.2) + target_radius - 0.4).max(0.8);
+        let desired = (number(&player, "melee", "range", 2.2) + target_radius - 0.4).max(0.8);
         let movement = if d > desired {
             navigate(p, goal, radius, &obstacles)
         } else {
@@ -584,9 +584,8 @@ fn autopilot(state: &GameState, index: usize) -> Result<GameInput, String> {
             ..GameInput::default()
         });
     }
-    let portal = state
-        .entities
-        .values()
+    let portal = entities
+        .iter()
         .find(|e| e.components.contains_key("portal"))
         .ok_or("No living target and no exit portal")?;
     let goal = portal.object.transform.translation;

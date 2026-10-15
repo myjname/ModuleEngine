@@ -73,16 +73,16 @@ pub fn install(registry: &mut SystemRegistry) -> Result<(), String> {
 struct Spin;
 impl ExecutableSystem for Spin {
     fn step(&mut self, context: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-        let commands = context
-            .world("world")?
-            .entities
-            .values()
-            .filter_map(|entity| {
-                let settings = entity.components.get(SPIN)?;
+        let world = &context.world("world")?.world;
+        let commands = world
+            .entities_with(&[SPIN])
+            .into_iter()
+            .filter_map(|id| {
+                let settings = world.component(id, SPIN)?;
                 if !settings.get("enabled")?.as_bool()? {
                     return None;
                 }
-                let mut transform = entity.object.transform;
+                let mut transform = world.object(id)?.transform;
                 let axis = match settings.get("axis")?.as_str()? {
                     "x" => 0,
                     "y" => 1,
@@ -90,10 +90,7 @@ impl ExecutableSystem for Spin {
                     _ => return None,
                 };
                 transform.rotation[axis] += settings.get("speed")?.as_f64()? as f32 * context.dt;
-                Some(WorldCommand::SetTransform {
-                    id: entity.object.id,
-                    transform,
-                })
+                Some(WorldCommand::SetTransform { id, transform })
             })
             .collect::<Vec<_>>();
         context.apply_commands(&commands)
@@ -204,7 +201,9 @@ pub(crate) mod tests {
         let mut session =
             GameSession::new_with_registry(prepared, WorldKind::Ecs, composition.systems).unwrap();
         session.step(1. / 60., &GameInput::default()).unwrap();
-        assert!((session.state().entities[&1].object.transform.rotation[1] - 0.05).abs() < 0.00001);
+        assert!(
+            (session.state().world.object(1).unwrap().transform.rotation[1] - 0.05).abs() < 0.00001
+        );
         assert_eq!(
             reopened.game.as_ref().unwrap().scenes["empty"].objects[0].components[SPIN]["speed"],
             json!(3.)

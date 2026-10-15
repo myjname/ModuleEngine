@@ -408,20 +408,50 @@ impl WorldProvider for ObjectsWorld {
     }
 }
 
-/// An ECS-like world with independent component tables keyed by entity ID.
-/// It does not wrap or copy ObjectsWorld during construction or extraction.
-#[derive(Clone)]
+/// Canonical entity/component storage. Owned DTOs are extracted at boundaries;
+/// systems query component columns directly and never share a second entity map.
+#[derive(Clone, Debug)]
 pub struct EcsWorld {
     transforms: BTreeMap<u64, Transform>,
     parents: BTreeMap<u64, u64>,
     colors: BTreeMap<u64, [u8; 4]>,
     angular_velocities: BTreeMap<u64, [f32; 3]>,
+    components: BTreeMap<String, BTreeMap<u64, serde_json::Value>>,
+    references: BTreeMap<u64, BTreeMap<String, u64>>,
+    lifetimes: BTreeMap<u64, u64>,
     time: f32,
+}
+
+fn new_entity_lifetime() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.try_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| value.checked_add(1),
+    )
+    .expect("Entity lifetime token space exhausted")
+}
+
+/// Runtime lifetime tokens are private identity bookkeeping, outside the saved
+/// semantic DTO state. Clone retains them; deserialization creates new ones.
+impl PartialEq for EcsWorld {
+    fn eq(&self, other: &Self) -> bool {
+        self.transforms == other.transforms
+            && self.parents == other.parents
+            && self.colors == other.colors
+            && self.angular_velocities == other.angular_velocities
+            && self.components == other.components
+            && self.references == other.references
+            && self.time == other.time
+    }
 }
 
 impl EcsWorld {
     /// Construct authored entities in independent component tables, without motion.
     pub fn from_objects(objects: Vec<WorldObject>) -> Result<Self, String> {
+        if objects.iter().any(|object| object.id == 0) {
+            return Err("Entity IDs must be nonzero".into());
+        }
         crate::validate_world_commands(&objects, &[])?;
         Ok(Self {
             transforms: objects.iter().map(|o| (o.id, o.transform)).collect(),
@@ -431,8 +461,194 @@ impl EcsWorld {
                 .collect(),
             colors: objects.iter().map(|o| (o.id, o.color)).collect(),
             angular_velocities: objects.iter().map(|o| (o.id, [0.; 3])).collect(),
+            components: BTreeMap::new(),
+            references: objects.iter().map(|o| (o.id, BTreeMap::new())).collect(),
+            lifetimes: objects
+                .iter()
+                .map(|o| (o.id, new_entity_lifetime()))
+                .collect(),
             time: 0.,
         })
+    }
+    pub fn from_entities(entities: Vec<crate::GameEntity>) -> Result<Self, String> {
+        if entities.iter().any(|entity| entity.object.id == 0) {
+            return Err("Entity IDs must be nonzero".into());
+        }
+        let mut world = Self::from_objects(
+            entities
+                .iter()
+                .map(|entity| entity.object.clone())
+                .collect(),
+        )?;
+        for entity in entities {
+            let id = entity.object.id;
+            world.references.insert(id, entity.references);
+            for (name, value) in entity.components {
+                world.insert_component(id, name, value)?;
+            }
+        }
+        world.validate_references()?;
+        Ok(world)
+    }
+    pub fn entity_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.transforms.keys().copied()
+    }
+    pub fn contains(&self, id: u64) -> bool {
+        self.transforms.contains_key(&id)
+    }
+    /// Opaque process-local identity for module-owned transient state. Tokens
+    /// survive checkpoints/ordinary edits but are fresh after spawn or reload.
+    pub fn lifetime(&self, id: u64) -> Option<u64> {
+        self.lifetimes.get(&id).copied()
+    }
+    pub fn len(&self) -> usize {
+        self.transforms.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.transforms.is_empty()
+    }
+    /// Query the smallest requested component column, retaining stable ID order.
+    pub fn entities_with(&self, required: &[&str]) -> Vec<u64> {
+        if required.is_empty() {
+            return self.entity_ids().collect();
+        }
+        let Some(columns) = required
+            .iter()
+            .map(|name| self.components.get(*name))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return vec![];
+        };
+        let smallest = columns
+            .iter()
+            .min_by_key(|column| column.len())
+            .expect("Nonempty required columns");
+        smallest
+            .keys()
+            .filter(|id| columns.iter().all(|column| column.contains_key(id)))
+            .copied()
+            .collect()
+    }
+    pub fn object(&self, id: u64) -> Option<WorldObject> {
+        Some(WorldObject {
+            id,
+            parent: self.parents.get(&id).copied(),
+            transform: *self.transforms.get(&id)?,
+            color: self.colors[&id],
+        })
+    }
+    pub fn objects_snapshot(&self) -> Vec<WorldObject> {
+        self.entity_ids().filter_map(|id| self.object(id)).collect()
+    }
+    pub fn transform_mut(&mut self, id: u64) -> Option<&mut Transform> {
+        self.transforms.get_mut(&id)
+    }
+    pub fn component(&self, id: u64, name: &str) -> Option<&serde_json::Value> {
+        self.components.get(name)?.get(&id)
+    }
+    pub fn component_mut(&mut self, id: u64, name: &str) -> Option<&mut serde_json::Value> {
+        self.components.get_mut(name)?.get_mut(&id)
+    }
+    pub fn insert_component(
+        &mut self,
+        id: u64,
+        name: impl Into<String>,
+        value: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let name = name.into();
+        if !self.contains(id) {
+            return Err(format!("Entity {id} does not exist"));
+        }
+        if name.trim().is_empty() {
+            return Err("Component ID must be nonempty".into());
+        }
+        Ok(self.components.entry(name).or_default().insert(id, value))
+    }
+    pub fn remove_component(&mut self, id: u64, name: &str) -> Option<serde_json::Value> {
+        let column = self.components.get_mut(name)?;
+        let removed = column.remove(&id);
+        if column.is_empty() {
+            self.components.remove(name);
+        }
+        removed
+    }
+    pub fn references(&self, id: u64) -> Option<&BTreeMap<String, u64>> {
+        self.references.get(&id)
+    }
+    pub fn references_mut(&mut self, id: u64) -> Option<&mut BTreeMap<String, u64>> {
+        self.references.get_mut(&id)
+    }
+    pub fn entity(&self, id: u64) -> Option<crate::GameEntity> {
+        Some(crate::GameEntity {
+            object: self.object(id)?,
+            components: self
+                .components
+                .iter()
+                .filter_map(|(name, column)| {
+                    column.get(&id).map(|value| (name.clone(), value.clone()))
+                })
+                .collect(),
+            references: self.references.get(&id).cloned().unwrap_or_default(),
+        })
+    }
+    pub fn entities_snapshot(&self) -> Vec<crate::GameEntity> {
+        self.entity_ids().filter_map(|id| self.entity(id)).collect()
+    }
+    /// Replace one entity's complete DTO without treating the update as a new
+    /// lifetime. Structural validation completes before any column is changed.
+    /// References may be transiently dangling while systems stage a tick; the
+    /// session validates all referents before publication.
+    pub fn upsert_entity(&mut self, entity: crate::GameEntity) -> Result<(), String> {
+        let id = entity.object.id;
+        if id == 0 || entity.components.keys().any(|name| name.trim().is_empty()) {
+            return Err("Entity needs a nonzero ID and nonempty component IDs".into());
+        }
+        let mut objects: BTreeMap<_, _> = self
+            .objects_snapshot()
+            .into_iter()
+            .map(|object| (object.id, object))
+            .collect();
+        objects.insert(id, entity.object.clone());
+        crate::validate_world_commands(&objects.into_values().collect::<Vec<_>>(), &[])?;
+        self.transforms.insert(id, entity.object.transform);
+        self.colors.insert(id, entity.object.color);
+        if let Some(parent) = entity.object.parent {
+            self.parents.insert(id, parent);
+        } else {
+            self.parents.remove(&id);
+        }
+        self.angular_velocities.entry(id).or_insert([0.; 3]);
+        self.lifetimes.entry(id).or_insert_with(new_entity_lifetime);
+        for column in self.components.values_mut() {
+            column.remove(&id);
+        }
+        self.components.retain(|_, column| !column.is_empty());
+        for (name, value) in entity.components {
+            self.components.entry(name).or_default().insert(id, value);
+        }
+        self.references.insert(id, entity.references);
+        Ok(())
+    }
+    pub fn validate_references(&self) -> Result<(), String> {
+        for (id, references) in &self.references {
+            for (name, target) in references {
+                if !self.contains(*target) {
+                    return Err(format!(
+                        "Object {id} reference '{name}' points to missing {target}; clear references before removing their targets"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn clear(&mut self) {
+        self.transforms.clear();
+        self.parents.clear();
+        self.colors.clear();
+        self.angular_velocities.clear();
+        self.components.clear();
+        self.references.clear();
+        self.lifetimes.clear();
     }
     /// Build the demo independently as Transform/Parent/Color/Motion tables.
     pub fn demo() -> Self {
@@ -456,6 +672,9 @@ impl EcsWorld {
                 (3, [0.25, -0.45, 0.0]),
                 (4, [0.; 3]),
             ]),
+            components: BTreeMap::new(),
+            references: (1..=4).map(|id| (id, BTreeMap::new())).collect(),
+            lifetimes: (1..=4).map(|id| (id, new_entity_lifetime())).collect(),
             time: 0.0,
         }
     }
@@ -463,19 +682,16 @@ impl EcsWorld {
 
 impl WorldProvider for EcsWorld {
     fn objects(&self) -> Result<Vec<WorldObject>, String> {
-        Ok(self
-            .transforms
-            .iter()
-            .map(|(id, transform)| WorldObject {
-                id: *id,
-                parent: self.parents.get(id).copied(),
-                transform: *transform,
-                color: self.colors[id],
-            })
-            .collect())
+        Ok(self.objects_snapshot())
     }
 
     fn apply_commands(&mut self, commands: &[WorldCommand]) -> Result<(), String> {
+        if commands
+            .iter()
+            .any(|command| matches!(command, WorldCommand::Spawn { object } if object.id == 0))
+        {
+            return Err("Entity IDs must be nonzero".into());
+        }
         let mut objects = self.objects()?.into_iter().map(|o| (o.id, o)).collect();
         crate::control::apply_object_commands(&mut objects, commands)?;
         // DTO validation completed before touching any component table.
@@ -487,13 +703,28 @@ impl WorldProvider for EcsWorld {
         self.colors = objects.values().map(|o| (o.id, o.color)).collect();
         self.angular_velocities
             .retain(|id, _| objects.contains_key(id));
+        for column in self.components.values_mut() {
+            column.retain(|id, _| objects.contains_key(id));
+        }
+        self.references.retain(|id, _| objects.contains_key(id));
+        self.lifetimes.retain(|id, _| objects.contains_key(id));
         for command in commands {
             if let WorldCommand::Spawn { object } = command {
                 self.angular_velocities.remove(&object.id);
+                for column in self.components.values_mut() {
+                    column.remove(&object.id);
+                }
+                self.references.remove(&object.id);
+                self.lifetimes.remove(&object.id);
             }
         }
+        self.components.retain(|_, column| !column.is_empty());
         for id in objects.keys() {
             self.angular_velocities.entry(*id).or_insert([0.; 3]);
+            self.references.entry(*id).or_default();
+            self.lifetimes
+                .entry(*id)
+                .or_insert_with(new_entity_lifetime);
         }
         Ok(())
     }
@@ -546,6 +777,49 @@ impl WorldProvider for EcsWorld {
     }
 }
 
+/// GameState's legacy wire field remains a keyed entity DTO map. Runtime
+/// storage is reconstructed only after IDs, hierarchy and references validate.
+pub(crate) mod entity_dto_map {
+    use super::EcsWorld;
+    use crate::GameEntity;
+    use serde::{
+        Deserializer, Serializer,
+        de::{Error, MapAccess, Visitor},
+    };
+    use std::collections::BTreeSet;
+
+    pub fn serialize<S: Serializer>(world: &EcsWorld, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            world
+                .entity_ids()
+                .map(|id| (id, world.entity(id).expect("Canonical entity ID"))),
+        )
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<EcsWorld, D::Error> {
+        struct EntityMap;
+        impl<'de> Visitor<'de> for EntityMap {
+            type Value = EcsWorld;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a map of stable IDs to entity DTOs")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut ids = BTreeSet::new();
+                let mut entities = vec![];
+                while let Some((id, entity)) = map.next_entry::<u64, GameEntity>()? {
+                    if id != entity.object.id || !ids.insert(id) {
+                        return Err(A::Error::custom(
+                            "Entity map keys must match unique stable object IDs",
+                        ));
+                    }
+                    entities.push(entity);
+                }
+                EcsWorld::from_entities(entities).map_err(A::Error::custom)
+            }
+        }
+        deserializer.deserialize_map(EntityMap)
+    }
+}
+
 fn transform(translation: [f32; 3], scale: [f32; 3]) -> Transform {
     Transform {
         translation,
@@ -557,6 +831,132 @@ fn transform(translation: [f32; 3], scale: [f32; 3]) -> Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn entity(
+        id: u64,
+        parent: Option<u64>,
+        components: &[(&str, serde_json::Value)],
+    ) -> crate::GameEntity {
+        crate::GameEntity {
+            object: WorldObject {
+                id,
+                parent,
+                transform: Transform::default(),
+                color: [255; 4],
+            },
+            components: components
+                .iter()
+                .map(|(name, value)| ((*name).into(), value.clone()))
+                .collect(),
+            references: BTreeMap::new(),
+        }
+    }
+    #[test]
+    fn component_column_queries_and_owned_dtos_keep_one_mutable_store() {
+        let mut world = EcsWorld::from_entities(vec![
+            entity(
+                3,
+                None,
+                &[
+                    ("a", serde_json::json!({"value":3})),
+                    ("b", serde_json::json!({})),
+                ],
+            ),
+            entity(1, None, &[("a", serde_json::json!({"value":1}))]),
+            entity(2, None, &[("b", serde_json::json!({}))]),
+        ])
+        .unwrap();
+        assert_eq!(world.entity_ids().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(world.entities_with(&[]), vec![1, 2, 3]);
+        assert_eq!(world.entities_with(&["a"]), vec![1, 3]);
+        assert_eq!(world.entities_with(&["a", "b"]), vec![3]);
+        assert!(world.entities_with(&["missing", "a"]).is_empty());
+        world.references_mut(1).unwrap().insert("owner".into(), 3);
+        let mut dto = world.entity(1).unwrap();
+        dto.components.get_mut("a").unwrap()["value"] = serde_json::json!(99);
+        assert_eq!(world.component(1, "a").unwrap()["value"], 1);
+        world.component_mut(1, "a").unwrap()["value"] = serde_json::json!(4);
+        assert_eq!(world.entity(1).unwrap().components["a"]["value"], 4);
+        let lifetime = world.lifetime(3).unwrap();
+        world
+            .apply_commands(&[WorldCommand::SetTransform {
+                id: 3,
+                transform: Transform::default(),
+            }])
+            .unwrap();
+        assert_eq!(world.lifetime(3), Some(lifetime));
+        let mut child = world.entity(3).unwrap();
+        child.object.parent = Some(2);
+        world.upsert_entity(child).unwrap();
+        assert_eq!(world.lifetime(3), Some(lifetime));
+        assert_eq!(world.entities_with(&["a", "b"]), vec![3]);
+        assert_eq!(world.references(1).unwrap()["owner"], 3);
+        world.remove_component(3, "a");
+        world
+            .insert_component(2, "a", serde_json::json!({"value":2}))
+            .unwrap();
+        assert_eq!(world.entities_with(&["a", "b"]), vec![2]);
+        assert!(
+            world
+                .insert_component(999, "a", serde_json::json!({}))
+                .is_err()
+        );
+    }
+    #[test]
+    fn subtree_reused_ids_clear_all_columns_references_and_motion_in_one_batch() {
+        let mut parent = entity(1, None, &[("marker", serde_json::json!({"old":true}))]);
+        parent.references.insert("child".into(), 2);
+        let mut world = EcsWorld::from_entities(vec![
+            parent,
+            entity(2, Some(1), &[("marker", serde_json::json!({}))]),
+        ])
+        .unwrap();
+        world.angular_velocities.insert(1, [1., 0., 0.]);
+        let old_lifetimes = [world.lifetime(1).unwrap(), world.lifetime(2).unwrap()];
+        world
+            .apply_commands(&[
+                WorldCommand::Remove { id: 1 },
+                WorldCommand::Spawn {
+                    object: entity(1, None, &[]).object,
+                },
+                WorldCommand::Spawn {
+                    object: entity(2, Some(1), &[]).object,
+                },
+            ])
+            .unwrap();
+        assert!(world.entities_with(&["marker"]).is_empty());
+        assert!(world.references(1).unwrap().is_empty());
+        assert!(world.references(2).unwrap().is_empty());
+        assert_ne!(world.lifetime(1), Some(old_lifetimes[0]));
+        assert_ne!(world.lifetime(2), Some(old_lifetimes[1]));
+        world.step(1., 1.);
+        assert_eq!(world.object(1).unwrap().transform.rotation, [0.; 3]);
+        world
+            .insert_component(2, "fresh", serde_json::json!({"value":5}))
+            .unwrap();
+        world.references_mut(2).unwrap().insert("parent".into(), 1);
+        let before = world.clone();
+        let lifetime = world.lifetime(1);
+        assert!(
+            world
+                .apply_commands(&[
+                    WorldCommand::Remove { id: 1 },
+                    WorldCommand::Spawn {
+                        object: entity(3, Some(999), &[]).object
+                    }
+                ])
+                .is_err()
+        );
+        assert_eq!(world, before);
+        assert_eq!(world.lifetime(1), lifetime);
+        world.clear();
+        assert_eq!(world.lifetime(1), None);
+        world
+            .apply_commands(&[WorldCommand::Spawn {
+                object: entity(1, None, &[]).object,
+            }])
+            .unwrap();
+        assert_ne!(world.lifetime(1), lifetime);
+    }
 
     #[test]
     fn authored_hierarchy_constructs_independent_stores_without_demo_velocity() {

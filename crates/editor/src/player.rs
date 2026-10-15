@@ -34,8 +34,9 @@ pub fn run(
             if let Some(target) = host
                 .session
                 .state()
-                .entities
-                .values()
+                .world
+                .entities_snapshot()
+                .into_iter()
                 .filter(|e| {
                     e.components
                         .get("actor")
@@ -431,9 +432,9 @@ impl eframe::App for Player {
                                 .find(|a| {
                                     snapshot
                                         .state
-                                        .entities
-                                        .get(&a.attacker)
-                                        .is_some_and(|e| e.components.contains_key("player"))
+                                        .world
+                                        .component(a.attacker, "player")
+                                        .is_some()
                                 })
                                 .map(|a| {
                                     [
@@ -642,8 +643,7 @@ impl NativeBenchmark {
         let state = snapshot.map(|s| s.state.as_ref());
         let player_health = state
             .and_then(|s| s.player())
-            .and_then(|p| p.components.get("health"))
-            .cloned();
+            .and_then(|p| p.components.get("health").cloned());
         let mut report = serde_json::json!({
             "schema_version":2,
             "kind":"native-player-window",
@@ -786,10 +786,7 @@ pub fn draw_hud(
         }
     }
     crate::combat_visuals::draw(ui, rect, camera, state, aim);
-    let player = state
-        .entities
-        .values()
-        .find(|e| e.components.contains_key("player"));
+    let player = state.player();
     if let Some(player) = player {
         let health = player.components.get("health");
         let current = health
@@ -822,11 +819,13 @@ pub fn draw_hud(
         );
     }
     let enemies = state
-        .entities
-        .values()
-        .filter(|e| {
-            e.components
-                .get("actor")
+        .world
+        .entities_with(&["actor"])
+        .into_iter()
+        .filter(|id| {
+            state
+                .world
+                .component(*id, "actor")
                 .and_then(|a| a.get("team"))
                 .and_then(|t| t.as_str())
                 == Some("enemy")
@@ -843,9 +842,10 @@ pub fn draw_hud(
         Color32::WHITE,
     );
     for entity in state
-        .entities
-        .values()
-        .filter(|e| e.components.contains_key("boss"))
+        .world
+        .entities_with(&["boss"])
+        .into_iter()
+        .filter_map(|id| state.world.entity(id))
     {
         let health = entity.components.get("health");
         let current = health
@@ -1079,7 +1079,7 @@ mod tests {
         let mut state: GameState = serde_json::from_value(serde_json::json!({
             "scene":"test", "time":0., "tick":0, "status":"Playing", "entities":{}, "transition":null
         })).unwrap();
-        state.entities.insert(boss.object.id, boss);
+        state.world.upsert_entity(boss).unwrap();
         let original = state.clone();
         let context = egui::Context::default();
         let mut output = context.run_ui(egui::RawInput::default(), |ui| {
@@ -1183,6 +1183,8 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920., 1080.));
         let mut warning = module_engine_core::AttackTelegraph {
             attacker: 100,
+            attacker_lifetime: None,
+            attacker_player: None,
             center: [0.; 3],
             direction: [1., 0.],
             range: 3.,

@@ -17,9 +17,10 @@ verify their execution and rollback.
 
 Each descriptor has a module ID, explicit state schema, typed resource ports and
 optional preceding module requirements. `components` declares the component
-types whose fields this installed system contributes to the inspector; inactive
-system contributions are absent from runtime entities without deleting authored
-values. A node's `params.components` can explicitly declare additional component
+types consumed by this system. Their fields/defaults come from separately
+registered component schemas, and a schema owner need not be a scheduled system.
+Inactive data are absent from runtime entities without deleting authored values.
+A node's `params.components` can explicitly declare additional component
 types consumed by Custom Rust. Each saved `SystemNode` has a stable
 instance ID, module ID, parameters, pin-to-resource bindings and explicit `after`
 constraints. A stage contains its ordered nodes. Validation rejects:
@@ -45,6 +46,18 @@ They do not yet provide a general language-independent binary ABI or schema
 checker for arbitrary custom JSON payloads. Native source is trusted and can use
 the public context directly even without a pin; metadata declares scheduling and
 editor contracts, not a security boundary.
+
+The native movement/collision `Positions` resource now publishes each ID as
+`{"position":[x,y,z],"lifetime":token}`. Collision also reads the previous
+coordinate-array representation for compatibility. Current records prevent a
+system inserted between movement and collision from applying an old start point
+to a newly spawned incarnation with the same saved ID. Native consumers of this
+resource should read the explicit record; it is not a stable binary ABI.
+
+The mutable world is `context.game.world`, the canonical ECS store. Native
+systems use component membership queries and column access. Owned entity DTOs
+are reserved for serialization, UI, IPC and validation; see
+[the ECS API and lifetime rules](ecs-world.md).
 
 ## Installing a source module
 

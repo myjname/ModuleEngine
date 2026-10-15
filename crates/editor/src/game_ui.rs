@@ -1294,13 +1294,7 @@ impl GameWorkbench {
     }
     /// Game follows its authored starting player while retaining its own orbit.
     fn frame_game_start(host: &mut GameHost) {
-        if let Some(player) = host
-            .session
-            .state()
-            .entities
-            .values()
-            .find(|entity| entity.components.contains_key("player"))
-        {
+        if let Some(player) = host.session.state().player() {
             host.camera.target = player.object.transform.translation;
         }
     }
@@ -4131,7 +4125,18 @@ mod tests {
             .preparation_context(&root, Some(&root), WorldKind::Objects)
             .unwrap();
         workbench.game_context = Some(context.clone());
-        (workbench, game_host::demo_document(), root, context)
+        // This fixture exercises the legacy Object route explicitly. New game
+        // templates now default to ECS; stale-candidate checks compare the
+        // selected world with the prepared context.
+        let mut document = game_host::demo_document();
+        document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "world.ecs")
+            .unwrap()
+            .module = "world.objects".into();
+        (workbench, document, root, context)
     }
     fn fake_host_job(
         workbench: &mut GameWorkbench,
@@ -4446,15 +4451,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            session.state().entities[&1].components["example.stats"]["speed"],
+            session.state().world.component(1, "example.stats").unwrap()["speed"],
             json!(5.)
         );
         assert_eq!(
-            session.state().entities[&1].components["example.stats"]["mode"],
+            session.state().world.component(1, "example.stats").unwrap()["mode"],
             json!("run")
         );
         assert_eq!(
-            session.state().entities[&1].components["example.stats"]["offset"],
+            session.state().world.component(1, "example.stats").unwrap()["offset"],
             json!([1., 2., 3.])
         );
         document.game.as_mut().unwrap().execution.stages[0]
@@ -4720,7 +4725,9 @@ mod tests {
         )
         .unwrap();
         session.step(1. / 60., &GameInput::default()).unwrap();
-        assert!((session.state().entities[&1].object.transform.rotation[1] - 0.05).abs() < 0.00001);
+        assert!(
+            (session.state().world.object(1).unwrap().transform.rotation[1] - 0.05).abs() < 0.00001
+        );
     }
 
     #[test]

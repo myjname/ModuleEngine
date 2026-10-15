@@ -6,7 +6,9 @@ use crate::{
     SystemRegistry, TickTransaction, WorldCommand, WorldKind, WorldObject, WorldProvider,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -57,22 +59,46 @@ pub enum GameStatus {
     Victory,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GameIntent {
     pub movement: [f32; 2],
     pub aim: [f32; 3],
     pub attack: bool,
+    #[serde(default)]
+    pub lifetime: Option<u64>,
+}
+
+impl PartialEq for GameIntent {
+    fn eq(&self, other: &Self) -> bool {
+        self.movement == other.movement && self.aim == other.aim && self.attack == other.attack
+    }
 }
 
 /// World-space telegraph for the UI/renderer. Filled from actual combat state.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttackTelegraph {
     pub attacker: u64,
+    #[serde(default)]
+    pub attacker_lifetime: Option<u64>,
+    #[serde(default)]
+    pub attacker_player: Option<bool>,
     pub center: [f32; 3],
     pub direction: [f32; 2],
     pub range: f32,
     pub arc: f32,
     pub progress: f32,
+}
+
+impl PartialEq for AttackTelegraph {
+    fn eq(&self, other: &Self) -> bool {
+        self.attacker == other.attacker
+            && self.attacker_player == other.attacker_player
+            && self.center == other.center
+            && self.direction == other.direction
+            && self.range == other.range
+            && self.arc == other.arc
+            && self.progress == other.progress
+    }
 }
 
 /// The exact world-space melee region used by combat and an aim preview.
@@ -99,23 +125,53 @@ impl MeleeArea {
 
 /// Presentation of an actual damage-active swing, rather than a pressed edge.
 /// Direction is captured when the attack starts and progress spans its duration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttackVisual {
     pub attacker: u64,
+    #[serde(default)]
+    pub attacker_lifetime: Option<u64>,
+    #[serde(default)]
+    pub attacker_player: Option<bool>,
     pub area: MeleeArea,
     pub progress: f32,
 }
 
+impl PartialEq for AttackVisual {
+    fn eq(&self, other: &Self) -> bool {
+        self.attacker == other.attacker
+            && self.attacker_player == other.attacker_player
+            && self.area == other.area
+            && self.progress == other.progress
+    }
+}
+
 /// A confirmed hit retained for 0.35 simulated seconds, including lethal hits.
 /// Position is captured before the health system can remove the target.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HitVisual {
     pub attacker: u64,
     pub target: u64,
+    /// Runtime incarnation prevents an old hit flashing a replacement object.
+    #[serde(default)]
+    pub target_lifetime: Option<u64>,
+    #[serde(default)]
+    pub target_player: Option<bool>,
     pub position: [f32; 3],
     pub damage: f32,
     pub started_at: f64,
     pub expires_at: f64,
+}
+
+impl PartialEq for HitVisual {
+    fn eq(&self, other: &Self) -> bool {
+        self.attacker == other.attacker
+            && self.target == other.target
+            && self.target_player == other.target_player
+            && self.position == other.position
+            && self.damage == other.damage
+            && self.started_at == other.started_at
+            && self.expires_at == other.expires_at
+    }
 }
 
 /// Mutable Play state; none of these values write back to the authored project.
@@ -125,7 +181,8 @@ pub struct GameState {
     pub time: f64,
     pub tick: u64,
     pub status: GameStatus,
-    pub entities: BTreeMap<u64, GameEntity>,
+    #[serde(rename = "entities", with = "crate::world::entity_dto_map")]
+    pub world: EcsWorld,
     #[serde(default)]
     pub intentions: BTreeMap<u64, GameIntent>,
     #[serde(default)]
@@ -142,51 +199,36 @@ pub struct GameState {
 impl GameState {
     /// All-or-none common commands, including subtree deletion and spawn.
     pub fn apply_commands(&mut self, commands: &[WorldCommand]) -> Result<(), String> {
-        let mut objects = self
-            .entities
-            .iter()
-            .map(|(id, e)| (*id, e.object.clone()))
-            .collect();
-        crate::apply_object_commands(&mut objects, commands)?;
-        self.entities.retain(|id, _| objects.contains_key(id));
-        for (id, object) in objects {
-            if let Some(entity) = self.entities.get_mut(&id) {
-                entity.object = object;
-            } else {
-                self.entities.insert(
-                    id,
-                    GameEntity {
-                        object,
-                        components: BTreeMap::new(),
-                        references: BTreeMap::new(),
-                    },
-                );
-            }
-        }
-        Ok(())
+        self.world.apply_commands(commands)
     }
-    pub fn player(&self) -> Option<&GameEntity> {
-        self.entities
-            .values()
-            .find(|e| e.components.contains_key("player"))
+    pub fn player(&self) -> Option<GameEntity> {
+        self.world
+            .entities_with(&["player"])
+            .first()
+            .and_then(|id| self.world.entity(*id))
     }
     pub fn living_enemies(&self) -> usize {
-        self.entities
-            .values()
-            .filter(|e| {
-                component::<Actor>(e, "actor").is_some_and(|a| a.team == "enemy") && health(e) > 0.
+        self.world
+            .entities_with(&["actor"])
+            .into_iter()
+            .filter(|id| {
+                world_component::<Actor>(&self.world, *id, "actor")
+                    .is_some_and(|a| a.team == "enemy")
+                    && world_component::<Health>(&self.world, *id, "health")
+                        .is_none_or(|health| health.current > 0.)
             })
             .count()
     }
     /// Prospective attack region, using the same aim fallback as a real swing.
     pub fn melee_aim(&self, attacker: u64, aim_world: [f32; 3]) -> Option<MeleeArea> {
-        let entity = self.entities.get(&attacker)?;
-        component::<Actor>(entity, "actor")?;
-        let melee = component::<Melee>(entity, "melee")?;
-        if health(entity) <= 0. {
+        world_component::<Actor>(&self.world, attacker, "actor")?;
+        let melee = world_component::<Melee>(&self.world, attacker, "melee")?;
+        if world_component::<Health>(&self.world, attacker, "health")
+            .is_some_and(|health| health.current <= 0.)
+        {
             return None;
         }
-        let center = entity.object.transform.translation;
+        let center = self.world.object(attacker)?.transform.translation;
         Some(MeleeArea {
             center,
             direction: attack_direction(center, aim_world),
@@ -196,23 +238,20 @@ impl GameState {
     }
     /// Living opposing targets eligible for a fresh swing in the supplied area.
     pub fn melee_targets(&self, attacker: u64, area: &MeleeArea) -> Vec<u64> {
-        let Some(actor) = self
-            .entities
-            .get(&attacker)
-            .and_then(|e| component::<Actor>(e, "actor"))
-        else {
+        let Some(actor) = world_component::<Actor>(&self.world, attacker, "actor") else {
             return vec![];
         };
-        self.entities
-            .values()
-            .filter_map(|target| {
-                let other = component::<Actor>(target, "actor")?;
-                let hp = component::<Health>(target, "health")?;
-                (target.object.id != attacker
+        self.world
+            .entities_with(&["actor", "health"])
+            .into_iter()
+            .filter_map(|id| {
+                let other = world_component::<Actor>(&self.world, id, "actor")?;
+                let hp = world_component::<Health>(&self.world, id, "health")?;
+                (id != attacker
                     && other.team != actor.team
                     && hp.current > 0.
-                    && area.contains(target.object.transform.translation, other.radius))
-                .then_some(target.object.id)
+                    && area.contains(self.world.object(id)?.transform.translation, other.radius))
+                .then_some(id)
             })
             .collect()
     }
@@ -225,12 +264,12 @@ pub struct GameSession {
     state: GameState,
     executor: SystemExecutor,
     registry: SystemRegistry,
-    provider: Box<dyn WorldProvider>,
+    provider: Option<Box<dyn WorldProvider>>,
     events: Vec<GameEvent>,
     accumulator: f64,
     pending_attack: bool,
     pending_interact: bool,
-    world_factory: GameWorldFactory,
+    world_factory: Option<GameWorldFactory>,
     active_components: BTreeSet<String>,
     validation_modules: BTreeSet<String>,
     asset_paths: Option<BTreeMap<String, String>>,
@@ -262,7 +301,7 @@ impl GameSession {
             project,
             kind,
             registry,
-            Arc::new(move |objects| make_provider(kind, objects)),
+            compatibility_factory(kind)?,
             modules,
             None,
             None,
@@ -279,7 +318,7 @@ impl GameSession {
             project,
             kind,
             registry,
-            Arc::new(move |objects| make_provider(kind, objects)),
+            compatibility_factory(kind)?,
             context.modules.clone(),
             context.asset_paths.cloned(),
             context.active_components.cloned(),
@@ -301,7 +340,7 @@ impl GameSession {
             project,
             kind,
             registry,
-            Arc::new(factory),
+            Some(Arc::new(factory)),
             modules,
             None,
             None,
@@ -321,7 +360,7 @@ impl GameSession {
             project,
             kind,
             registry,
-            Arc::new(factory),
+            Some(Arc::new(factory)),
             context.modules.clone(),
             context.asset_paths.cloned(),
             context.active_components.cloned(),
@@ -331,7 +370,7 @@ impl GameSession {
         project: GameProject,
         kind: WorldKind,
         registry: SystemRegistry,
-        world_factory: GameWorldFactory,
+        world_factory: Option<GameWorldFactory>,
         validation_modules: BTreeSet<String>,
         asset_paths: Option<BTreeMap<String, String>>,
         active_override: Option<BTreeSet<String>>,
@@ -353,7 +392,10 @@ impl GameSession {
             &active_components,
             &context,
         )?;
-        let provider = Self::load_provider(&world_factory, &state)?;
+        let provider = world_factory
+            .as_ref()
+            .map(|factory| Self::load_provider(factory, &state))
+            .transpose()?;
         let executor = SystemExecutor::new(&project.execution, &registry)?;
         Ok(Self {
             project,
@@ -376,7 +418,7 @@ impl GameSession {
         world_factory: &GameWorldFactory,
         state: &GameState,
     ) -> Result<Box<dyn WorldProvider>, String> {
-        let objects: Vec<_> = state.entities.values().map(|e| e.object.clone()).collect();
+        let objects = state.world.objects_snapshot();
         crate::validate_world_commands(&objects, &[])?;
         let provider = world_factory(objects.clone())?;
         let loaded = provider.objects()?;
@@ -400,15 +442,17 @@ impl GameSession {
             time,
             tick,
             status: GameStatus::Playing,
-            entities: project
-                .resolve_scene_with_context(id, registry, context)?
-                .into_iter()
-                .map(|mut e| {
-                    e.components
-                        .retain(|name, _| active_components.contains(name));
-                    (e.object.id, e)
-                })
-                .collect(),
+            world: EcsWorld::from_entities(
+                project
+                    .resolve_scene_with_context(id, registry, context)?
+                    .into_iter()
+                    .map(|mut e| {
+                        e.components
+                            .retain(|name, _| active_components.contains(name));
+                        e
+                    })
+                    .collect(),
+            )?,
             intentions: BTreeMap::new(),
             telegraphs: vec![],
             attack_visuals: vec![],
@@ -430,27 +474,28 @@ impl GameSession {
         self.executor.states()
     }
     pub fn world_objects(&self) -> Vec<WorldObject> {
-        self.state
-            .entities
-            .values()
-            .map(|e| e.object.clone())
-            .collect()
+        self.state.world.objects_snapshot()
     }
     pub fn asset_bindings(&self) -> BTreeMap<u64, String> {
         self.state
-            .entities
-            .iter()
-            .filter_map(|(id, e)| {
-                e.components
-                    .get("mesh")?
+            .world
+            .entities_with(&["mesh"])
+            .into_iter()
+            .filter_map(|id| {
+                self.state
+                    .world
+                    .component(id, "mesh")?
                     .get("path")?
                     .as_str()
-                    .map(|p| (*id, p.into()))
+                    .map(|p| (id, p.into()))
             })
             .collect()
     }
     pub fn snapshot(&self) -> SceneSnapshot {
-        let mut snapshot = self.provider.snapshot();
+        let mut snapshot = self.provider.as_ref().map_or_else(
+            || self.state.world.snapshot(),
+            |provider| provider.snapshot(),
+        );
         snapshot.time = self.state.time as f32;
         snapshot
     }
@@ -468,7 +513,9 @@ impl GameSession {
             active_components: Some(&self.active_components),
         };
         let mut transaction = WorldTickTransaction::new(
-            self.provider.as_mut(),
+            self.provider
+                .as_mut()
+                .map(|provider| provider.as_mut() as &mut dyn WorldProvider),
             self.registry.components(),
             &self.active_components,
             context,
@@ -532,7 +579,9 @@ impl GameSession {
                 active_components: Some(&self.active_components),
             };
             let mut transaction = match WorldTickTransaction::new(
-                self.provider.as_mut(),
+                self.provider
+                    .as_mut()
+                    .map(|provider| provider.as_mut() as &mut dyn WorldProvider),
                 self.registry.components(),
                 &self.active_components,
                 context,
@@ -589,10 +638,10 @@ impl GameSession {
         let from = self.state.scene.clone();
         let carried: Vec<_> = self
             .state
-            .entities
-            .values()
-            .filter(|e| e.components.contains_key("persistent"))
-            .cloned()
+            .world
+            .entities_with(&["persistent"])
+            .into_iter()
+            .filter_map(|id| self.state.world.entity(id))
             .collect();
         let spawn = self.state.transition_spawn;
         let context = ComponentValidationContext {
@@ -611,7 +660,7 @@ impl GameSession {
             &context,
         )?;
         for mut entity in carried {
-            if let Some(destination) = next.entities.get(&entity.object.id) {
+            if let Some(destination) = next.world.entity(entity.object.id) {
                 entity.object.parent = destination.object.parent;
                 entity.object.transform = destination.object.transform;
                 entity.references = destination.references.clone();
@@ -622,14 +671,19 @@ impl GameSession {
             if let Some(pos) = spawn {
                 entity.object.transform.translation = pos;
             }
-            next.entities.insert(entity.object.id, entity);
+            next.world.upsert_entity(entity)?;
         }
         self.registry.components().validate_entities(
-            &next.entities.values().cloned().collect::<Vec<_>>(),
+            &next.world.entities_snapshot(),
             &self.active_components,
             &context,
         )?;
-        let provider = Self::load_provider(&self.world_factory, &next)?;
+        next.world.validate_references()?;
+        let provider = self
+            .world_factory
+            .as_ref()
+            .map(|factory| Self::load_provider(factory, &next))
+            .transpose()?;
         let executor = SystemExecutor::new(&self.project.execution, &self.registry)?;
         // Stop hooks can fail after mutating their context. Keep the visible
         // scene/events until replacement succeeds; external shutdown effects
@@ -762,7 +816,7 @@ pub fn world_command_diff(
 }
 
 struct WorldTickTransaction<'a> {
-    provider: &'a mut dyn WorldProvider,
+    provider: Option<&'a mut dyn WorldProvider>,
     components: &'a crate::ComponentRegistry,
     active: &'a BTreeSet<String>,
     context: ComponentValidationContext<'a>,
@@ -772,12 +826,16 @@ struct WorldTickTransaction<'a> {
 }
 impl<'a> WorldTickTransaction<'a> {
     fn new(
-        provider: &'a mut dyn WorldProvider,
+        provider: Option<&'a mut dyn WorldProvider>,
         components: &'a crate::ComponentRegistry,
         active: &'a BTreeSet<String>,
         context: ComponentValidationContext<'a>,
     ) -> Result<Self, String> {
-        let before = provider.objects()?;
+        let before = provider
+            .as_ref()
+            .map(|provider| provider.objects())
+            .transpose()?
+            .unwrap_or_default();
         Ok(Self {
             provider,
             components,
@@ -791,46 +849,31 @@ impl<'a> WorldTickTransaction<'a> {
 }
 impl TickTransaction for WorldTickTransaction<'_> {
     fn validate(&mut self, candidate: &GameState) -> Result<(), String> {
-        if candidate.entities.iter().any(|(id, e)| *id != e.object.id) {
-            return Err("World entity keys must match stable object IDs".into());
-        }
-        for entity in candidate.entities.values() {
-            for (name, target) in &entity.references {
-                if !candidate.entities.contains_key(target) {
-                    return Err(format!(
-                        "Object {} reference '{name}' points to missing {target}; clear references before removing their targets",
-                        entity.object.id
-                    ));
-                }
-            }
-        }
+        candidate.world.validate_references()?;
+        let objects = candidate.world.objects_snapshot();
+        crate::validate_world_commands(&objects, &[])?;
         self.components.validate_entities(
-            &candidate.entities.values().cloned().collect::<Vec<_>>(),
+            &candidate.world.entities_snapshot(),
             self.active,
             &self.context,
         )?;
-        self.commands = world_command_diff(
-            &self.before,
-            &candidate
-                .entities
-                .values()
-                .map(|e| e.object.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        self.provider.validate_commands(&self.commands)
+        if let Some(provider) = self.provider.as_ref() {
+            self.commands = world_command_diff(&self.before, &objects)?;
+            provider.validate_commands(&self.commands)?;
+        }
+        Ok(())
     }
     fn commit(&mut self, candidate: &GameState) -> Result<(), String> {
         if self.commands.is_empty() {
             return Ok(());
         }
+        let Some(provider) = self.provider.as_deref_mut() else {
+            return Ok(());
+        };
         self.applied = true;
-        self.provider.apply_commands(&self.commands)?;
-        let expected: Vec<_> = candidate
-            .entities
-            .values()
-            .map(|e| e.object.clone())
-            .collect();
-        if object_map(&self.provider.objects()?) != object_map(&expected) {
+        provider.apply_commands(&self.commands)?;
+        let expected = candidate.world.objects_snapshot();
+        if object_map(&provider.objects()?) != object_map(&expected) {
             return Err(
                 "World provider did not apply the validated portable command packet".into(),
             );
@@ -838,13 +881,25 @@ impl TickTransaction for WorldTickTransaction<'_> {
         Ok(())
     }
     fn rollback(&mut self) -> Result<(), String> {
-        if self.applied {
-            let commands = world_command_diff(&self.provider.objects()?, &self.before)?;
-            self.provider.validate_commands(&commands)?;
-            self.provider.apply_commands(&commands)?;
+        if self.applied
+            && let Some(provider) = self.provider.as_deref_mut()
+        {
+            let commands = world_command_diff(&provider.objects()?, &self.before)?;
+            provider.validate_commands(&commands)?;
+            provider.apply_commands(&commands)?;
             self.applied = false;
         }
         Ok(())
+    }
+}
+
+fn compatibility_factory(kind: WorldKind) -> Result<Option<GameWorldFactory>, String> {
+    match kind {
+        WorldKind::Ecs => Ok(None),
+        WorldKind::Objects => Ok(Some(Arc::new(|objects| {
+            make_provider(WorldKind::Objects, objects)
+        }))),
+        WorldKind::Custom => Err("Custom worlds need an explicit compatibility factory".into()),
     }
 }
 
@@ -891,9 +946,18 @@ struct Portal {
     requires_clear: bool,
     spawn: [f32; 3],
 }
+#[cfg(test)]
 fn component<T: for<'de> Deserialize<'de>>(entity: &GameEntity, name: &str) -> Option<T> {
     serde_json::from_value(entity.components.get(name)?.clone()).ok()
 }
+fn world_component<T: for<'de> Deserialize<'de>>(
+    world: &EcsWorld,
+    id: u64,
+    name: &str,
+) -> Option<T> {
+    serde_json::from_value(world.component(id, name)?.clone()).ok()
+}
+#[cfg(test)]
 fn health(e: &GameEntity) -> f32 {
     component::<Health>(e, "health").map_or(1., |h| h.current)
 }
@@ -917,478 +981,9 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
-type TickFn = fn(&mut SystemContext<'_>, &mut Value) -> Result<(), String>;
-type BuiltinConfiguration = (
-    &'static str,
-    TickFn,
-    Vec<(&'static str, &'static str, ResourceAccess)>,
-    Vec<&'static str>,
-);
-struct NativeSystem(TickFn);
-impl ExecutableSystem for NativeSystem {
-    fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
-        (self.0)(ctx, state)
-    }
-}
-
-pub(crate) fn register_game_systems(registry: &mut SystemRegistry) {
-    use ResourceAccess::{Read, ReadWrite, Write};
-    let configs: [BuiltinConfiguration; 8] = [
-        (
-            "game.input",
-            input_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("input", "GameInput", Read),
-            ],
-            vec![],
-        ),
-        (
-            "game.ai",
-            ai_system,
-            vec![("world", "GameWorld", ReadWrite)],
-            vec![],
-        ),
-        (
-            "game.movement",
-            movement_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("previous", "Positions", Write),
-            ],
-            vec![],
-        ),
-        (
-            "game.collision",
-            collision_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("previous", "Positions", Read),
-            ],
-            vec![],
-        ),
-        (
-            "game.combat",
-            combat_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("events", "GameEvents", ReadWrite),
-            ],
-            vec![],
-        ),
-        (
-            "game.health",
-            health_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("events", "GameEvents", ReadWrite),
-            ],
-            vec![],
-        ),
-        (
-            "game.portals",
-            portal_system,
-            vec![
-                ("world", "GameWorld", ReadWrite),
-                ("events", "GameEvents", ReadWrite),
-            ],
-            vec![],
-        ),
-        (
-            "game.audio",
-            audio_system,
-            vec![("events", "GameEvents", ReadWrite)],
-            vec![],
-        ),
-    ];
-    for (id, step, ports, requires) in configs {
-        let descriptor = SystemDescriptor {
-            id: id.into(),
-            state_schema: format!("{id}/1"),
-            components: match id {
-                "game.input" => vec!["player"],
-                "game.ai" => vec!["actor", "ai", "health", "melee"],
-                "game.movement" => vec!["actor"],
-                "game.collision" => vec!["actor", "obstacle"],
-                "game.combat" => vec!["actor", "health", "melee"],
-                "game.health" => vec!["health", "player", "boss"],
-                "game.portals" => vec!["portal", "persistent", "player", "actor", "health"],
-                _ => vec![],
-            }
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-            ports: ports
-                .into_iter()
-                .map(|(name, data_type, access)| SystemPort {
-                    name: name.into(),
-                    data_type: data_type.into(),
-                    access,
-                })
-                .collect(),
-            requires: requires.into_iter().map(Into::into).collect(),
-        };
-        registry.register(descriptor,move|params|{
-            if !params.is_null()&&params.as_object().is_none_or(|o|!o.is_empty()){return Err("Built-in system configuration belongs to object components; params must be empty".into());}
-            Ok(Box::new(NativeSystem(step)))
-        }).expect("Unique built-in system module");
-    }
-}
-
-fn input_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    for entity in ctx
-        .game
-        .entities
-        .values()
-        .filter(|e| e.components.contains_key("player"))
-    {
-        let mut movement = ctx.input.movement;
-        let length = (movement[0] * movement[0] + movement[1] * movement[1]).sqrt();
-        if length > 1. {
-            movement = normalized(movement);
-        }
-        ctx.game.intentions.insert(
-            entity.object.id,
-            GameIntent {
-                movement,
-                aim: ctx.input.aim_world,
-                attack: ctx.input.attack,
-            },
-        );
-    }
-    Ok(())
-}
-
-fn ai_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    let actors: Vec<_> = ctx
-        .game
-        .entities
-        .values()
-        .filter_map(|e| {
-            component::<Actor>(e, "actor")
-                .map(|a| (e.object.id, e.object.transform.translation, a, health(e)))
-        })
-        .collect();
-    for e in ctx.game.entities.values() {
-        let (Some(ai), Some(actor)) = (component::<Ai>(e, "ai"), component::<Actor>(e, "actor"))
-        else {
-            continue;
-        };
-        let pos = e.object.transform.translation;
-        let target = actors
-            .iter()
-            .filter(|(_, _, a, h)| a.team != actor.team && *h > 0.)
-            .min_by(|a, b| distance(pos, a.1).total_cmp(&distance(pos, b.1)));
-        let Some((_, target, _, _)) = target else {
-            continue;
-        };
-        let d = distance(pos, *target);
-        if d > ai.aggro_radius {
-            continue;
-        }
-        let melee = component::<Melee>(e, "melee");
-        let attack = melee.as_ref().is_some_and(|m| d < m.range * 0.85);
-        let movement = if attack {
-            [0., 0.]
-        } else {
-            normalized([target[0] - pos[0], target[2] - pos[2]])
-        };
-        ctx.game.intentions.insert(
-            e.object.id,
-            GameIntent {
-                movement,
-                aim: *target,
-                attack,
-            },
-        );
-    }
-    Ok(())
-}
-
-fn movement_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    let mut previous = BTreeMap::new();
-    for (id, intent) in &ctx.game.intentions {
-        let Some(entity) = ctx.game.entities.get_mut(id) else {
-            continue;
-        };
-        let Some(actor) = component::<Actor>(entity, "actor") else {
-            continue;
-        };
-        previous.insert(*id, entity.object.transform.translation);
-        entity.object.transform.translation[0] += intent.movement[0] * actor.speed * ctx.dt;
-        entity.object.transform.translation[2] += intent.movement[1] * actor.speed * ctx.dt;
-    }
-    ctx.set_resource(
-        "previous",
-        serde_json::to_value(previous).map_err(|e| e.to_string())?,
-    )
-}
-
-fn collision_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    let previous: BTreeMap<u64, [f32; 3]> =
-        serde_json::from_value(ctx.resource("previous")?.clone()).map_err(|e| e.to_string())?;
-    let obstacles: Vec<_> = ctx
-        .game
-        .entities
-        .values()
-        .filter_map(|e| {
-            component::<Obstacle>(e, "obstacle")
-                .map(|o| (e.object.transform.translation, o.half_extents))
-        })
-        .collect();
-    for (id, start) in previous {
-        let Some(entity) = ctx.game.entities.get_mut(&id) else {
-            continue;
-        };
-        let Some(actor) = component::<Actor>(entity, "actor") else {
-            continue;
-        };
-        let wanted = entity.object.transform.translation;
-        let mut p = start;
-        // Bound movement increments to the body radius to prevent tunnelling,
-        // and resolve axes separately so actors slide along blocking geometry.
-        let count =
-            ((distance(start, wanted) / (actor.radius * 0.5)).ceil() as usize).clamp(1, 128);
-        let delta = [
-            (wanted[0] - start[0]) / count as f32,
-            (wanted[2] - start[2]) / count as f32,
-        ];
-        let blocks = |p: [f32; 3]| {
-            obstacles.iter().any(|(center, extents)| {
-                let dx = (p[0] - center[0]).abs() - extents[0];
-                let dz = (p[2] - center[2]).abs() - extents[1];
-                dx.max(0.).powi(2) + dz.max(0.).powi(2) < actor.radius * actor.radius
-            })
-        };
-        for _ in 0..count {
-            let mut next = p;
-            next[0] += delta[0];
-            if !blocks(next) {
-                p = next;
-            }
-            next = p;
-            next[2] += delta[1];
-            if !blocks(next) {
-                p = next;
-            }
-        }
-        entity.object.transform.translation = p;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Swing {
-    cooldown: f32,
-    remaining: f32,
-    windup: f32,
-    direction: [f32; 2],
-    hit: Vec<u64>,
-    active: bool,
-}
-fn combat_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
-    let mut swings: BTreeMap<u64, Swing> = if state.is_null() {
-        BTreeMap::new()
-    } else {
-        serde_json::from_value(state.clone()).map_err(|e| e.to_string())?
-    };
-    let attackers: Vec<_> = ctx
-        .game
-        .entities
-        .values()
-        .filter_map(|e| {
-            Some((
-                e.object.id,
-                e.object.transform.translation,
-                component::<Actor>(e, "actor")?,
-                component::<Melee>(e, "melee")?,
-                health(e),
-            ))
-        })
-        .collect();
-    for (id, pos, _actor, melee, hp) in attackers {
-        if hp <= 0. {
-            continue;
-        }
-        let swing = swings.entry(id).or_default();
-        swing.cooldown = (swing.cooldown - ctx.dt).max(0.);
-        let intent = ctx.game.intentions.get(&id).cloned().unwrap_or_default();
-        if intent.attack && swing.cooldown <= 0. && !swing.active {
-            swing.cooldown = melee.cooldown;
-            swing.remaining = melee.duration;
-            swing.windup = melee.windup;
-            swing.hit.clear();
-            swing.active = true;
-            swing.direction = attack_direction(pos, intent.aim);
-            ctx.events.push(GameEvent::Attack { attacker: id });
-        }
-        if !swing.active {
-            continue;
-        }
-        // Attack direction is captured at windup start, giving an evasion window.
-        if swing.windup > 0. {
-            swing.windup = (swing.windup - ctx.dt).max(0.);
-            ctx.game.telegraphs.push(AttackTelegraph {
-                attacker: id,
-                center: pos,
-                direction: swing.direction,
-                range: melee.range,
-                arc: melee.arc,
-                progress: 1. - swing.windup / melee.windup.max(1e-6),
-            });
-            continue;
-        }
-        let area = MeleeArea {
-            center: pos,
-            direction: swing.direction,
-            range: melee.range,
-            arc: melee.arc,
-        };
-        ctx.game.attack_visuals.push(AttackVisual {
-            attacker: id,
-            area,
-            progress: (1. - swing.remaining / melee.duration).clamp(0., 1.),
-        });
-        let targets = ctx.game.melee_targets(id, &area);
-        for target in targets {
-            if swing.hit.contains(&target) {
-                continue;
-            }
-            let Some(entity) = ctx.game.entities.get_mut(&target) else {
-                continue;
-            };
-            let Some(mut hp) = component::<Health>(entity, "health") else {
-                continue;
-            };
-            hp.current = (hp.current - melee.damage).max(0.);
-            entity.components.insert(
-                "health".into(),
-                serde_json::to_value(hp).map_err(|e| e.to_string())?,
-            );
-            swing.hit.push(target);
-            ctx.game.hit_visuals.push(HitVisual {
-                attacker: id,
-                target,
-                position: entity.object.transform.translation,
-                damage: melee.damage,
-                started_at: ctx.game.time,
-                expires_at: ctx.game.time + 0.35,
-            });
-            ctx.events.push(GameEvent::Hit {
-                attacker: id,
-                target,
-                damage: melee.damage,
-            });
-        }
-        swing.remaining -= ctx.dt;
-        if swing.remaining <= 0. {
-            swing.active = false;
-        }
-    }
-    swings.retain(|id, _| ctx.game.entities.contains_key(id));
-    *state = serde_json::to_value(swings).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn health_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
-    let mut emitted: Vec<u64> = if state.is_null() {
-        vec![]
-    } else {
-        serde_json::from_value(state.clone()).map_err(|e| e.to_string())?
-    };
-    // Only retained dead entities need duplicate suppression. Removed IDs can
-    // be spawned again, and a revived entity can die again in a later tick.
-    emitted.retain(|id| {
-        ctx.game
-            .entities
-            .get(id)
-            .is_some_and(|e| e.components.contains_key("health") && health(e) <= 0.)
-    });
-    let dead: Vec<_> = ctx
-        .game
-        .entities
-        .values()
-        .filter(|e| e.components.contains_key("health") && health(e) <= 0.)
-        // Capture death metadata before removing a parent can remove another
-        // dead entity in this same batch.
-        .map(|e| {
-            (
-                e.object.id,
-                e.components.contains_key("player"),
-                e.components
-                    .get("boss")
-                    .and_then(|v| v.get("victory_on_death"))
-                    .and_then(Value::as_bool)
-                    == Some(true),
-            )
-        })
-        .collect();
-    for (id, player, victory) in dead {
-        if emitted.contains(&id) {
-            continue;
-        }
-        emitted.push(id);
-        ctx.events.push(GameEvent::Death { object: id });
-        if player {
-            ctx.game.status = GameStatus::Defeat;
-        } else {
-            if victory {
-                ctx.game.status = GameStatus::Victory;
-                ctx.events.push(GameEvent::Victory);
-            }
-            if ctx.game.entities.contains_key(&id) {
-                ctx.game.apply_commands(&[WorldCommand::Remove { id }])?;
-            }
-        }
-    }
-    emitted.retain(|id| ctx.game.entities.contains_key(id));
-    *state = json!(emitted);
-    Ok(())
-}
-
-fn portal_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    if ctx.game.status != GameStatus::Playing {
-        return Ok(());
-    }
-    let Some(player) = ctx.game.player() else {
-        return Ok(());
-    };
-    let pos = player.object.transform.translation;
-    for entity in ctx.game.entities.values() {
-        let Some(portal) = component::<Portal>(entity, "portal") else {
-            continue;
-        };
-        if distance(pos, entity.object.transform.translation) <= portal.radius
-            && (!portal.requires_clear || ctx.game.living_enemies() == 0)
-        {
-            ctx.game.transition = Some(portal.scene);
-            ctx.game.transition_spawn = Some(portal.spawn);
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn audio_system(ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
-    let sounds: Vec<_> = ctx
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::Attack { attacker } => Some(("attack", Some(*attacker))),
-            GameEvent::Hit { target, .. } => Some(("hit", Some(*target))),
-            GameEvent::Death { object } => Some(("death", Some(*object))),
-            GameEvent::Victory => Some(("victory", None)),
-            _ => None,
-        })
-        .collect();
-    for (cue, object) in sounds {
-        ctx.events.push(GameEvent::Sound {
-            cue: cue.into(),
-            object,
-        });
-    }
-    Ok(())
-}
+#[path = "builtin_game_systems.rs"]
+mod builtin;
+pub(crate) use builtin::register_game_systems;
 
 #[cfg(test)]
 mod tests {
@@ -1501,8 +1096,15 @@ mod tests {
                     }
                 );
                 assert_eq!(session.events().contains(&GameEvent::Victory), !player);
-                assert!(session.state().entities.is_empty());
-                assert!(session.provider.objects().unwrap().is_empty());
+                assert!(session.state().world.is_empty());
+                assert!(
+                    session
+                        .provider
+                        .as_ref()
+                        .map(|provider| provider.objects().unwrap())
+                        .unwrap_or_else(|| session.state().world.objects_snapshot())
+                        .is_empty()
+                );
                 assert!(session.snapshot().items.is_empty());
             }
         }
@@ -1515,8 +1117,15 @@ mod tests {
             for _ in 0..2 {
                 session.step(1. / 60., &GameInput::default()).unwrap();
                 assert_eq!(session.events(), &[GameEvent::Death { object: 10 }]);
-                assert!(session.state().entities.is_empty());
-                assert!(session.provider.objects().unwrap().is_empty());
+                assert!(session.state().world.is_empty());
+                assert!(
+                    session
+                        .provider
+                        .as_ref()
+                        .map(|provider| provider.objects().unwrap())
+                        .unwrap_or_else(|| session.state().world.objects_snapshot())
+                        .is_empty()
+                );
                 session
                     .apply_commands(&[WorldCommand::Spawn {
                         object: test_object(10, None).object,
@@ -1524,11 +1133,9 @@ mod tests {
                     .unwrap();
                 session
                     .state
-                    .entities
-                    .get_mut(&10)
-                    .unwrap()
-                    .components
-                    .insert("health".into(), json!({"maximum":10.,"current":0.}));
+                    .world
+                    .insert_component(10, "health", json!({"maximum":10.,"current":0.}))
+                    .unwrap();
             }
         }
     }
@@ -1605,8 +1212,15 @@ mod tests {
                     GameEvent::Death { object: 20 }
                 ]
             );
-            assert!(session.state().entities.is_empty());
-            assert!(session.provider.objects().unwrap().is_empty());
+            assert!(session.state().world.is_empty());
+            assert!(
+                session
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.objects().unwrap())
+                    .unwrap_or_else(|| session.state().world.objects_snapshot())
+                    .is_empty()
+            );
         }
     }
     fn persistent_hierarchy_project() -> GameProject {
@@ -1652,16 +1266,22 @@ mod tests {
                 .unwrap();
             let mut session = GameSession::new(project, kind).unwrap();
             session.transition("destination").unwrap();
-            let carried = &session.state().entities[&2];
+            let carried = &session.state().world.entity(2).unwrap();
             assert_eq!(carried.object, destination.object);
             assert_eq!(carried.references, destination.references);
             assert_eq!(health(carried), 6.);
             assert!(carried.components.contains_key("persistent"));
-            let absent = &session.state().entities[&4];
+            let absent = &session.state().world.entity(4).unwrap();
             assert_eq!(absent.object.parent, None);
             assert!(absent.references.is_empty());
             assert_eq!(
-                object_map(&session.provider.objects().unwrap()),
+                object_map(
+                    &session
+                        .provider
+                        .as_ref()
+                        .map(|provider| provider.objects().unwrap())
+                        .unwrap_or_else(|| session.state().world.objects_snapshot())
+                ),
                 object_map(&session.world_objects())
             );
             assert_eq!(
@@ -1726,9 +1346,24 @@ mod tests {
     struct InvalidHealthWriter;
     impl ExecutableSystem for InvalidHealthWriter {
         fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
-            let entity = ctx.game.entities.get_mut(&10).unwrap();
-            entity.components.get_mut("health").unwrap()["current"] = json!(-1.);
-            entity.object.transform.translation = [9., 0., 0.];
+            ctx.game.world.component_mut(10, "health").unwrap()["current"] = json!(-1.);
+            ctx.game.world.transform_mut(10).unwrap().translation = [9., 0., 0.];
+            ctx.game.world.remove_component(10, "material");
+            ctx.game
+                .world
+                .insert_component(10, "scratch", json!({"value":7}))
+                .unwrap();
+            ctx.game
+                .world
+                .references_mut(10)
+                .unwrap()
+                .insert("self".into(), 10);
+            ctx.game.apply_commands(&[
+                WorldCommand::Remove { id: 20 },
+                WorldCommand::Spawn {
+                    object: test_object(20, None).object,
+                },
+            ])?;
             ctx.events.push(GameEvent::Victory);
             *state = json!("invalid candidate");
             Ok(())
@@ -1743,10 +1378,14 @@ mod tests {
             registry
                 .register(descriptor, |_| Ok(Box::new(InvalidHealthWriter)))
                 .unwrap();
-            let mut project = focused_project(vec![dead_object(10, None)], &[]);
+            let mut original = dead_object(10, None);
+            original.components.insert("material".into(), json!({}));
+            original.references.insert("target".into(), 20);
+            let mut project = focused_project(vec![original, test_object(20, None)], &[]);
             append_test_system(&mut project, "test.invalid-health");
             let mut session = GameSession::new_with_registry(project, kind, registry).unwrap();
             let before = session.state().clone();
+            let lifetime = session.state().world.lifetime(20);
             let snapshot = session.snapshot();
             let systems = session.system_states();
             assert!(
@@ -1756,6 +1395,7 @@ mod tests {
                     .contains("health.current")
             );
             assert_eq!(session.state(), &before);
+            assert_eq!(session.state().world.lifetime(20), lifetime);
             assert_eq!(session.snapshot(), snapshot);
             assert_eq!(session.system_states(), systems);
             assert!(session.events().is_empty());
@@ -1816,7 +1456,7 @@ mod tests {
         }
         fn stop(&mut self, ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
             ctx.game.scene = "corrupted by stop".into();
-            ctx.game.entities.clear();
+            ctx.game.world.clear();
             ctx.events.push(GameEvent::Victory);
             Err("Stop failed".into())
         }
@@ -1959,8 +1599,8 @@ mod tests {
                     .any(|e| matches!(e, GameEvent::Hit { attacker: 1, .. }))
             );
         }
-        assert_eq!(health(&s.state.entities[&10]), 8.);
-        assert_eq!(health(&s.state.entities[&11]), 8.);
+        assert_eq!(health(&s.state.world.entity(10).unwrap()), 8.);
+        assert_eq!(health(&s.state.world.entity(11).unwrap()), 8.);
     }
     #[test]
     fn melee_area_matches_radius_extension_and_center_angle() {
@@ -2000,19 +1640,22 @@ mod tests {
         let mut session = GameSession::new(project, WorldKind::Objects).unwrap();
         // A module can supply an actor without a damageable Health component.
         // It remains in the world, but combat has always skipped damaging it.
-        session
-            .state
-            .entities
-            .get_mut(&10)
-            .unwrap()
-            .components
-            .remove("health");
+        session.state.world.remove_component(10, "health");
         let aim = [0., 0., 3.];
         let area = session.state().melee_aim(1, aim).unwrap();
-        assert!(area.contains(
-            session.state.entities[&10].object.transform.translation,
-            0.36
-        ));
+        assert!(
+            area.contains(
+                session
+                    .state
+                    .world
+                    .entity(10)
+                    .unwrap()
+                    .object
+                    .transform
+                    .translation,
+                0.36
+            )
+        );
         assert_eq!(session.state().melee_targets(1, &area), vec![11]);
         session
             .step(
@@ -2037,7 +1680,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(targets, vec![11]);
-        assert!(session.state().entities.contains_key(&10));
+        assert!(session.state().world.contains(10));
         assert!(
             !session
                 .state()
@@ -2090,7 +1733,7 @@ mod tests {
                 .unwrap();
             assert_eq!(attack.area, preview);
             assert_eq!(attack.progress, 0.);
-            assert!(!session.state().entities.contains_key(&10));
+            assert!(!session.state().world.contains(10));
             let lethal_hit = session
                 .state()
                 .hit_visuals
@@ -2159,7 +1802,7 @@ mod tests {
         objects.restart().unwrap();
         assert!(objects.state().attack_visuals.is_empty());
         assert!(objects.state().hit_visuals.is_empty());
-        assert!(objects.state().entities.contains_key(&10));
+        assert!(objects.state().world.contains(10));
     }
     #[test]
     fn old_game_state_deserializes_without_combat_visuals() {
@@ -2172,16 +1815,59 @@ mod tests {
         assert!(restored.hit_visuals.is_empty());
     }
     #[test]
+    fn canonical_world_preserves_entity_wire_shape_and_rejects_malformed_ids() {
+        let session = GameSession::new(project_without_enemies(), WorldKind::Ecs).unwrap();
+        let value = serde_json::to_value(session.state()).unwrap();
+        assert!(value.get("world").is_none());
+        assert_eq!(
+            value["entities"].as_object().unwrap().len(),
+            session.state().world.len()
+        );
+        let restored: GameState = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(&restored, session.state());
+        assert_ne!(
+            restored.world.lifetime(1),
+            session.state().world.lifetime(1)
+        );
+        let mut mismatch = value.clone();
+        mismatch["entities"]["1"]["object"]["id"] = json!(999);
+        assert!(serde_json::from_value::<GameState>(mismatch).is_err());
+        let mut zero = value.clone();
+        let mut entity = zero["entities"]
+            .as_object_mut()
+            .unwrap()
+            .remove("1")
+            .unwrap();
+        entity["object"]["id"] = json!(0);
+        zero["entities"]["0"] = entity;
+        assert!(serde_json::from_value::<GameState>(zero).is_err());
+        let entity = serde_json::to_string(&value["entities"]["1"]).unwrap();
+        let duplicate = serde_json::to_string(&value).unwrap().replacen(
+            "\"entities\":{",
+            &format!("\"entities\":{{\"1\":{entity},"),
+            1,
+        );
+        assert!(serde_json::from_str::<GameState>(&duplicate).is_err());
+    }
+    #[test]
+    fn default_ecs_session_keeps_no_secondary_provider_through_scene_lifecycle() {
+        let mut session = GameSession::new(project_without_enemies(), WorldKind::Ecs).unwrap();
+        assert!(session.provider.is_none());
+        assert!(session.world_factory.is_none());
+        session.step(1. / 60., &GameInput::default()).unwrap();
+        session.transition("boss").unwrap();
+        session.restart().unwrap();
+        assert!(session.provider.is_none());
+        assert!(session.world_factory.is_none());
+        let mut expected = session.state().world.snapshot();
+        expected.time = session.state().time as f32;
+        assert_eq!(session.snapshot(), expected);
+    }
+    #[test]
     fn portal_transfers_health_and_boss_warns_before_damage() {
         let p = project_without_enemies();
         let mut s = GameSession::new(p, WorldKind::Ecs).unwrap();
-        s.state
-            .entities
-            .get_mut(&1)
-            .unwrap()
-            .components
-            .get_mut("health")
-            .unwrap()["current"] = json!(60.);
+        s.state.world.component_mut(1, "health").unwrap()["current"] = json!(60.);
         s.apply_commands(&[WorldCommand::SetPosition {
             id: 1,
             position: [0., 0., -7.2],
@@ -2189,7 +1875,7 @@ mod tests {
         .unwrap();
         s.step(1. / 60., &GameInput::default()).unwrap();
         assert_eq!(s.state.scene, "boss");
-        assert_eq!(health(s.state.player().unwrap()), 60.);
+        assert_eq!(health(&s.state.player().unwrap()), 60.);
         assert!(
             s.events
                 .iter()
@@ -2202,7 +1888,7 @@ mod tests {
         .unwrap();
         s.step(1. / 60., &GameInput::default()).unwrap();
         assert!(!s.state.telegraphs.is_empty());
-        assert_eq!(health(s.state.player().unwrap()), 60.);
+        assert_eq!(health(&s.state.player().unwrap()), 60.);
         s.apply_commands(&[WorldCommand::SetPosition {
             id: 1,
             position: [7., 0., 5.],
@@ -2211,7 +1897,7 @@ mod tests {
         for _ in 0..70 {
             s.step(1. / 60., &GameInput::default()).unwrap();
         }
-        assert_eq!(health(s.state.player().unwrap()), 60.);
+        assert_eq!(health(&s.state.player().unwrap()), 60.);
     }
     struct DeclaredData;
     impl ExecutableSystem for DeclaredData {
@@ -2242,7 +1928,11 @@ mod tests {
         let registry = SystemRegistry::builtin();
         let session = GameSession::new(project.clone(), WorldKind::Objects).unwrap();
         assert!(
-            !session.state().entities[&10]
+            !session
+                .state()
+                .world
+                .entity(10)
+                .unwrap()
                 .components
                 .contains_key("replication")
         );
@@ -2304,7 +1994,7 @@ mod tests {
             GameSession::new_with_registry(project.clone(), WorldKind::Ecs, registry.clone())
                 .unwrap();
         assert_eq!(
-            restored.state().entities[&10].components["replication"]["enabled"],
+            restored.state().world.entity(10).unwrap().components["replication"]["enabled"],
             json!(false)
         );
         assert!(

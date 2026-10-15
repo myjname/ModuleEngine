@@ -13,7 +13,12 @@ pub fn apply_hit_flashes(snapshot: &mut module_engine_core::SceneSnapshot, state
         let intensity = state
             .hit_visuals
             .iter()
-            .filter(|hit| hit.target == item.id)
+            .filter(|hit| {
+                hit.target == item.id
+                    && hit
+                        .target_lifetime
+                        .is_none_or(|lifetime| state.world.lifetime(item.id) == Some(lifetime))
+            })
             .map(|hit| {
                 let age = state.time - hit.started_at;
                 if age < 0. || state.time >= hit.expires_at {
@@ -40,19 +45,16 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
         return;
     }
     let painter = ui.painter_at(rect);
-    let player = state
-        .entities
-        .values()
-        .find(|e| e.components.contains_key("player"));
+    let player = state.player();
     if let Some(player) = player
-        && !state
-            .attack_visuals
-            .iter()
-            .any(|a| a.attacker == player.object.id)
-        && !state
-            .telegraphs
-            .iter()
-            .any(|a| a.attacker == player.object.id)
+        && !state.attack_visuals.iter().any(|a| {
+            a.attacker == player.object.id
+                && current_incarnation(state, a.attacker, a.attacker_lifetime)
+        })
+        && !state.telegraphs.iter().any(|a| {
+            a.attacker == player.object.id
+                && current_incarnation(state, a.attacker, a.attacker_lifetime)
+        })
         && let Some(aim) = aim
         && let Some(area) = state.melee_aim(player.object.id, aim)
     {
@@ -68,10 +70,9 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
         paint_targets(&painter, camera, rect, state, player.object.id, &area);
     }
     for attack in &state.attack_visuals {
-        let friendly = state
-            .entities
-            .get(&attack.attacker)
-            .is_some_and(|e| e.components.contains_key("player"));
+        let friendly = attack
+            .attacker_player
+            .unwrap_or_else(|| state.world.component(attack.attacker, "player").is_some());
         let color = if friendly {
             [255, 206, 92]
         } else {
@@ -87,7 +88,7 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
             Color32::from_rgba_unmultiplied(color[0], color[1], color[2], alpha),
             Stroke::new(2.5, Color32::from_rgb(color[0], color[1], color[2])),
         );
-        if friendly {
+        if friendly && current_incarnation(state, attack.attacker, attack.attacker_lifetime) {
             paint_targets(&painter, camera, rect, state, attack.attacker, &attack.area);
         }
         slash(&painter, camera, rect, &attack.area, progress, friendly);
@@ -98,10 +99,9 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
         if age >= 1. {
             continue;
         }
-        let received = state
-            .entities
-            .get(&hit.target)
-            .is_some_and(|e| e.components.contains_key("player"));
+        let received = hit
+            .target_player
+            .unwrap_or_else(|| state.world.component(hit.target, "player").is_some());
         let rgb = if received {
             [255, 100, 90]
         } else {
@@ -147,6 +147,10 @@ pub fn draw(ui: &egui::Ui, rect: Rect, camera: Camera, state: &GameState, aim: O
     }
 }
 
+fn current_incarnation(state: &GameState, id: u64, lifetime: Option<u64>) -> bool {
+    lifetime.is_none_or(|lifetime| state.world.lifetime(id) == Some(lifetime))
+}
+
 fn paint_targets(
     painter: &egui::Painter,
     camera: Camera,
@@ -156,7 +160,7 @@ fn paint_targets(
     area: &MeleeArea,
 ) {
     for id in state.melee_targets(attacker, area) {
-        if let Some(target) = state.entities.get(&id) {
+        if let Some(target) = state.world.entity(id) {
             let radius = target
                 .components
                 .get("actor")
@@ -541,7 +545,7 @@ mod tests {
         // Each highlight belongs to an actual eligible target, including the
         // radial-overlap target that lies beyond the painted nominal range.
         for (ring, id) in rings.iter().zip(state.melee_targets(1, &forward_area)) {
-            let entity = &state.entities[&id];
+            let entity = state.world.entity(id).unwrap();
             let radius = entity.components["actor"]["radius"].as_f64().unwrap() as f32;
             let expected = crate::player::screen_point(
                 camera(),
@@ -593,6 +597,22 @@ mod tests {
         assert_eq!(session.project(), &authored);
         assert_eq!(session.snapshot(), fresh);
 
+        let mut replacement = before_state.clone();
+        let object = replacement.world.object(11).unwrap();
+        replacement
+            .apply_commands(&[
+                module_engine_core::WorldCommand::Remove { id: 11 },
+                module_engine_core::WorldCommand::Spawn { object },
+            ])
+            .unwrap();
+        assert_ne!(
+            replacement.world.lifetime(11),
+            before_state.world.lifetime(11)
+        );
+        let mut replacement_snapshot = before_snapshot.clone();
+        apply_hit_flashes(&mut replacement_snapshot, &replacement);
+        assert_eq!(replacement_snapshot, before_snapshot);
+
         let mut expired = before_state.clone();
         expired.time = expired
             .hit_visuals
@@ -615,7 +635,7 @@ mod tests {
     fn active_swing_and_lethal_hit_emit_visible_shapes_without_a_gpu() {
         let session = attacked_encounter();
         let active = session.state();
-        assert!(!active.entities.contains_key(&10));
+        assert!(!active.world.contains(10));
         assert!(active.hit_visuals.iter().any(|h| h.target == 10));
         let mut blank = active.clone();
         blank.attack_visuals.clear();
@@ -661,6 +681,153 @@ mod tests {
     }
 
     #[test]
+    fn reused_ids_keep_recorded_roles_without_blocking_new_preview_or_retargeting_old_swings() {
+        use module_engine_core::WorldCommand;
+        let cyan =
+            egui::epaint::ColorMode::Solid(Color32::from_rgba_unmultiplied(125, 225, 255, 180));
+        let enemy_stroke = egui::epaint::ColorMode::Solid(Color32::from_rgb(255, 90, 70));
+        let player_stroke = egui::epaint::ColorMode::Solid(Color32::from_rgb(255, 206, 92));
+        for windup in [0., 0.2] {
+            let mut project = encounter().project().clone();
+            let scene = project.scenes.get_mut("arena").unwrap();
+            scene
+                .objects
+                .retain(|entity| [1, 11, 13].contains(&entity.object.id));
+            let enemy = scene
+                .objects
+                .iter_mut()
+                .find(|entity| entity.object.id == 11)
+                .unwrap();
+            enemy.components.insert(
+                "actor".into(),
+                json!({"team":"enemy","radius":0.35,"speed":0.}),
+            );
+            enemy
+                .components
+                .insert("ai".into(), json!({"kind":"chase","aggro_radius":100.}));
+            enemy.components.insert("melee".into(), json!({"range":4.,"damage":0.,"cooldown":1.,"arc":std::f32::consts::TAU,"duration":1.,"windup":windup}));
+            let mut session = GameSession::new(project, WorldKind::Ecs).unwrap();
+            session
+                .step(
+                    1. / 60.,
+                    &GameInput {
+                        attack: true,
+                        aim_world: [0.2, 0., 3.5],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let mut state = session.state().clone();
+            let old_player_attack = state
+                .attack_visuals
+                .iter()
+                .find(|attack| attack.attacker == 1)
+                .unwrap()
+                .clone();
+            assert!(
+                state
+                    .hit_visuals
+                    .iter()
+                    .any(|hit| hit.target == 11 && hit.target_player == Some(false))
+            );
+            if windup == 0. {
+                assert!(
+                    state.attack_visuals.iter().any(
+                        |attack| attack.attacker == 11 && attack.attacker_player == Some(false)
+                    )
+                );
+            } else {
+                assert!(state.telegraphs.iter().any(
+                    |warning| warning.attacker == 11 && warning.attacker_player == Some(false)
+                ));
+            }
+            state.attack_visuals.retain(|attack| attack.attacker == 11);
+            state.telegraphs.retain(|warning| warning.attacker == 11);
+            state.hit_visuals.retain(|hit| hit.target == 11);
+            let mut replacement = state.world.entity(11).unwrap();
+            replacement.object.transform.translation = [0., 0., 5.];
+            replacement.components.insert("player".into(), json!({}));
+            replacement.components.get_mut("actor").unwrap()["team"] = json!("player");
+            replacement.components.get_mut("melee").unwrap()["range"] = json!(2.2);
+            replacement.components.get_mut("melee").unwrap()["arc"] = json!(1.9);
+            state
+                .apply_commands(&[
+                    WorldCommand::Remove { id: 11 },
+                    WorldCommand::Spawn {
+                        object: replacement.object.clone(),
+                    },
+                ])
+                .unwrap();
+            state.world.upsert_entity(replacement).unwrap();
+            state.world.remove_component(1, "player");
+            assert_eq!(state.player().unwrap().object.id, 11);
+
+            let aim = Some([0., 0., 8.]);
+            let mut preview_only = state.clone();
+            preview_only.attack_visuals.clear();
+            preview_only.telegraphs.clear();
+            preview_only.hit_visuals.clear();
+            let preview_shapes = render_shapes(&preview_only, aim);
+            assert_eq!(target_rings(&preview_shapes).len(), 1);
+            let shapes = render_shapes(&state, aim);
+            assert!(
+                leaves(&shapes).iter().any(
+                    |shape| matches!(shape, egui::Shape::Path(path) if path.stroke.color == cyan)
+                ),
+                "An old incarnation's swing or windup must not suppress the fresh player's aim"
+            );
+            assert_eq!(
+                target_rings(&shapes).len(),
+                target_rings(&preview_shapes).len()
+            );
+            if windup == 0. {
+                assert!(leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::Path(path) if path.stroke.color == enemy_stroke)),
+                    "The recorded enemy swing stays red after its ID becomes a player");
+                assert!(!leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::Path(path) if path.stroke.color == player_stroke)));
+            }
+            let hit = &state.hit_visuals[0];
+            let age = ((state.time - hit.started_at) / (hit.expires_at - hit.started_at))
+                .clamp(0., 1.) as f32;
+            let alpha = (255. * (1. - age)) as u8;
+            let outgoing = Color32::from_rgba_unmultiplied(255, 235, 145, alpha);
+            let incoming = Color32::from_rgba_unmultiplied(255, 100, 90, alpha);
+            assert!(leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::LineSegment { stroke, .. } if stroke.color == outgoing)));
+            assert!(!leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::LineSegment { stroke, .. } if stroke.color == incoming)),
+                "The recorded outgoing hit must not become incoming damage on a replacement player");
+
+            // Also retain an actual friendly attack after its attacker is
+            // replaced by an enemy. Its old gold shape remains, but it must
+            // not query the replacement's opposing team for new target rings.
+            state.attack_visuals = vec![old_player_attack];
+            state.telegraphs.clear();
+            state.hit_visuals.clear();
+            let mut enemy = state.world.entity(1).unwrap();
+            enemy.components.get_mut("actor").unwrap()["team"] = json!("enemy");
+            state
+                .apply_commands(&[
+                    WorldCommand::Remove { id: 1 },
+                    WorldCommand::Spawn {
+                        object: enemy.object.clone(),
+                    },
+                ])
+                .unwrap();
+            state.world.upsert_entity(enemy).unwrap();
+            state.world.transform_mut(11).unwrap().translation = [0., 0., 4.];
+            assert!(
+                !state
+                    .melee_targets(1, &state.attack_visuals[0].area)
+                    .is_empty()
+            );
+            let shapes = render_shapes(&state, None);
+            assert!(
+                target_rings(&shapes).is_empty(),
+                "An old swing must not retarget the replacement actor"
+            );
+            assert!(leaves(&shapes).iter().any(|shape| matches!(shape, egui::Shape::Path(path) if path.stroke.color == player_stroke)));
+        }
+    }
+
+    #[test]
     fn moving_cursor_during_a_swing_keeps_active_area_and_highlights_locked() {
         let mut session = attacked_encounter();
         let forward_shapes = render_shapes(session.state(), Some([0., 0., 3.]));
@@ -696,7 +863,7 @@ mod tests {
         let next_rings = target_rings(&next_preview);
         assert_eq!(next_rings.len(), 1);
         assert_ne!(next_rings[0].points, backward_rings[0].points);
-        let target = &session.state().entities[&13];
+        let target = session.state().world.entity(13).unwrap();
         let radius = target.components["actor"]["radius"].as_f64().unwrap() as f32;
         let expected = crate::player::screen_point(
             camera(),
