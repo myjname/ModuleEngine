@@ -380,16 +380,32 @@ impl Editor {
         available
     }
     fn personal_path(&self, workspace: WorkspaceKind) -> PathBuf {
-        self.distribution
-            .as_ref()
-            .map(|p| p.personal_layout_path(workspace.key()))
-            .unwrap_or_else(|| {
-                PathBuf::from(&self.path)
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join(".user/unavailable")
-                    .join(format!("{}.json", workspace.key()))
-            })
+        #[cfg(test)]
+        {
+            let profile = match self.distribution.as_ref().map(|d| d.profile) {
+                Some(crate::distribution::DistributionProfile::Full) => "full",
+                Some(crate::distribution::DistributionProfile::Team) => "team",
+                None => "unavailable",
+            };
+            self.test_personal_settings
+                .path()
+                .join(".user")
+                .join(profile)
+                .join(format!("{}.json", workspace.key()))
+        }
+        #[cfg(not(test))]
+        {
+            self.distribution
+                .as_ref()
+                .map(|p| p.personal_layout_path(workspace.key()))
+                .unwrap_or_else(|| {
+                    PathBuf::from(&self.path)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(".user/unavailable")
+                        .join(format!("{}.json", workspace.key()))
+                })
+        }
     }
     pub(super) fn load_personal_layouts(&mut self) {
         for workspace in [WorkspaceKind::Engine, WorkspaceKind::Project] {
@@ -1015,6 +1031,72 @@ pub fn participating_modules_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_personal_layouts_are_isolated_and_explicit_save_load_still_roundtrips() {
+        let root = crate::project::source_root();
+        let document = demo_document(WorldKind::Objects);
+        let path = root.join("unused-personal-settings-isolation.json");
+        let mut first = Editor::new(document.clone(), path.clone());
+        let mut second = Editor::new(document.clone(), path);
+        let distribution = first.distribution.as_ref().unwrap();
+        let package_root = distribution.package_root.clone();
+        let compile_root = distribution.compile_root().unwrap();
+        let production_path = distribution.personal_layout_path("project");
+        assert_eq!(
+            production_path,
+            package_root.join(".user/full/project.json")
+        );
+        let first_path = first.personal_path(WorkspaceKind::Project);
+        let second_path = second.personal_path(WorkspaceKind::Project);
+        assert!(first_path.starts_with(first.test_personal_settings.path()));
+        assert!(second_path.starts_with(second.test_personal_settings.path()));
+        assert_ne!(first_path, production_path);
+        assert_ne!(first_path, second_path);
+        first.project_layout = DockLayout::single(EditorType::RustCustom);
+        first.project_panes.insert(
+            1,
+            PaneMemory::new(
+                PaneSnapshot {
+                    graph_pan: [123., 456.],
+                    graph_zoom: 0.61,
+                    source: "speed".into(),
+                    ..Default::default()
+                },
+                &document,
+            ),
+        );
+        first.personal_dirty = true;
+        first.save_personal_layouts();
+        assert!(!first.personal_dirty);
+        assert!(first_path.is_file());
+        assert!(!second_path.exists());
+        first.project_layout = DockLayout::default_for(WorkspaceKind::Project);
+        first.project_panes.clear();
+        first.load_personal_layouts();
+        assert_eq!(
+            first.project_layout,
+            DockLayout::single(EditorType::RustCustom)
+        );
+        let restored = first.project_panes.get_mut(&1).unwrap().snapshot(&document);
+        assert_eq!(restored.graph_pan, [123., 456.]);
+        assert_eq!(restored.graph_zoom, 0.61);
+        second.load_personal_layouts();
+        assert_eq!(
+            second.project_layout,
+            DockLayout::default_for(WorkspaceKind::Project)
+        );
+        assert_eq!(first.document, document);
+        assert_eq!(
+            first.distribution.as_ref().unwrap().package_root,
+            package_root
+        );
+        assert_eq!(
+            first.distribution.as_ref().unwrap().compile_root().unwrap(),
+            compile_root
+        );
+    }
+
     use crate::distribution::{DistributionProfile, detect};
     use module_engine_core::demo_document;
     #[test]

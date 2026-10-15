@@ -107,6 +107,7 @@ impl ScriptCompiler {
         let portable_rustc = Some(executable("rustc")).filter(|p| p.is_file());
         let uses_portable = (explicit_cargo.is_none() && portable_cargo.is_some())
             || (explicit_rustc.is_none() && portable_rustc.is_some());
+        let pinned_rustup = portable_manifest_rustup(cfg!(windows), uses_portable);
         let cargo_home = resolve_cargo_home(
             &tool_root,
             std::env::var_os("CARGO_HOME").map(PathBuf::from),
@@ -122,8 +123,8 @@ impl ScriptCompiler {
             cargo_home,
             cargo_binary: resolve_tool_program(&tool_root, "cargo", explicit_cargo),
             rustc_binary: resolve_tool_program(&tool_root, "rustc", explicit_rustc),
-            rustup_home: uses_portable.then(|| tool_root.join(".tools/rustup")),
-            rustup_toolchain: uses_portable.then(|| project_toolchain(&tool_root)),
+            rustup_home: pinned_rustup.then(|| tool_root.join(".tools/rustup")),
+            rustup_toolchain: pinned_rustup.then(|| project_toolchain(&tool_root)),
             artifact_scope: cleanup::fixture_for(&work_dir),
             project_root,
             work_dir,
@@ -360,7 +361,7 @@ impl ScriptCompiler {
                     "Cargo succeeded without producing the worker executable".into(),
                 ));
             }
-            let executable = directory.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
+            let executable = artifacts.executable_path();
             fs::copy(&built_executable, &executable)
                 .map_err(|error| ScriptError::Setup(error.to_string()))?;
             artifacts.trim_build_outputs();
@@ -492,6 +493,19 @@ fn compiler_tool_root(project_root: &Path) -> PathBuf {
 }
 
 fn resolve_cargo_home(project_root: &Path, environment: Option<PathBuf>) -> Option<PathBuf> {
+    resolve_cargo_home_for_platform(project_root, environment, cfg!(target_os = "linux"))
+}
+
+fn resolve_cargo_home_for_platform(
+    project_root: &Path,
+    environment: Option<PathBuf>,
+    linux: bool,
+) -> Option<PathBuf> {
+    // The shipped project's legacy cache can belong to the Windows build. An
+    // explicitly selected native Linux cache must stay isolated from it.
+    if linux && environment.is_some() {
+        return environment;
+    }
     let local = project_root.join(".work/cargo-home");
     let sibling = project_root.parent().map(|p| p.join("cargo-home"));
     let portable = project_root.join(".tools/cargo");
@@ -509,6 +523,13 @@ fn resolve_tool_program(root: &Path, name: &str, explicit: Option<PathBuf>) -> O
             .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         path.is_file().then_some(path)
     })
+}
+
+/// The shipped bootstrap/manifest currently pins Windows MSVC only. Native
+/// Linux tools may live under .tools too, but must retain their own installed
+/// rustup home/toolchain (or explicitly inherited RUSTUP_* environment).
+fn portable_manifest_rustup(windows: bool, portable_tools_selected: bool) -> bool {
+    windows && portable_tools_selected
 }
 
 fn project_toolchain(root: &Path) -> String {
@@ -853,16 +874,7 @@ fn run_bounded(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW, including worker console.
-    }
-    let mut process = OwnedChild::new(
-        command
-            .spawn()
-            .map_err(|e| ScriptError::Setup(e.to_string()))?,
-    )?;
+    let mut process = OwnedChild::spawn(&mut command)?;
     let child = &mut process;
     let stdout = read_pipe(child.stdout.take().unwrap());
     let stderr = read_pipe(child.stderr.take().unwrap());
@@ -925,8 +937,32 @@ struct OwnedChild {
     child: std::process::Child,
     #[cfg(windows)]
     job: WindowsJob,
+    #[cfg(target_os = "linux")]
+    stopped: bool,
+    #[cfg(target_os = "linux")]
+    exit_status: Option<std::process::ExitStatus>,
 }
 impl OwnedChild {
+    fn spawn(command: &mut Command) -> Result<Self, ScriptError> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW.
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            // Set before exec, rather than racing Cargo/rustc or a worker's
+            // first child after spawn. Descendants inherit this private group.
+            command.process_group(0);
+        }
+        Self::new(
+            command
+                .spawn()
+                .map_err(|error| ScriptError::Setup(error.to_string()))?,
+        )
+    }
+
     fn new(mut child: std::process::Child) -> Result<Self, ScriptError> {
         #[cfg(windows)]
         let job = WindowsJob::new(&child).map_err(|error| {
@@ -934,17 +970,82 @@ impl OwnedChild {
             let _ = child.wait();
             ScriptError::Setup(format!("Cannot own child process tree: {error}"))
         })?;
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: getpgid only inspects this live/unreaped child. Refuse to
+            // signal an inherited group which could also contain the editor.
+            if unsafe { libc::getpgid(child.id() as libc::pid_t) } != child.id() as libc::pid_t {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ScriptError::Setup(
+                    "Child was not started in its own Linux process group".into(),
+                ));
+            }
+        }
         Ok(Self {
             child,
             #[cfg(windows)]
             job,
+            #[cfg(target_os = "linux")]
+            stopped: false,
+            #[cfg(target_os = "linux")]
+            exit_status: None,
         })
     }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.stopped {
+                return Ok(self.exit_status);
+            }
+            // WNOWAIT keeps the group leader unreaped. Its PID cannot be reused
+            // between observing exit and terminating the remaining owned group.
+            // Child::try_wait would reap it too soon and allow a PGID reuse race.
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: valid writable siginfo, this owned child PID, no handler.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: waitid initialized siginfo (zero PID means still running).
+            if unsafe { info.assume_init().si_pid() } == 0 {
+                return Ok(None);
+            }
+            self.stop();
+            Ok(self.exit_status)
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.child.try_wait()
+    }
+
     fn stop(&mut self) {
         #[cfg(windows)]
         self.job.terminate();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        #[cfg(target_os = "linux")]
+        {
+            if self.stopped {
+                return;
+            }
+            self.stopped = true;
+            // SAFETY: the unreaped private group leader still reserves this ID.
+            // Negative PID addresses exactly its group; never PID 0 or -1.
+            unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+            let _ = self.child.kill();
+            self.exit_status = self.child.wait().ok();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 impl std::ops::Deref for OwnedChild {
@@ -1231,16 +1332,15 @@ fn update(ctx: &mut ScriptContext) {
         // Exercise the default compiler, not just target-path construction:
         // compiling a real worker must leave the outer Cargo/rustdoc inputs
         // byte/metadata-identical in its native dependency directory.
-        let native_target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| compiler_root.join("target"));
-        let native_target = if native_target.is_absolute() {
-            native_target
-        } else {
-            compiler_root.join(native_target)
-        };
+        // The test binary's directory is the actual outer deps directory in
+        // debug/release and native/explicit-target builds alike.
+        let native_dependencies = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let native_artifacts = || {
-            fs::read_dir(native_target.join("debug/deps"))
+            fs::read_dir(&native_dependencies)
                 .unwrap()
                 .filter_map(Result::ok)
                 .filter(|entry| {
@@ -1264,7 +1364,15 @@ fn update(ctx: &mut ScriptContext) {
             .unwrap()
             .with_asset_root(&first_root)
             .unwrap();
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(active.executable().parent(), active.worker_lock().parent());
+        #[cfg(target_os = "linux")]
+        assert!(
+            active
+                .executable()
+                .starts_with(compiler.target_dir.as_ref().unwrap().join("executables"))
+        );
+        #[cfg(not(target_os = "linux"))]
         assert!(
             !active
                 .executable()
@@ -1545,11 +1653,17 @@ fn update(ctx: &mut ScriptContext) {
         let artifacts =
             TestArtifactGuard::new(&root.join(".work/test-temp"), "script-test").unwrap();
         let work = artifacts.path().to_path_buf();
-        let mut compiler = ScriptCompiler::new(root.clone(), work.clone());
-        // Actual subprocess builds remove inherited CARGO_HOME and set the
-        // project/sibling cache selected without consulting that environment.
-        compiler.cargo_home = resolve_cargo_home(&root, None);
-        assert!(compiler.cargo_home.is_some());
+        let compiler = ScriptCompiler::new(root.clone(), work.clone());
+        // Retain the Windows project/sibling cache regression. Native Linux
+        // subprocesses keep the constructor's explicitly selected Cargo home,
+        // so testing a shared source checkout does not write its Windows cache.
+        #[cfg(windows)]
+        let compiler = {
+            let mut compiler = compiler;
+            compiler.cargo_home = resolve_cargo_home(&root, None);
+            assert!(compiler.cargo_home.is_some());
+            compiler
+        };
         // The default custom-workers dependency target is shared across test
         // fixtures and separate from the outer native Cargo build.
         let mut host = ScriptHost::new(compiler);
@@ -1736,6 +1850,10 @@ fn update(ctx: &mut ScriptContext) {
                     use std::os::windows::process::CommandExt;
                     command.creation_flags(0x08000000);
                 }
+                // The detached-leader subprocess fixture deliberately exits
+                // before this child, so the outer owner's group cleanup is
+                // what the regression exercises.
+                #[allow(clippy::zombie_processes)]
                 let mut descendant_child = command.spawn().unwrap();
                 let start = Instant::now();
                 while !descendant.join("started").is_file() {
@@ -1743,6 +1861,9 @@ fn update(ctx: &mut ScriptContext) {
                     thread::sleep(Duration::from_millis(2));
                 }
                 fs::write(directory.join("started"), "tree started").unwrap();
+                if std::env::var_os("MODULE_ENGINE_CLEANUP_CHILD_DETACH_DESCENDANT").is_some() {
+                    return;
+                }
                 let _ = descendant_child.wait();
                 fs::write(directory.join("completed"), "unexpected tree survivor").unwrap();
                 return;
@@ -1802,7 +1923,7 @@ fn update(ctx: &mut ScriptContext) {
             "cancelled child continued executing after run_bounded returned"
         );
 
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             fs::remove_file(&started).unwrap();
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1832,6 +1953,34 @@ fn update(ctx: &mut ScriptContext) {
                 "cancelled descendant continued executing after its owner returned"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_successful_owner_exit_still_terminates_its_descendants_before_return() {
+        let artifacts =
+            TestArtifactGuard::new(&std::env::temp_dir(), "module-linux-owned-group").unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::cancelled_compilation_creates_no_candidate_and_owned_process_cancellation_waits_for_exit", "--nocapture"])
+            .env("MODULE_ENGINE_CLEANUP_CHILD", artifacts.path())
+            .env("MODULE_ENGINE_CLEANUP_CHILD_SPAWN_DESCENDANT", "1")
+            .env("MODULE_ENGINE_CLEANUP_CHILD_DETACH_DESCENDANT", "1");
+        let result = run_bounded(
+            command,
+            vec![],
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(artifacts.path().join("descendant/started").is_file());
+        thread::sleep(Duration::from_millis(550));
+        assert!(
+            !artifacts.path().join("descendant/completed").exists(),
+            "successful child left an owned descendant executing or holding its pipes"
+        );
     }
 
     #[cfg(windows)]
@@ -1888,6 +2037,15 @@ fn update(ctx: &mut ScriptContext) {
     }
 
     #[test]
+    fn windows_portable_manifest_never_overrides_native_linux_rustup_policy() {
+        // Pure policy coverage; these flags are not a Linux compilation/run.
+        assert!(portable_manifest_rustup(true, true));
+        assert!(!portable_manifest_rustup(true, false));
+        assert!(!portable_manifest_rustup(false, true));
+        assert!(!portable_manifest_rustup(false, false));
+    }
+
+    #[test]
     fn cache_selection_follows_project_then_sibling_then_portable_then_environment() {
         let artifacts =
             TestArtifactGuard::new(&std::env::temp_dir(), "module-script-cache").unwrap();
@@ -1896,22 +2054,32 @@ fn update(ctx: &mut ScriptContext) {
         fs::create_dir_all(project.join(".tools/cargo")).unwrap();
         let inherited = directory.join("other-cache");
         assert_eq!(
-            resolve_cargo_home(&project, Some(inherited.clone())),
+            resolve_cargo_home_for_platform(&project, Some(inherited.clone()), false),
             Some(project.join(".tools/cargo"))
         );
         fs::create_dir_all(directory.join("cargo-home")).unwrap();
         assert_eq!(
-            resolve_cargo_home(&project, Some(inherited.clone())),
+            resolve_cargo_home_for_platform(&project, Some(inherited.clone()), false),
             Some(directory.join("cargo-home"))
         );
         fs::create_dir_all(project.join(".work/cargo-home")).unwrap();
         assert_eq!(
-            resolve_cargo_home(&project, Some(inherited)),
+            resolve_cargo_home_for_platform(&project, Some(inherited.clone()), false),
             Some(project.join(".work/cargo-home"))
         );
         assert_eq!(
-            resolve_cargo_home(&project, None),
+            resolve_cargo_home_for_platform(&project, None, false),
             Some(project.join(".work/cargo-home"))
+        );
+        assert_eq!(
+            resolve_cargo_home_for_platform(&project, Some(inherited.clone()), true),
+            Some(inherited),
+            "explicit Linux Cargo home must not use any legacy Windows cache"
+        );
+        assert_eq!(
+            resolve_cargo_home_for_platform(&project, None, true),
+            Some(project.join(".work/cargo-home")),
+            "without an explicit Linux cache retain ordinary project discovery"
         );
         let shims = project.join(".tools/cargo/bin");
         fs::create_dir_all(&shims).unwrap();

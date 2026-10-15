@@ -515,6 +515,18 @@ fn copy_package(source: &Path, destination: &Path) -> Result<(), String> {
                 .open(target)
                 .map_err(|error| error.to_string())?;
             std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = input
+                    .metadata()
+                    .map_err(|error| error.to_string())?
+                    .permissions()
+                    .mode();
+                output
+                    .set_permissions(fs::Permissions::from_mode(mode & 0o777))
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
     Ok(())
@@ -524,7 +536,7 @@ fn native_cli(package: &Path, mode: &str, evidence: &Path, cwd: &Path) -> Result
     fs::create_dir(evidence).map_err(|error| error.to_string())?;
     let stdout = evidence.join("stdout.json");
     let stderr = evidence.join("stderr.txt");
-    let mut command = Command::new(package.join("Player.exe"));
+    let mut command = Command::new(package.join(module_engine_player::package::PLAYER_EXECUTABLE));
     command
         .arg(mode)
         .arg(package)
@@ -635,7 +647,9 @@ fn export_relocate(
             && !exported.join("Cargo.toml").exists()
             && !exported.join("Cargo.lock").exists()
             && !exported.join("engine-sdk.json").exists()
-            && !exported.join("ModuleEngine.exe").exists(),
+            && !exported
+                .join(crate::distribution::EDITOR_EXECUTABLE)
+                .exists(),
         "Standalone Player contains authoring/compiler/SDK artifacts",
     )?;
     let is_puzzle = name == "puzzle";
@@ -696,7 +710,7 @@ fn export_relocate(
         "Native executable fingerprint differs from Player manifest",
     )?;
     Ok(
-        json!({"exported":exported,"relocated":relocated,"copied_artifacts_sha256":before,"manifest_sha256":hash_file(&relocated.join("player.json"))?,"player_sha256":hash_file(&relocated.join("Player.exe"))?,"native_features":manifest.native_features,"assets":assets,"omissions":{"editor_executable":true,"sdk_sources_and_metadata":true,"rust_toolchain":true,"cargo_manifests":true,"unrelated_game_native_feature":true,"puzzle_audio":is_puzzle},"graphical":graphical,"headless":headless,"original_and_relocated_artifact_hashes_unchanged":true}),
+        json!({"exported":exported,"relocated":relocated,"copied_artifacts_sha256":before,"manifest_sha256":hash_file(&relocated.join("player.json"))?,"player_sha256":hash_file(&relocated.join(module_engine_player::package::PLAYER_EXECUTABLE))?,"native_features":manifest.native_features,"native_platform":manifest.native_platform,"assets":assets,"omissions":{"editor_executable":true,"sdk_sources_and_metadata":true,"rust_toolchain":true,"cargo_manifests":true,"unrelated_game_native_feature":true,"puzzle_audio":is_puzzle},"graphical":graphical,"headless":headless,"original_and_relocated_artifact_hashes_unchanged":true}),
     )
 }
 

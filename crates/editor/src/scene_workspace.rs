@@ -473,10 +473,14 @@ mod tests {
 
     fn editor() -> Editor {
         let root = crate::project::source_root();
-        let mut editor = Editor::new(
-            game_host::demo_document(),
-            root.join("unused-scene-editor-tests.json"),
-        );
+        let mut document = game_host::demo_document();
+        // Scene/Play ownership tests need a native host, not an audio endpoint.
+        // Keep the test content explicitly silent on unsupported platforms;
+        // production templates and audio capability checks retain their cues.
+        if !module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+            document.game.as_mut().unwrap().audio_cues.clear();
+        }
+        let mut editor = Editor::new(document, root.join("unused-scene-editor-tests.json"));
         editor.playing = false;
         editor.game_workbench.scene = "arena".into();
         editor.game_workbench.select(Some(1));

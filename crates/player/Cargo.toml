@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-ui = ["dep:eframe", "module-engine-arpg?/ui", "module-engine-project-puzzle?/ui"]
+ui = ["dep:eframe", "dep:winit", "module-engine-arpg?/ui", "module-engine-project-puzzle?/ui"]
 arpg = ["dep:module-engine-arpg"]
 puzzle = ["dep:module-engine-project-puzzle"]
 vulkan = ["dep:module-engine-vulkan"]
@@ -24,6 +24,10 @@ eframe = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 png.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, optional = true, features = ["wayland", "x11"] }
+winit = { version = "0.30.13", default-features = false, features = ["wayland", "wayland-dlopen", "x11"], optional = true }
 
 [dev-dependencies]
 module-engine-two-arenas = { path = "../example-two-arenas" }

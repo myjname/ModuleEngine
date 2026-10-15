@@ -284,7 +284,12 @@ fn run() -> Result<(), String> {
                 &package.compile_root()?,
                 &destination,
             )?;
-            println!("Standalone Player: {}", output.join("Player.exe").display());
+            println!(
+                "Standalone Player: {}",
+                output
+                    .join(module_engine_player::package::PLAYER_EXECUTABLE)
+                    .display()
+            );
             return Ok(());
         }
         Some("--seal-source-project") => {
@@ -537,7 +542,7 @@ fn run() -> Result<(), String> {
             Ok(Box::new(editor))
         }),
     )
-    .map_err(|e| e.to_string())
+    .map_err(module_engine_player::ui::gui_startup_error)
 }
 
 fn parse_profile(

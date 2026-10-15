@@ -18,6 +18,18 @@ struct WavConfig {
     cue_field: String,
 }
 
+/// The current WAV adapter uses WinMM. Installing its factory does not imply
+/// playback availability on every host platform; disabled services remain valid.
+pub const WAV_PLAYBACK_SUPPORTED: bool = cfg!(windows);
+
+fn ensure_native_playback() -> Result<(), String> {
+    if WAV_PLAYBACK_SUPPORTED {
+        Ok(())
+    } else {
+        Err("Native WAV playback is not implemented on this platform. Disable host services/audio cues or select an Engine profile without audio.wav; Linux GUI and silent/headless games remain supported.".into())
+    }
+}
+
 /// Install explicitly in an application profile which permits native audio.
 pub fn install_audio(registry: &mut HostServiceRegistry) -> Result<(), String> {
     registry.register(WAV_SERVICE_ID, |request, context| {
@@ -38,6 +50,9 @@ struct WavService {
 }
 impl WavService {
     fn new(config: WavConfig, context: &HostServiceContext<'_>) -> Result<Self, String> {
+        // Fail before asset IO rather than constructing a successful silent
+        // endpoint and later counting missing Linux playback as delivered sound.
+        ensure_native_playback()?;
         if config.event.trim().is_empty() || config.cue_field.trim().is_empty() {
             return Err("WAV service event and cue field must be nonempty".into());
         }
@@ -103,7 +118,7 @@ impl HostService for WavService {
                     endpoint()
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .play(self.endpoint_id, &self.retired, || native_play(path));
+                        .play(self.endpoint_id, &self.retired, || native_play(path))?;
                 }
             }
         }
@@ -125,7 +140,7 @@ impl HostService for WavService {
         self.enabled = false;
     }
     fn diagnostics(&self) -> Value {
-        json!({"played":self.played,"enabled":self.enabled,"cues":self.cues.len(),"platform_playback":cfg!(windows)})
+        json!({"played":self.played,"enabled":self.enabled,"cues":self.cues.len(),"platform_playback":WAV_PLAYBACK_SUPPORTED})
     }
 }
 impl Drop for WavService {
@@ -141,12 +156,18 @@ struct AudioEndpoint {
     owner: Option<u64>,
 }
 impl AudioEndpoint {
-    fn play(&mut self, owner: u64, retired: &AtomicBool, play: impl FnOnce()) {
+    fn play(
+        &mut self,
+        owner: u64,
+        retired: &AtomicBool,
+        play: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         if retired.load(Ordering::Acquire) {
-            return;
+            return Ok(());
         }
+        play()?;
         self.owner = Some(owner);
-        play();
+        Ok(())
     }
     fn stop(&mut self, owner: u64, stop: impl FnOnce()) {
         if self.owner == Some(owner) {
@@ -159,17 +180,24 @@ fn endpoint() -> &'static Mutex<AudioEndpoint> {
     static ENDPOINT: OnceLock<Mutex<AudioEndpoint>> = OnceLock::new();
     ENDPOINT.get_or_init(|| Mutex::new(AudioEndpoint::default()))
 }
-fn native_play(path: &[u16]) {
+fn native_play(path: &[u16]) -> Result<(), String> {
     #[cfg(windows)]
     unsafe {
-        PlaySoundW(
+        if PlaySoundW(
             path.as_ptr(),
             std::ptr::null_mut(),
             0x00020000 | 0x0001 | 0x0002,
-        );
+        ) == 0
+        {
+            return Err("WinMM could not start the configured WAV cue".into());
+        }
+        Ok(())
     }
     #[cfg(not(windows))]
-    let _ = path;
+    {
+        let _ = path;
+        ensure_native_playback()
+    }
 }
 fn native_stop() {
     #[cfg(windows)]
@@ -187,7 +215,9 @@ unsafe extern "system" {
 mod tests {
     use super::*;
     use module_engine_core::HostServiceRequest;
-    use std::{fs, path::Path};
+    #[cfg(windows)]
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn retired_owner_cannot_play_over_or_stop_successor_and_stop_is_idempotent() {
@@ -195,10 +225,25 @@ mod tests {
         let old_retired = AtomicBool::new(false);
         let new_retired = AtomicBool::new(false);
         let mut operations = vec![];
-        endpoint.play(1, &old_retired, || operations.push("old play"));
+        endpoint
+            .play(1, &old_retired, || {
+                operations.push("old play");
+                Ok(())
+            })
+            .unwrap();
         old_retired.store(true, Ordering::Release);
-        endpoint.play(2, &new_retired, || operations.push("new play"));
-        endpoint.play(1, &old_retired, || operations.push("retired late play"));
+        endpoint
+            .play(2, &new_retired, || {
+                operations.push("new play");
+                Ok(())
+            })
+            .unwrap();
+        endpoint
+            .play(1, &old_retired, || {
+                operations.push("retired late play");
+                Ok(())
+            })
+            .unwrap();
         endpoint.stop(1, || operations.push("old stop"));
         assert_eq!(endpoint.owner, Some(2));
         assert_eq!(operations, ["old play", "new play"]);
@@ -225,15 +270,15 @@ mod tests {
         let services = registry.build(&requests, &context, false).unwrap();
         assert!(services.is_empty());
         assert_eq!(services.diagnostics(), json!({}));
-        assert!(
-            registry
-                .build(&requests, &context, true)
-                .err()
-                .unwrap()
-                .contains("unknown asset")
-        );
+        let error = registry.build(&requests, &context, true).err().unwrap();
+        assert!(error.contains(if WAV_PLAYBACK_SUPPORTED {
+            "unknown asset"
+        } else {
+            "not implemented on this platform"
+        }));
     }
 
+    #[cfg(windows)]
     #[test]
     fn configured_event_mapping_resolves_manifest_and_counts_muted_cues_then_resets() {
         let root = std::env::temp_dir().join(format!(
@@ -293,5 +338,44 @@ mod tests {
         let temporary = std::env::temp_dir().canonicalize().unwrap();
         assert!(root.starts_with(&temporary) && root != temporary);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_native_audio_fails_before_asset_io_and_never_reports_playback() {
+        let mut registry = HostServiceRegistry::new();
+        install_audio(&mut registry).unwrap();
+        let request = HostServiceRequest {
+            id: WAV_SERVICE_ID.into(),
+            config: json!({"cues":{"hit":"missing.wav"},"event":"cue","cue_field":"name"}),
+            asset_references: Default::default(),
+        };
+        let context = HostServiceContext {
+            asset_root: Path::new("missing-root-must-not-be-opened"),
+            asset_paths: &BTreeMap::new(),
+            retired: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(registry.build(&[], &context, true).unwrap().is_empty());
+        assert!(
+            registry
+                .build(std::slice::from_ref(&request), &context, false)
+                .unwrap()
+                .is_empty()
+        );
+        let error = registry.build(&[request], &context, true).err().unwrap();
+        assert!(error.contains("Native WAV playback is not implemented"));
+        assert!(error.contains("Disable host services/audio cues"));
+        assert!(native_play(&[]).is_err());
+    }
+
+    #[test]
+    fn failing_native_endpoint_does_not_take_ownership() {
+        let mut endpoint = AudioEndpoint { owner: Some(1) };
+        assert!(
+            endpoint
+                .play(2, &AtomicBool::new(false), || Err("device error".into()))
+                .is_err()
+        );
+        assert_eq!(endpoint.owner, Some(1));
     }
 }

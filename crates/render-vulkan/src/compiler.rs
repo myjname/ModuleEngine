@@ -92,13 +92,136 @@ pub fn resource_root() -> PathBuf {
     }
     candidates
         .into_iter()
-        .find(|root| root.join("assets/gpu").is_dir() && root.join("tools/dxc/dxc.exe").is_file())
+        // Source-free Player packages need assets, not a compiler. Linux may
+        // use a native DXC from PATH instead of any bundled Windows tools.
+        .find(|root| root.join("assets/gpu").is_dir())
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
 }
 pub fn dxc_path() -> PathBuf {
-    std::env::var_os("MODULE_ENGINE_DXC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| resource_root().join("tools/dxc/dxc.exe"))
+    let root = resource_root();
+    resolve_dxc_at(
+        &root,
+        std::env::var_os("MODULE_ENGINE_DXC").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+    .unwrap_or_else(|_| bundled_dxc_candidates(&root).remove(0))
+}
+
+fn bundled_dxc_candidates(root: &Path) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        vec![root.join("tools/dxc/dxc.exe")]
+    } else {
+        vec![root.join("tools/dxc/bin/dxc"), root.join("tools/dxc/dxc")]
+    }
+}
+
+fn resolve_dxc_at(
+    root: &Path,
+    explicit: Option<&std::ffi::OsStr>,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    let on_path = |name: &std::ffi::OsStr| {
+        search_path
+            .into_iter()
+            .flat_map(std::env::split_paths)
+            .map(|directory| directory.join(name))
+            .find(|path| validate_native_dxc(path).is_ok())
+    };
+    if let Some(explicit) = explicit {
+        let path = PathBuf::from(explicit);
+        // Preserve Windows Command's existing bare-command override behavior.
+        #[cfg(windows)]
+        return Ok(path);
+        #[cfg(not(windows))]
+        {
+            let resolved = if path.components().count() == 1 && !path.is_file() {
+                on_path(explicit).unwrap_or(path)
+            } else {
+                path
+            };
+            validate_native_dxc(&resolved).map_err(|error| {
+                format!("MODULE_ENGINE_DXC {}: {error}; set it to a native executable, not Windows dxc.exe", resolved.display())
+            })?;
+            return Ok(resolved);
+        }
+    }
+    let candidates = bundled_dxc_candidates(root);
+    if let Some(path) = candidates
+        .iter()
+        .find(|path| validate_native_dxc(path).is_ok())
+    {
+        return Ok(path.clone());
+    }
+    if let Some(path) = on_path(std::ffi::OsStr::new(if cfg!(windows) {
+        "dxc.exe"
+    } else {
+        "dxc"
+    })) {
+        return Ok(path);
+    }
+    Err(format!(
+        "No native DXC compiler for {}. Restore {} with its native shared libraries, install DXC yourself on PATH, or set MODULE_ENGINE_DXC. Precompiled Player shaders do not require DXC.",
+        std::env::consts::OS,
+        candidates[0].display()
+    ))
+}
+
+fn validate_native_dxc(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::{io::Read, os::unix::fs::PermissionsExt};
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("native Linux DXC is not executable (check file permissions)".into());
+        }
+        let mut magic = [0_u8; 4];
+        std::fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut magic))
+            .map_err(|error| error.to_string())?;
+        if magic != *b"\x7fELF" {
+            return Err("expected a native Linux ELF DXC executable".into());
+        }
+    }
+    Ok(())
+}
+
+fn dxc_command(path: &Path) -> Result<Command, String> {
+    let mut command = Command::new(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // Never open a compiler console.
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Native DXC release archives use bin/ and lib/. Restrict loader changes
+        // to this child, preserving the caller's existing paths afterwards.
+        let libraries = path.parent().and_then(|parent| {
+            // Release layout: bin/dxc + lib/. Also support the documented
+            // flat fallback dxc + lib/, without accidentally selecting tools/lib.
+            let root = if parent.file_name() == Some(std::ffi::OsStr::new("bin")) {
+                parent.parent()?
+            } else {
+                parent
+            };
+            Some(root.join("lib"))
+        });
+        if let Some(libraries) = libraries.filter(|path| path.is_dir()) {
+            let mut paths = vec![libraries];
+            if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            command.env(
+                "LD_LIBRARY_PATH",
+                std::env::join_paths(paths)
+                    .map_err(|error| format!("DXC library path: {error}"))?,
+            );
+        }
+    }
+    Ok(command)
 }
 /// Fingerprint literal includes conservatively across all conditional branches.
 /// The same content walk is used before compiling and when selecting a pipeline,
@@ -277,11 +400,13 @@ pub fn compile_hlsl_at(
         output: output.clone(),
     };
     std::fs::write(&input, source).map_err(|e| e.to_string())?;
-    let dxc = std::env::var_os("MODULE_ENGINE_DXC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("tools/dxc/dxc.exe"));
+    let dxc = resolve_dxc_at(
+        root,
+        std::env::var_os("MODULE_ENGINE_DXC").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )?;
     DXC_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
-    let result = Command::new(&dxc)
+    let result = dxc_command(&dxc)?
         .args([
             "-spirv",
             "-fspv-target-env=vulkan1.3",
@@ -302,7 +427,7 @@ pub fn compile_hlsl_at(
         .output()
         .map_err(|e| {
             format!(
-                "DXC {}: {e}; restore pinned tools/dxc or set MODULE_ENGINE_DXC",
+                "Native DXC {}: {e}; restore this platform's tools/dxc and shared libraries or set MODULE_ENGINE_DXC",
                 dxc.display()
             )
         })?;
@@ -530,6 +655,91 @@ pub(crate) fn verify_shader(pass: &Pass, words: &[u32], vertex: bool) -> Result<
 #[cfg(test)]
 mod dependency_tests {
     use super::*;
+    #[test]
+    fn native_dxc_discovery_is_deterministic_and_missing_tool_is_actionable() {
+        let root = std::env::temp_dir().join(format!(
+            "module-engine-dxc-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let error = resolve_dxc_at(&root, None, None).unwrap_err();
+        assert!(error.contains("No native DXC compiler"));
+        assert!(error.contains("MODULE_ENGINE_DXC"));
+        assert!(error.contains("Precompiled Player shaders do not require DXC"));
+        let candidate = bundled_dxc_candidates(&root).remove(0);
+        assert_eq!(
+            candidate.file_name().unwrap(),
+            if cfg!(windows) { "dxc.exe" } else { "dxc" }
+        );
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        // Selection fixture only, not a compiler invocation or Linux runtime proof.
+        std::fs::write(&candidate, b"\x7fELFfixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(resolve_dxc_at(&root, None, None).unwrap(), candidate);
+        let explicit = root.join(if cfg!(windows) {
+            "explicit.exe"
+        } else {
+            "explicit"
+        });
+        std::fs::copy(&candidate, &explicit).unwrap();
+        assert_eq!(
+            resolve_dxc_at(&root, Some(explicit.as_os_str()), None).unwrap(),
+            explicit
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_dxc_rejects_pe_and_non_executable_files_and_uses_child_local_libraries() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("module-engine-dxc-linux-{}", std::process::id()));
+        let compiler = root.join("tools/dxc/bin/dxc");
+        std::fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("tools/dxc/lib")).unwrap();
+        std::fs::write(&compiler, b"MZWindowsExecutable").unwrap();
+        std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_native_dxc(&compiler).unwrap_err().contains("ELF"));
+        let error = resolve_dxc_at(&root, Some(compiler.as_os_str()), None).unwrap_err();
+        assert!(error.contains("MODULE_ENGINE_DXC"));
+        assert!(error.contains("not Windows dxc.exe"));
+        std::fs::write(&compiler, b"\x7fELFfixture").unwrap();
+        std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            validate_native_dxc(&compiler)
+                .unwrap_err()
+                .contains("not executable")
+        );
+        std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let flat_compiler = root.join("tools/dxc/dxc");
+        std::fs::copy(&compiler, &flat_compiler).unwrap();
+        for native_compiler in [&compiler, &flat_compiler] {
+            let command = dxc_command(native_compiler).unwrap();
+            let library_path = command
+                .get_envs()
+                .find(|(key, _)| *key == "LD_LIBRARY_PATH")
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(
+                std::env::split_paths(library_path).next().unwrap(),
+                root.join("tools/dxc/lib"),
+                "native library path for {}",
+                native_compiler.display()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn source_without_includes_needs_no_filesystem_root() {
         let absent = std::env::temp_dir().join("module-engine-no-root-needed-for-inline-hlsl");

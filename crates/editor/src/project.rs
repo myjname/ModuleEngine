@@ -277,7 +277,9 @@ pub fn export_with_package_root(
         "README.md",
         "LICENSE",
         "run.ps1",
+        "run.sh",
         "verify.ps1",
+        "verify.sh",
         "toolchain-manifest.json",
         "engine-sdk.json",
     ] {
@@ -338,6 +340,7 @@ fn complete_manifest(
         if relative.eq_ignore_ascii_case("project.json")
             || relative.eq_ignore_ascii_case(crate::distribution::MANIFEST_NAME)
             || relative.eq_ignore_ascii_case("ModuleEngine.exe")
+            || relative.eq_ignore_ascii_case("ModuleEngine")
             || matches!(
                 relative.split('/').next(),
                 Some(".work" | "target" | ".git" | ".sdk" | ".user" | ".tools")
@@ -420,6 +423,19 @@ fn copy_new(source: &Path, target: &Path) -> Result<(), String> {
         .open(target)
         .map_err(|e| format!("{}: {e}", target.display()))?;
     std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Preserve launchable tools/scripts without propagating setuid/setgid
+        // bits into a relocated source or Team package.
+        let mode = input
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode();
+        fs::set_permissions(target, fs::Permissions::from_mode(mode & 0o777))
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -592,9 +608,15 @@ pub fn export_team_with_package_root(
         return Err("Team export requires a new or empty directory".into());
     }
     fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    copy_new(ready_executable, &target.join("ModuleEngine.exe"))?;
+    copy_new(
+        ready_executable,
+        &target.join(crate::distribution::EDITOR_EXECUTABLE),
+    )?;
     for (native_key, native_player) in native_players {
-        let native_target = target.join("players").join(native_key).join("Player.exe");
+        let native_target = target
+            .join("players")
+            .join(native_key)
+            .join(module_engine_player::package::PLAYER_EXECUTABLE);
         fs::create_dir_all(native_target.parent().unwrap()).map_err(|e| e.to_string())?;
         copy_new(&native_player, &native_target)?;
     }
@@ -602,19 +624,38 @@ pub fn export_team_with_package_root(
         copy_new(&source.join(relative), &target.join(relative))?;
     }
     copy_tree(&source.join("scripts"), &target.join("scripts"))?;
-    for relative in ["assets", "tools/dxc"] {
-        copy_tree(&resource.join(relative), &target.join(relative))?;
+    copy_tree(&resource.join("assets"), &target.join("assets"))?;
+    if module_engine_core::connected_modules(&packaged).contains("render.vulkan") {
+        copy_tree(&resource.join("tools/dxc"), &target.join("tools/dxc"))?;
     }
     export_assets(asset_root, &assets, &target)?;
     export_assets(&resource, &headers, &target)?;
     create_custom_sdk(&source, &target)?;
+    #[cfg(windows)]
     fs::write(target.join("run.ps1"),
         "param([string]$Project='project.json')\n$ErrorActionPreference='Stop'\nPush-Location $PSScriptRoot\ntry { & (Join-Path $PSScriptRoot 'ModuleEngine.exe') $Project --profile team; if ($LASTEXITCODE -ne 0) { throw 'ModuleEngine failed' } } finally { Pop-Location }\n").map_err(|e|e.to_string())?;
+    #[cfg(windows)]
     fs::write(target.join("README.md"),
         "# ModuleEngine Team 0.4\n\nRun .\\ModuleEngine.exe from this directory, or use .\\run.ps1.\nEngine architecture and gameplay system order are frozen by .module-engine-package.json. Edit Project settings, authored scenes/templates, participating component values and scheduled gameplay Update Rust sources.\nRust Custom requires the pinned Rust/Cargo toolchain plus host MSVC/Windows SDK. Doctor: .\\scripts\\bootstrap.ps1 -Json. Explicit restoration: .\\scripts\\bootstrap.ps1 -Restore; tools/cache remain package-local. .sdk contains the pinned Core compilation SDK, not the native editor authoring workspace. Team never enables Engine from another source tree. This profile is an authoring policy, not a security sandbox.\n").map_err(|e|e.to_string())?;
+    #[cfg(unix)]
+    write_unix_team_launcher(&target)?;
     save_document_with_backup(&target.join("project.json"), &packaged)?;
     crate::distribution::write_team_manifest(&target, &packaged)?;
     Ok(target)
+}
+
+#[cfg(unix)]
+fn write_unix_team_launcher(target: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(target.join("run.sh"),
+        "#!/bin/sh\nset -eu\npackage_root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncd \"$package_root\"\nexec \"$package_root/ModuleEngine\" \"${1:-project.json}\" --profile team\n")
+        .map_err(|error| error.to_string())?;
+    fs::set_permissions(target.join("run.sh"), fs::Permissions::from_mode(0o755))
+        .map_err(|error| error.to_string())?;
+    fs::write(target.join("README.md"),
+        "# ModuleEngine Team 0.4\n\nRun `./run.sh` or `./ModuleEngine project.json --profile team`. Native binaries are specific to the OS and architecture that built this package. A working Vulkan driver and Wayland or X11 session are required for the Linux GUI.\n\nThe Engine architecture and gameplay system order are frozen by `.module-engine-package.json`. Project settings, authored scenes/templates, participating component values and scheduled gameplay Rust sources remain editable. Rust Custom requires the pinned native Rust/Cargo toolchain and native C/C++ linker. GPU shader editing requires the packaged Linux DXC (`tools/dxc/bin/dxc`, `tools/dxc/lib/libdxcompiler.so` and its system dependencies). No Windows SDK, PowerShell or Windows DXC is used by the Linux application. The `.sdk` directory contains the pinned Core compilation SDK; Team never enables Engine from another source tree. This profile is an authoring policy, not a security sandbox.\n")
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -809,6 +850,69 @@ mod tests {
         let target = path.canonicalize().unwrap();
         assert!(target.starts_with(&temp) && target != temp);
         fs::remove_dir_all(target).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn source_and_team_copy_preserves_unix_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("native executable modes");
+        let source = root.join("native tool");
+        let copied = root.join("copied tool");
+        fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o4755)).unwrap();
+        copy_new(&source, &copied).unwrap();
+        assert_eq!(
+            fs::metadata(&copied).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        assert!(
+            copy_new(&source, &copied).is_err(),
+            "never replace an existing target"
+        );
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_team_launcher_quotes_paths_and_uses_native_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("Team launcher with spaces");
+        write_unix_team_launcher(&root).unwrap();
+        let engine = root.join(crate::distribution::EDITOR_EXECUTABLE);
+        fs::write(&engine, "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\"\n").unwrap();
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        let unrelated = fixture("unrelated working folder");
+        let output = std::process::Command::new(root.join("run.sh"))
+            .arg("project with spaces.json")
+            .current_dir(&unrelated)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec![
+                root.to_str().unwrap(),
+                "project with spaces.json",
+                "--profile",
+                "team"
+            ]
+        );
+        assert_eq!(
+            fs::metadata(root.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert!(!root.join("ModuleEngine.exe").exists());
+        cleanup(&unrelated);
+        cleanup(&root);
     }
     #[test]
     fn workspace_version_check_is_conservative() {
@@ -1081,17 +1185,34 @@ mod tests {
             "crates/project-tools/Cargo.toml",
             "scripts/bootstrap.ps1",
             "toolchain-manifest.json",
+            "assets/gpu/custom_compute.hlsl",
+            "resources/shared.hlsli",
+            "resources/model.bin",
+        ] {
+            assert!(output.join(path).is_file(), "missing {path}");
+        }
+        #[cfg(windows)]
+        for path in [
             "tools/dxc/dxc.exe",
             "tools/dxc/dxcompiler.dll",
             "tools/dxc/dxil.dll",
             "tools/dxc/LICENSE-MS.txt",
             "tools/dxc/LICENSE-LLVM.txt",
             "tools/dxc/download.json",
-            "assets/gpu/custom_compute.hlsl",
-            "resources/shared.hlsli",
-            "resources/model.bin",
         ] {
             assert!(output.join(path).is_file(), "missing {path}");
+        }
+        #[cfg(target_os = "linux")]
+        for path in ["tools/dxc/bin/dxc", "tools/dxc/lib/libdxcompiler.so"] {
+            // Full source authoring is deliberately independent of installed
+            // tools. Preserve a native compiler when one was supplied.
+            let original = source_root().join(path);
+            if original.is_file() {
+                assert_eq!(
+                    hash_file(&original).unwrap(),
+                    hash_file(&output.join(path)).unwrap()
+                );
+            }
         }
         assert!(output.join(crate::distribution::MANIFEST_NAME).is_file());
         assert!(
@@ -1234,25 +1355,35 @@ mod tests {
      {
         let backend = module_engine_vulkan::resource_root();
         let mut arpg = crate::game_host::demo_document();
-        let with_cues = crate::game_package::team_feature_sets(&arpg, &backend).unwrap();
-        assert_eq!(with_cues.len(), 2);
-        assert!(
-            with_cues
-                .iter()
-                .all(|features| features.contains("arpg") && !features.contains("puzzle"))
-        );
-        assert_eq!(
-            with_cues
-                .iter()
-                .filter(|features| features.contains("audio"))
-                .count(),
-            1
-        );
+        let with_cues = crate::game_package::team_feature_sets(&arpg, &backend);
+        if module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+            let variants = with_cues.as_ref().unwrap();
+            assert_eq!(variants.len(), 2);
+            assert!(
+                variants
+                    .iter()
+                    .all(|features| features.contains("arpg") && !features.contains("puzzle"))
+            );
+            assert_eq!(
+                variants
+                    .iter()
+                    .filter(|features| features.contains("audio"))
+                    .count(),
+                1
+            );
+        } else {
+            assert!(with_cues.as_ref().unwrap_err().contains("audio.wav"));
+        }
         let modules = arpg.module_versions.clone();
         let lock = arpg.engine_lock.clone();
         arpg.game.as_mut().unwrap().audio_cues.clear();
         let without_cues = crate::game_package::team_feature_sets(&arpg, &backend).unwrap();
-        assert_eq!(without_cues, with_cues);
+        if module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+            assert_eq!(without_cues, with_cues.unwrap());
+        } else {
+            assert_eq!(without_cues.len(), 1);
+            assert!(!without_cues[0].contains("audio"));
+        }
         assert_eq!(arpg.module_versions, modules);
         assert_eq!(arpg.engine_lock, lock);
         let puzzle = crate::game_host::puzzle_document();

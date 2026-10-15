@@ -119,6 +119,8 @@ pub struct Editor {
     panel_registry: Vec<panes::ModulePanelRegistration>,
     active_object: Option<u64>,
     authored_object_ids: std::collections::BTreeSet<u64>,
+    #[cfg(test)]
+    test_personal_settings: module_engine_script::TestArtifactGuard,
     personal_dirty: bool,
     personal_save_time: f64,
     last_ui_frame: Option<u64>,
@@ -340,6 +342,12 @@ impl Editor {
             panel_registry: vec![],
             active_object: Some(1),
             authored_object_ids: std::collections::BTreeSet::new(),
+            #[cfg(test)]
+            test_personal_settings: module_engine_script::TestArtifactGuard::new(
+                &std::env::temp_dir().join("module-engine-editor-settings"),
+                "editor-personal-settings",
+            )
+            .expect("A test Editor requires an isolated personal settings directory"),
             personal_dirty: false,
             personal_save_time: 0.0,
             last_ui_frame: None,
@@ -2830,6 +2838,17 @@ fn graph_connection_error(
 
 #[cfg(test)]
 mod tests {
+    /// Native host/Play tests exercise silent fixtures on platforms without
+    /// a WAV endpoint. Production templates and audio contract tests retain
+    /// their authored requests and explicit unsupported-service diagnostics.
+    fn native_test_document() -> GraphDocument {
+        let mut document = crate::game_host::demo_document();
+        if !module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+            document.game.as_mut().unwrap().audio_cues.clear();
+        }
+        document
+    }
+
     use super::*;
     use module_engine_core::demo_document;
 
@@ -3637,7 +3656,7 @@ mod tests {
     fn rust_panel_prepares_hidden_game_recovers_bad_source_and_applies_to_game_backend() {
         let root = crate::project::source_root();
         let id = "game-controller";
-        let mut document = crate::game_host::demo_document();
+        let mut document = native_test_document();
         let good = document.custom_sources[id].clone();
         document
             .custom_sources
@@ -3940,10 +3959,7 @@ mod tests {
             time::{Duration, Instant},
         };
         let root = crate::project::source_root();
-        let mut editor = Editor::new(
-            crate::game_host::demo_document(),
-            root.join("unused-aa-status.json"),
-        );
+        let mut editor = Editor::new(native_test_document(), root.join("unused-aa-status.json"));
         editor.playing = false;
         editor.game_workbench.scene = "arena".into();
         let deadline = Instant::now() + Duration::from_secs(45);
@@ -4138,10 +4154,8 @@ mod tests {
         let mut reports = vec![];
         for nested in [false, true] {
             let root = crate::project::source_root();
-            let mut editor = Editor::new(
-                crate::game_host::demo_document(),
-                root.join("unused-graph-drag.json"),
-            );
+            let mut editor =
+                Editor::new(native_test_document(), root.join("unused-graph-drag.json"));
             editor.playing = false;
             editor.authoring_intent = true;
             editor.game_workbench.scene = "arena".into();

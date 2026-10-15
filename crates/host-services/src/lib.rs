@@ -10,7 +10,7 @@ use std::{
 #[cfg(feature = "audio")]
 mod audio;
 #[cfg(feature = "audio")]
-pub use audio::install_audio;
+pub use audio::{WAV_PLAYBACK_SUPPORTED, install_audio};
 
 pub const WAV_SERVICE_ID: &str = "audio.wav";
 

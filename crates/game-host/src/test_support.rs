@@ -142,7 +142,10 @@ pub(super) fn new_host_at(
             compile_root: compile_root.map(Path::to_path_buf),
             render: RenderMode::Graph,
             services,
-            services_enabled: true,
+            // These compatibility fixtures opt into native endpoint tests only
+            // where playback is implemented; Linux exercises the same host
+            // without claiming a silent stub is working audio.
+            services_enabled: module_engine_host_services::WAV_PLAYBACK_SUPPORTED,
         },
         None,
     )
@@ -227,6 +230,7 @@ pub(super) fn game_registry(
         overrides,
     )
 }
+#[cfg(windows)]
 pub(super) fn audio_played(host: &GameHost) -> u64 {
     host.services.diagnostics()[module_engine_host_services::WAV_SERVICE_ID]["played"]
         .as_u64()

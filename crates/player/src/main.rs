@@ -22,8 +22,9 @@ fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => {
+            let executable = module_engine_player::package::PLAYER_EXECUTABLE;
             println!(
-                "ModuleEngine standalone Player\n  Player.exe\n  Player.exe --verify-package <package-root> [output-folder]\n  Player.exe --headless-check <package-root> [output-folder]\n  Player.exe --benchmark <output-folder>"
+                "ModuleEngine standalone Player\n  ./{executable}\n  ./{executable} --verify-package <package-root> [output-folder]\n  ./{executable} --headless-check <package-root> [output-folder]\n  ./{executable} --benchmark <output-folder>"
             );
             Ok(())
         }

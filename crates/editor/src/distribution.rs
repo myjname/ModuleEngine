@@ -11,6 +11,11 @@ use std::{
 };
 
 pub const MANIFEST_NAME: &str = ".module-engine-package.json";
+pub const EDITOR_EXECUTABLE: &str = if cfg!(windows) {
+    "ModuleEngine.exe"
+} else {
+    "ModuleEngine"
+};
 pub const PROJECT_BINDING_NAME: &str = ".module-engine-project.json";
 pub fn project_binding_path(project_path: &Path) -> Result<PathBuf, String> {
     let name = project_path
@@ -76,6 +81,8 @@ fn project_binding(project_path: &Path) -> Result<Option<ProjectEngineBinding>, 
     if binding.schema_version != 1 || binding.engine_version != env!("CARGO_PKG_VERSION") {
         return Err("Project engine binding version does not match executable".into());
     }
+    #[cfg(target_os = "linux")]
+    let binding = resolve_foreign_binding_root(binding, windows_binding_in_wsl)?;
     if !binding.package_root.is_absolute() {
         return Err("Project engine binding requires an absolute installed package path".into());
     }
@@ -96,6 +103,78 @@ fn project_binding(project_path: &Path) -> Result<Option<ProjectEngineBinding>, 
         return Err("Team project binding lacks its frozen engine blueprint".into());
     }
     Ok(Some(binding))
+}
+
+/// Recognize only a drive-absolute Windows path. Canonical Windows bindings may
+/// carry the verbatim drive prefix; UNC shares and device namespaces do not get
+/// translated into a different engine installation.
+#[cfg(any(target_os = "linux", test))]
+fn windows_drive_absolute(path: &Path) -> Option<&str> {
+    let text = path.to_str()?;
+    let drive = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let bytes = drive.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+    .then_some(drive)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolve_foreign_binding_root(
+    mut binding: ProjectEngineBinding,
+    convert: impl FnOnce(&str) -> Result<PathBuf, String>,
+) -> Result<ProjectEngineBinding, String> {
+    if let Some(windows) = windows_drive_absolute(&binding.package_root) {
+        let converted = convert(windows)?;
+        if !converted.is_absolute() {
+            return Err("Windows project engine binding conversion returned a non-absolute Linux path; the binding was not ignored or rewritten".into());
+        }
+        binding.package_root = converted;
+    }
+    Ok(binding)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_wslpath_output(output: &[u8]) -> Result<PathBuf, String> {
+    let text = std::str::from_utf8(output)
+        .map_err(|error| format!("WSL path conversion returned invalid UTF-8: {error}"))?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    if text.is_empty() || text.contains(['\n', '\r', '\0']) || !Path::new(text).is_absolute() {
+        return Err("WSL path conversion did not return one absolute Linux path".into());
+    }
+    Ok(PathBuf::from(text))
+}
+
+#[cfg(target_os = "linux")]
+fn windows_binding_in_wsl(windows: &str) -> Result<PathBuf, String> {
+    let fail = |detail: String| {
+        format!(
+            "Windows project engine binding '{windows}' cannot be resolved on this Linux host: {detail}. WSL must expose the same installed package through /usr/bin/wslpath; otherwise use an explicit native Linux package binding. The binding was not ignored or rewritten"
+        )
+    };
+    let tool = Path::new("/usr/bin/wslpath");
+    if !tool.is_file() {
+        return Err(fail("/usr/bin/wslpath is unavailable".into()));
+    }
+    let output = std::process::Command::new(tool)
+        .args(["-u", windows])
+        .output()
+        .map_err(|error| fail(format!("wslpath launch failed: {error}")))?;
+    if !output.status.success() {
+        return Err(fail(format!(
+            "wslpath failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let path = parse_wslpath_output(&output.stdout).map_err(fail)?;
+    path.canonicalize().map_err(|error| {
+        fail(format!(
+            "converted installed package '{}' is unavailable: {error}",
+            path.display()
+        ))
+    })
 }
 #[derive(Clone, Debug, Default)]
 pub struct SourceStatus {
@@ -193,7 +272,7 @@ pub fn detect(
     if let Some(m) = &manifest {
         check_manifest_version(m)?;
         if m.profile == DistributionProfile::Team {
-            verify_team_backend(&package_root, m)?;
+            verify_team_backend(&package_root, m, document)?;
         }
     }
     let profile = if manifest
@@ -533,7 +612,9 @@ pub fn write_full_manifest(
         "LICENSE",
         "toolchain-manifest.json",
         "run.ps1",
+        "run.sh",
         "verify.ps1",
+        "verify.sh",
     ] {
         if root.join(name).is_file() {
             backend_files.insert(name.into(), hash_file(&root.join(name))?);
@@ -595,7 +676,7 @@ pub fn write_team_manifest(
             backend_files.insert(path.clone(), hash_file(&root.join(path))?);
         }
     }
-    for name in ["ModuleEngine.exe", "toolchain-manifest.json"] {
+    for name in [EDITOR_EXECUTABLE, "toolchain-manifest.json"] {
         if !root.join(name).is_file() {
             return Err(format!("Team package missing {name}"));
         }
@@ -624,7 +705,7 @@ pub fn write_team_manifest(
         }
     }
     verify_sdk(root, &manifest)?;
-    verify_team_backend(root, &manifest)?;
+    verify_team_backend(root, &manifest, document)?;
     save_manifest(root, &manifest)?;
     Ok(manifest)
 }
@@ -921,16 +1002,30 @@ fn verify_sdk(root: &Path, m: &PackageManifest) -> Result<(), String> {
     }
     Ok(())
 }
-fn verify_team_backend(root: &Path, m: &PackageManifest) -> Result<(), String> {
-    for file in [
-        "ModuleEngine.exe",
-        "toolchain-manifest.json",
-        "tools/dxc/dxc.exe",
-        "tools/dxc/dxcompiler.dll",
-        "tools/dxc/dxil.dll",
-        "tools/dxc/LICENSE-MS.txt",
-        "tools/dxc/LICENSE-LLVM.txt",
-    ] {
+fn team_backend_requirements(document: &GraphDocument) -> Vec<&'static str> {
+    let mut files = vec![EDITOR_EXECUTABLE, "toolchain-manifest.json"];
+    if module_engine_core::connected_modules(document).contains("render.vulkan") {
+        if cfg!(windows) {
+            files.extend([
+                "tools/dxc/dxc.exe",
+                "tools/dxc/dxcompiler.dll",
+                "tools/dxc/dxil.dll",
+                "tools/dxc/LICENSE-MS.txt",
+                "tools/dxc/LICENSE-LLVM.txt",
+            ]);
+        } else if cfg!(target_os = "linux") {
+            files.extend(["tools/dxc/bin/dxc", "tools/dxc/lib/libdxcompiler.so"]);
+        }
+    }
+    files
+}
+
+fn verify_team_backend(
+    root: &Path,
+    m: &PackageManifest,
+    document: &GraphDocument,
+) -> Result<(), String> {
+    for file in team_backend_requirements(document) {
         if !m.backend_files.contains_key(file) {
             return Err(format!("Team backend inventory missing {file}"));
         }
@@ -978,6 +1073,115 @@ mod delivery_tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::copy(original.join(relative), p).unwrap();
         }
+    }
+    #[test]
+    fn windows_binding_recognition_accepts_only_absolute_drive_paths() {
+        for (path, expected) in [
+            (r"E:\ModuleEngine", r"E:\ModuleEngine"),
+            ("e:/Module Engine", "e:/Module Engine"),
+            (r"\\?\E:\ModuleEngine", r"E:\ModuleEngine"),
+        ] {
+            assert_eq!(windows_drive_absolute(Path::new(path)), Some(expected));
+        }
+        for path in [
+            "E:relative",
+            "/mnt/e/ModuleEngine",
+            r"\\server\share",
+            r"\\?\UNC\server\share",
+            r"\\.\PhysicalDrive0",
+            r"\\?\E:relative",
+            "ab:/ModuleEngine",
+            "1:/ModuleEngine",
+            "é:/ModuleEngine",
+        ] {
+            assert_eq!(windows_drive_absolute(Path::new(path)), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn foreign_binding_resolution_changes_only_the_in_memory_locator() {
+        let binding = ProjectEngineBinding {
+            schema_version: 1,
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            package_root: PathBuf::from(r"\\?\E:\ModuleEngine"),
+            profile: DistributionProfile::Team,
+            blueprint_hash: Some("a".repeat(64)),
+            gameplay_source_ids: BTreeSet::from(["game-controller".into(), "user-update".into()]),
+        };
+        let original = serde_json::to_vec(&binding).unwrap();
+        let expected = std::env::temp_dir().join("same installed engine");
+        let resolved = resolve_foreign_binding_root(binding.clone(), |windows| {
+            assert_eq!(windows, r"E:\ModuleEngine");
+            Ok(expected.clone())
+        })
+        .unwrap();
+        assert_eq!(resolved.package_root, expected);
+        let mut before = serde_json::to_value(&binding).unwrap();
+        let mut after = serde_json::to_value(&resolved).unwrap();
+        before.as_object_mut().unwrap().remove("package_root");
+        after.as_object_mut().unwrap().remove("package_root");
+        assert_eq!(
+            before, after,
+            "profile, SDK/version and frozen policy must not change"
+        );
+        assert_eq!(serde_json::to_vec(&binding).unwrap(), original);
+        assert!(
+            resolve_foreign_binding_root(binding.clone(), |_| Ok(PathBuf::from("relative")))
+                .unwrap_err()
+                .contains("non-absolute")
+        );
+        assert_eq!(
+            resolve_foreign_binding_root(binding.clone(), |_| Err("converter unavailable".into()))
+                .unwrap_err(),
+            "converter unavailable"
+        );
+        assert_eq!(serde_json::to_vec(&binding).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wslpath_output_requires_one_absolute_utf8_path() {
+        assert_eq!(
+            parse_wslpath_output(b"/mnt/e/Module Engine\n").unwrap(),
+            PathBuf::from("/mnt/e/Module Engine")
+        );
+        assert_eq!(
+            parse_wslpath_output(b"/mnt/e/trailing space \r\n").unwrap(),
+            PathBuf::from("/mnt/e/trailing space ")
+        );
+        for invalid in [
+            b"".as_slice(),
+            b"relative\n".as_slice(),
+            b"E:\\ModuleEngine\n".as_slice(),
+            b"/one\n/two\n".as_slice(),
+            b"/one\n\n".as_slice(),
+            b"/one\0\n".as_slice(),
+            b"/one\xff\n".as_slice(),
+        ] {
+            assert!(parse_wslpath_output(invalid).is_err(), "{invalid:?}");
+        }
+    }
+    #[test]
+    fn team_backend_uses_native_tools_only_for_a_connected_vulkan_renderer() {
+        let mut doc = crate::host::settings_demo_document(WorldKind::Ecs);
+        let required = team_backend_requirements(&doc);
+        assert!(required.contains(&EDITOR_EXECUTABLE));
+        #[cfg(windows)]
+        assert!(required.contains(&"tools/dxc/dxc.exe"));
+        #[cfg(target_os = "linux")]
+        {
+            assert!(required.contains(&"tools/dxc/bin/dxc"));
+            assert!(required.contains(&"tools/dxc/lib/libdxcompiler.so"));
+            assert!(
+                !required
+                    .iter()
+                    .any(|file| file.ends_with(".exe") || file.ends_with(".dll"))
+            );
+        }
+        // A neutral/headless Team does not acquire an unused compiler service.
+        doc.root.edges.clear();
+        let required = team_backend_requirements(&doc);
+        assert_eq!(required, vec![EDITOR_EXECUTABLE, "toolchain-manifest.json"]);
     }
     #[test]
     fn full_sources_are_complete_versioned_and_editable_independent_of_tools() {
@@ -1143,15 +1347,7 @@ mod delivery_tests {
         let doc = crate::host::settings_demo_document(WorldKind::Objects);
         let gameplay = gameplay_sources(&doc);
         let mut backend_files = BTreeMap::new();
-        let mandatory = [
-            "ModuleEngine.exe",
-            "toolchain-manifest.json",
-            "tools/dxc/dxc.exe",
-            "tools/dxc/dxcompiler.dll",
-            "tools/dxc/dxil.dll",
-            "tools/dxc/LICENSE-MS.txt",
-            "tools/dxc/LICENSE-LLVM.txt",
-        ];
+        let mandatory = team_backend_requirements(&doc);
         for relative in mandatory.into_iter().chain(
             NATIVE_FILES
                 .iter()

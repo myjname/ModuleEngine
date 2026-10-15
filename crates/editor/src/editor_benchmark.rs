@@ -135,7 +135,7 @@ pub fn run(
             }))
         }),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(module_engine_player::ui::gui_startup_error)?;
     returned
         .lock()
         .map_err(|_| "Native Editor benchmark result lock poisoned".to_string())?

@@ -226,6 +226,7 @@ pub(crate) struct CandidateArtifacts {
     pub(crate) directory: PathBuf,
     parent: PathBuf,
     target: PathBuf,
+    executable_directory: Option<PathBuf>,
     package: String,
     ready: AtomicBool,
     keep_diagnostics: AtomicBool,
@@ -250,6 +251,7 @@ impl CandidateArtifacts {
             directory,
             parent,
             target,
+            executable_directory: None,
             package: package.into(),
             ready: AtomicBool::new(false),
             keep_diagnostics: AtomicBool::new(false),
@@ -257,7 +259,33 @@ impl CandidateArtifacts {
             _fixture: fixture,
         };
         this.mark("building");
+        #[cfg(target_os = "linux")]
+        let mut this = this;
+        #[cfg(target_os = "linux")]
+        if !this.target.starts_with(&this.directory) {
+            // Sources may live on a mounted host filesystem. Running their
+            // copied ELF there adds startup I/O to the first bounded exchange.
+            // Keep a unique runnable copy beside the selected native Cargo
+            // artifacts, while preserving source/lock/log provenance in work.
+            let parent = this.target.join("executables");
+            fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+            let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+            if !parent.starts_with(&this.target) || parent == this.target {
+                return Err("Worker executable cache escapes the selected target directory".into());
+            }
+            let directory = parent.join(package);
+            // Never adopt or clean up an existing candidate's runnable copy.
+            fs::create_dir(&directory).map_err(|error| error.to_string())?;
+            this.executable_directory = Some(directory);
+        }
         Ok(this)
+    }
+
+    pub(crate) fn executable_path(&self) -> PathBuf {
+        self.executable_directory
+            .as_ref()
+            .unwrap_or(&self.directory)
+            .join(format!("worker{}", std::env::consts::EXE_SUFFIX))
     }
 
     fn mark(&self, state: &str) {
@@ -321,6 +349,7 @@ impl Drop for CandidateArtifacts {
         let directory = self.directory.clone();
         let parent = self.parent.clone();
         let target = self.target.clone();
+        let executable_directory = self.executable_directory.clone();
         let package = self.package.clone();
         let ready = self.ready.load(Ordering::Acquire);
         let keep = self.keep_diagnostics.load(Ordering::Acquire);
@@ -330,6 +359,7 @@ impl Drop for CandidateArtifacts {
                 directory,
                 parent,
                 target,
+                executable_directory,
                 package,
                 ready: AtomicBool::new(ready),
                 keep_diagnostics: AtomicBool::new(keep),
@@ -344,6 +374,11 @@ impl Drop for CandidateArtifacts {
 impl CandidateArtifacts {
     fn cleanup(&self) {
         self.trim_build_outputs();
+        if let Some(directory) = &self.executable_directory {
+            // Only the fresh unique leaf is owned. The shared dependency cache
+            // and other active/caller-created executable directories survive.
+            remove_or_defer(directory.clone(), directory.parent().unwrap().to_path_buf());
+        }
         if self.ready.load(Ordering::Acquire) && !self.keep_diagnostics.load(Ordering::Acquire) {
             if self._fixture.is_some() {
                 // The test's outcome, known only when its guard drops, decides
@@ -380,10 +415,9 @@ fn trim_package(target: &Path, package: &str) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name
-                .strip_prefix(package)
-                .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('-'))
-            {
+            if name.strip_prefix(package).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with('.') || rest.starts_with('-')
+            }) {
                 remove_or_defer(entry.path(), folder.clone());
             }
         }
@@ -626,6 +660,93 @@ mod tests {
             "failure becomes eligible only after the final lease closes"
         );
         assert!(guard.reproducible_target("../outside").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_runnable_copy_survives_shared_build_trimming_until_the_final_owner_retires() {
+        let guard = TestArtifactGuard::new(&std::env::temp_dir(), "module-runnable").unwrap();
+        let work = guard.path().join("source-work");
+        let target = guard.path().join("shared-target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(target.join("debug/deps/serde-retained.rlib"), "dependency").unwrap();
+        fs::write(
+            target.join("debug/module_engine_worker_runnable"),
+            "Cargo native ELF",
+        )
+        .unwrap();
+        fs::write(
+            target.join("debug/module_engine_worker_runnable_other"),
+            "prefix neighbor",
+        )
+        .unwrap();
+        fs::create_dir_all(target.join("executables/unowned")).unwrap();
+        fs::write(target.join("executables/unowned/keep"), "unowned sibling").unwrap();
+        let candidate = Arc::new(
+            CandidateArtifacts::create(
+                &work,
+                &target,
+                "module_engine_worker_runnable",
+                fixture_for(&work),
+            )
+            .unwrap(),
+        );
+        let executable = candidate.executable_path();
+        assert!(executable.starts_with(target.join("executables")));
+        assert!(!executable.starts_with(&candidate.directory));
+        fs::write(&executable, "unique runnable copy").unwrap();
+        fs::write(candidate.directory.join("source.rs"), "source provenance").unwrap();
+        let source = candidate.directory.join("source.rs");
+        candidate.ready();
+        candidate.failed("accepted program retains its runtime fault diagnostics");
+        candidate.trim_build_outputs();
+        assert!(!target.join("debug/module_engine_worker_runnable").exists());
+        assert!(
+            target
+                .join("debug/module_engine_worker_runnable_other")
+                .is_file()
+        );
+        assert!(
+            executable.is_file(),
+            "build trimming removed an accepted runnable copy"
+        );
+        let active = candidate.clone();
+        drop(candidate);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(
+            executable.is_file(),
+            "another active lease still owns the executable"
+        );
+        drop(active);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(!executable.parent().unwrap().exists());
+        assert_eq!(fs::read_to_string(source).unwrap(), "source provenance");
+        assert!(target.join("debug/deps/serde-retained.rlib").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("executables/unowned/keep")).unwrap(),
+            "unowned sibling"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_nested_build_target_keeps_its_runnable_copy_outside_trimmed_build_outputs() {
+        let guard = TestArtifactGuard::new(&std::env::temp_dir(), "module-nested-run").unwrap();
+        let work = guard.path().join("sources");
+        let name = "module_engine_worker_nested";
+        let target = work.join(name).join("target");
+        let candidate =
+            CandidateArtifacts::create(&work, &target, name, fixture_for(&work)).unwrap();
+        let executable = candidate.executable_path();
+        assert_eq!(executable.parent(), Some(candidate.directory.as_path()));
+        fs::write(&executable, "nested candidate runnable copy").unwrap();
+        fs::write(target.join("rebuildable"), "build output").unwrap();
+        candidate.trim_build_outputs();
+        assert!(!target.exists());
+        assert!(executable.is_file());
+        drop(candidate);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(!executable.exists());
     }
 
     #[cfg(windows)]

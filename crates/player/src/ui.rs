@@ -18,62 +18,209 @@ const BENCHMARK_FRAMES: usize = 120;
 const FRAME_BUDGET_MS: f64 = 1000. / 60.;
 
 /// Shared window presentation policy for Editor, Player, and native diagnostics.
-/// Windows uses DX12 for GUI presentation; the selected game renderer is separate.
-/// `MODULE_ENGINE_GUI_BACKEND=glow|wgpu` permits a controlled comparison.
-/// Legacy `EFRAME_SCREENSHOT_TO` implicitly selects Glow only when no backend is
-/// explicitly requested, because eframe's two-frame capture does not support wgpu.
+/// The GUI uses WGPU/DX12 on Windows and WGPU/Vulkan on Linux. This does not
+/// select the game's renderer. Glow requires an explicit diagnostic request.
+/// `MODULE_ENGINE_WINDOW_SYSTEM=auto|wayland|x11` selects Linux window creation
+/// independently from the GPU backend.
 pub fn native_options(viewport: egui::ViewportBuilder) -> Result<eframe::NativeOptions, String> {
-    let requested = match std::env::var("MODULE_ENGINE_GUI_BACKEND") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(format!("MODULE_ENGINE_GUI_BACKEND: {error}")),
-    };
-    let legacy_capture = std::env::var_os("EFRAME_SCREENSHOT_TO").is_some();
-    let options = native_options_for(
-        viewport,
-        requested.as_deref(),
-        legacy_capture,
-        cfg!(target_os = "windows"),
-    )?;
-    eprintln!(
-        "ModuleEngine GUI: requested renderer={:?}, legacy screenshot fallback={}",
-        options.renderer,
-        legacy_capture && requested.is_none()
-    );
-    Ok(options)
+    let policy = requested_gui_policy()?;
+    if policy.platform == GuiPlatform::Linux {
+        validate_linux_display(
+            policy.window_system,
+            env_present("WAYLAND_DISPLAY") || env_present("WAYLAND_SOCKET"),
+            env_present("DISPLAY"),
+        )?;
+    }
+    eprintln!("ModuleEngine GUI requested: {policy:?}; game renderer is independent");
+    Ok(native_options_for(viewport, policy))
 }
 
-fn native_options_for(
-    viewport: egui::ViewportBuilder,
-    requested: Option<&str>,
-    legacy_capture: bool,
-    windows: bool,
-) -> Result<eframe::NativeOptions, String> {
-    let renderer = match requested {
-        Some("glow") => eframe::Renderer::Glow,
-        Some("wgpu") if legacy_capture => {
-            return Err(
-                "EFRAME_SCREENSHOT_TO requires Glow; unset it for the wgpu GUI backend. The Editor supports MODULE_ENGINE_UI_SCREENSHOT_TO for native screenshots."
-                    .into(),
-            );
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuiPlatform {
+    Windows,
+    Linux,
+    Other,
+}
+impl GuiPlatform {
+    fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Windows
+        } else if cfg!(target_os = "linux") {
+            Self::Linux
+        } else {
+            Self::Other
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowSystem {
+    Auto,
+    Wayland,
+    X11,
+}
+impl WindowSystem {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Wayland => "wayland",
+            Self::X11 => "x11",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GuiPolicy {
+    platform: GuiPlatform,
+    renderer: eframe::Renderer,
+    window_system: WindowSystem,
+}
+impl GuiPolicy {
+    fn gpu_backend(self) -> &'static str {
+        match (self.renderer, self.platform) {
+            (eframe::Renderer::Glow, _) => "OpenGL",
+            (eframe::Renderer::Wgpu, GuiPlatform::Windows) => "DX12",
+            (eframe::Renderer::Wgpu, GuiPlatform::Linux) => "Vulkan",
+            (eframe::Renderer::Wgpu, GuiPlatform::Other) => "platform default",
+        }
+    }
+}
+
+fn env_option(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name}: {error}")),
+    }
+}
+
+fn env_present(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn requested_gui_policy() -> Result<GuiPolicy, String> {
+    gui_policy_for(
+        GuiPlatform::current(),
+        env_option("MODULE_ENGINE_GUI_BACKEND")?.as_deref(),
+        env_option("MODULE_ENGINE_WINDOW_SYSTEM")?.as_deref(),
+        std::env::var_os("EFRAME_SCREENSHOT_TO").is_some(),
+    )
+}
+
+fn gui_policy_for(
+    platform: GuiPlatform,
+    requested_renderer: Option<&str>,
+    requested_window_system: Option<&str>,
+    legacy_capture: bool,
+) -> Result<GuiPolicy, String> {
+    let renderer = match requested_renderer {
+        Some("glow") => eframe::Renderer::Glow,
         Some("wgpu") => eframe::Renderer::Wgpu,
         Some(_) => return Err("MODULE_ENGINE_GUI_BACKEND must be glow or wgpu".into()),
-        None if legacy_capture || !windows => eframe::Renderer::Glow,
+        None if platform == GuiPlatform::Other => eframe::Renderer::Glow,
         None => eframe::Renderer::Wgpu,
     };
+    if legacy_capture && renderer == eframe::Renderer::Wgpu {
+        return Err(
+            "EFRAME_SCREENSHOT_TO only supports explicit MODULE_ENGINE_GUI_BACKEND=glow diagnostics; it does not change the normal WGPU backend. Unset EFRAME_SCREENSHOT_TO and use the Editor's MODULE_ENGINE_UI_SCREENSHOT_TO for a native WGPU screenshot."
+                .into(),
+        );
+    }
+    let window_system = match requested_window_system {
+        None | Some("auto") => WindowSystem::Auto,
+        Some("wayland") => WindowSystem::Wayland,
+        Some("x11") => WindowSystem::X11,
+        Some(_) => {
+            return Err("MODULE_ENGINE_WINDOW_SYSTEM must be auto, wayland, or x11".into());
+        }
+    };
+    if platform != GuiPlatform::Linux && window_system != WindowSystem::Auto {
+        return Err("MODULE_ENGINE_WINDOW_SYSTEM=wayland|x11 is only supported on Linux".into());
+    }
+    Ok(GuiPolicy {
+        platform,
+        renderer,
+        window_system,
+    })
+}
+
+fn validate_linux_display(
+    window_system: WindowSystem,
+    has_wayland: bool,
+    has_x11: bool,
+) -> Result<(), String> {
+    let available = match window_system {
+        WindowSystem::Auto => has_wayland || has_x11,
+        WindowSystem::Wayland => has_wayland,
+        WindowSystem::X11 => has_x11,
+    };
+    if available {
+        return Ok(());
+    }
+    Err(format!(
+        "Linux GUI window-system={} is unavailable: Wayland requires WAYLAND_DISPLAY or WAYLAND_SOCKET; X11 requires DISPLAY. Run in a graphical session (headless package checks do not require a window).",
+        window_system.name()
+    ))
+}
+
+fn native_options_for(viewport: egui::ViewportBuilder, policy: GuiPolicy) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport,
-        renderer,
+        renderer: policy.renderer,
         ..Default::default()
     };
-    if windows
-        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
-    {
-        // Keep the GUI's presentation path independent from offscreen Vulkan.
-        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Restrict GUI presentation to the verified platform path. WGPU_BACKEND
+        // must not silently override Windows DX12 or request DX12 on Linux.
+        match policy.platform {
+            GuiPlatform::Windows => {
+                setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+            }
+            GuiPlatform::Linux => {
+                setup.instance_descriptor.backends = eframe::wgpu::Backends::VULKAN;
+            }
+            GuiPlatform::Other => {}
+        }
     }
-    Ok(options)
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::wayland::EventLoopBuilderExtWayland;
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        options.event_loop_builder = Some(Box::new(move |builder| match policy.window_system {
+            WindowSystem::Auto => {}
+            WindowSystem::Wayland => {
+                builder.with_wayland();
+            }
+            WindowSystem::X11 => {
+                builder.with_x11();
+            }
+        }));
+    }
+    options
+}
+
+/// Preserve the original framework error with the requested platform policy.
+/// This adds useful context when no surface, display server, or GPU is available;
+/// it never retries through a different presentation backend.
+pub fn gui_startup_error(error: impl std::fmt::Display) -> String {
+    let request = requested_gui_policy()
+        .map(|policy| {
+            format!(
+                "renderer={:?}, GPU={}, window-system={}",
+                policy.renderer,
+                policy.gpu_backend(),
+                policy.window_system.name()
+            )
+        })
+        .unwrap_or_else(|error| format!("invalid GUI configuration: {error}"));
+    let hint = if cfg!(target_os = "linux") {
+        "Check the selected Wayland/X11 session and a native Vulkan-capable GPU driver/ICD."
+    } else if cfg!(target_os = "windows") {
+        "The default Windows GUI requires a DX12 adapter and driver."
+    } else {
+        "Check the native graphics adapter and window system."
+    };
+    format!("ModuleEngine GUI initialization failed ({request}): {error}. {hint}")
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -81,13 +228,18 @@ pub struct GuiGraphicsInfo {
     pub renderer: &'static str,
     pub backend: Option<String>,
     pub adapter_name: Option<String>,
+    pub window_system: Option<String>,
+    pub requested_renderer: Option<String>,
+    pub requested_gpu_backend: Option<String>,
+    pub requested_window_system: Option<String>,
     pub gl_vendor: Option<String>,
     pub gl_renderer: Option<String>,
 }
 
-/// Record the initialized adapter, rather than inferring it from requested options.
+/// Record the initialized adapter and display handle separately from requests.
 pub fn report_graphics(cc: &eframe::CreationContext<'_>) -> GuiGraphicsInfo {
-    let graphics = if let Some(state) = &cc.wgpu_render_state {
+    use eframe::wgpu::rwh::{HasDisplayHandle, RawDisplayHandle};
+    let mut graphics = if let Some(state) = &cc.wgpu_render_state {
         let adapter = state.adapter.get_info();
         GuiGraphicsInfo {
             renderer: "Wgpu",
@@ -105,6 +257,7 @@ pub fn report_graphics(cc: &eframe::CreationContext<'_>) -> GuiGraphicsInfo {
             adapter_name: Some(renderer.clone()),
             gl_vendor: Some(vendor),
             gl_renderer: Some(renderer),
+            ..Default::default()
         }
     } else {
         GuiGraphicsInfo {
@@ -112,6 +265,21 @@ pub fn report_graphics(cc: &eframe::CreationContext<'_>) -> GuiGraphicsInfo {
             ..Default::default()
         }
     };
+    graphics.window_system = cc.display_handle().ok().map(|handle| {
+        match handle.as_raw() {
+            RawDisplayHandle::Windows(_) => "Windows",
+            RawDisplayHandle::Wayland(_) => "Wayland",
+            RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_) => "X11",
+            RawDisplayHandle::AppKit(_) => "AppKit",
+            _ => "Other",
+        }
+        .into()
+    });
+    if let Ok(policy) = requested_gui_policy() {
+        graphics.requested_renderer = Some(format!("{:?}", policy.renderer));
+        graphics.requested_gpu_backend = Some(policy.gpu_backend().into());
+        graphics.requested_window_system = Some(policy.window_system.name().into());
+    }
     eprintln!("ModuleEngine GUI initialized: {graphics:?}");
     graphics
 }
@@ -155,7 +323,7 @@ pub fn run_host(mut host: GameHost) -> Result<(), String> {
             Ok(Box::new(player))
         }),
     )
-    .map_err(|e| e.to_string())
+    .map_err(gui_startup_error)
 }
 
 /// Measure the shipping Player path including framework texture upload and
@@ -227,7 +395,7 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
             )))
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(gui_startup_error)?;
     returned
         .lock()
         .map_err(|_| "Benchmark result lock poisoned".to_string())?
@@ -865,63 +1033,97 @@ pub fn configure_style(ctx: &egui::Context) {
 mod native_options_tests {
     use super::*;
 
-    fn options(
-        requested: Option<&str>,
-        legacy_capture: bool,
-        windows: bool,
-    ) -> Result<eframe::NativeOptions, String> {
-        native_options_for(
-            egui::ViewportBuilder::default(),
-            requested,
-            legacy_capture,
-            windows,
-        )
+    fn options(platform: GuiPlatform) -> eframe::NativeOptions {
+        let policy = gui_policy_for(platform, None, None, false).unwrap();
+        native_options_for(egui::ViewportBuilder::default(), policy)
+    }
+
+    fn backends(options: eframe::NativeOptions) -> eframe::wgpu::Backends {
+        assert_eq!(options.renderer, eframe::Renderer::Wgpu);
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = options.wgpu_options.wgpu_setup else {
+            panic!("Native GUI must create its own independent wgpu setup");
+        };
+        setup.instance_descriptor.backends
     }
 
     #[test]
-    fn windows_gui_uses_dx12_and_other_platforms_retain_glow() {
-        let windows = options(None, false, true).unwrap();
-        assert_eq!(windows.renderer, eframe::Renderer::Wgpu);
-        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = windows.wgpu_options.wgpu_setup else {
-            panic!("Native GUI must create its own independent wgpu setup");
-        };
+    fn windows_policy_keeps_dx12_and_linux_policy_uses_only_vulkan() {
+        // These are pure cross-platform policy checks, not Linux execution.
         assert_eq!(
-            setup.instance_descriptor.backends,
+            backends(options(GuiPlatform::Windows)),
             eframe::wgpu::Backends::DX12
         );
         assert_eq!(
-            options(None, false, false).unwrap().renderer,
-            eframe::Renderer::Glow
+            backends(options(GuiPlatform::Linux)),
+            eframe::wgpu::Backends::VULKAN
         );
     }
 
     #[test]
-    fn legacy_capture_falls_back_only_when_backend_is_unspecified() {
-        assert_eq!(
-            options(None, true, true).unwrap().renderer,
-            eframe::Renderer::Glow
-        );
-        assert_eq!(
-            options(Some("glow"), true, true).unwrap().renderer,
-            eframe::Renderer::Glow
-        );
-        let error = options(Some("wgpu"), true, true).err().unwrap();
-        assert!(error.contains("EFRAME_SCREENSHOT_TO"));
-        assert!(error.contains("MODULE_ENGINE_UI_SCREENSHOT_TO"));
+    fn legacy_capture_cannot_silently_change_the_default_backend() {
+        for platform in [GuiPlatform::Windows, GuiPlatform::Linux] {
+            for renderer in [None, Some("wgpu")] {
+                let error = gui_policy_for(platform, renderer, None, true).unwrap_err();
+                assert!(error.contains("EFRAME_SCREENSHOT_TO"));
+                assert!(error.contains("MODULE_ENGINE_UI_SCREENSHOT_TO"));
+            }
+            let policy = gui_policy_for(platform, Some("glow"), None, true).unwrap();
+            assert_eq!(policy.renderer, eframe::Renderer::Glow);
+            assert_eq!(policy.gpu_backend(), "OpenGL");
+        }
     }
 
     #[test]
-    fn explicit_backend_selection_is_validated() {
-        assert_eq!(
-            options(Some("glow"), false, true).unwrap().renderer,
-            eframe::Renderer::Glow
-        );
-        assert_eq!(
-            options(Some("wgpu"), false, false).unwrap().renderer,
-            eframe::Renderer::Wgpu
-        );
-        assert!(options(Some("invalid"), false, true).is_err());
-        assert!(options(Some(""), false, true).is_err());
+    fn window_system_selection_is_independent_of_the_gpu_policy() {
+        for (name, window_system) in [
+            ("auto", WindowSystem::Auto),
+            ("wayland", WindowSystem::Wayland),
+            ("x11", WindowSystem::X11),
+        ] {
+            let policy = gui_policy_for(GuiPlatform::Linux, None, Some(name), false).unwrap();
+            assert_eq!(policy.window_system, window_system);
+            assert_eq!(policy.renderer, eframe::Renderer::Wgpu);
+            assert_eq!(policy.gpu_backend(), "Vulkan");
+            let glow = gui_policy_for(GuiPlatform::Linux, Some("glow"), Some(name), false).unwrap();
+            assert_eq!(glow.window_system, window_system);
+            assert_eq!(glow.gpu_backend(), "OpenGL");
+        }
+        assert!(gui_policy_for(GuiPlatform::Windows, None, Some("wayland"), false).is_err());
+        assert!(gui_policy_for(GuiPlatform::Other, None, Some("x11"), false).is_err());
+    }
+
+    #[test]
+    fn missing_linux_display_is_rejected_before_gpu_startup() {
+        assert!(validate_linux_display(WindowSystem::Auto, false, false).is_err());
+        let error = validate_linux_display(WindowSystem::Wayland, false, true).unwrap_err();
+        assert!(error.contains("window-system=wayland"));
+        assert!(error.contains("WAYLAND_DISPLAY"));
+        assert!(validate_linux_display(WindowSystem::X11, true, false).is_err());
+        assert!(validate_linux_display(WindowSystem::Auto, true, false).is_ok());
+        assert!(validate_linux_display(WindowSystem::Auto, false, true).is_ok());
+        assert!(validate_linux_display(WindowSystem::Wayland, true, false).is_ok());
+        assert!(validate_linux_display(WindowSystem::X11, false, true).is_ok());
+    }
+
+    #[test]
+    fn invalid_renderer_and_window_system_values_are_not_ignored() {
+        for renderer in ["invalid", "", "dx12", "vulkan"] {
+            assert!(gui_policy_for(GuiPlatform::Windows, Some(renderer), None, false).is_err());
+        }
+        for window_system in ["invalid", "", "dx12", "vulkan"] {
+            assert!(gui_policy_for(GuiPlatform::Linux, None, Some(window_system), false).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_linux_options_install_the_winit_window_system_hook() {
+        for requested in ["auto", "wayland", "x11"] {
+            let policy = gui_policy_for(GuiPlatform::Linux, None, Some(requested), false).unwrap();
+            let options = native_options_for(egui::ViewportBuilder::default(), policy);
+            assert!(options.event_loop_builder.is_some());
+            assert_eq!(backends(options), eframe::wgpu::Backends::VULKAN);
+        }
     }
 }
 

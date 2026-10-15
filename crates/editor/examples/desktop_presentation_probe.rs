@@ -3,7 +3,9 @@
 //! This deliberately creates no project, GameHost, Vulkan device, or layout.
 //! `MODULE_ENGINE_PROBE_SECONDS` sets the lifetime (default: 10 seconds).
 //! `MODULE_ENGINE_PROBE_VSYNC=0` changes only the OpenGL swap interval.
-//! `MODULE_ENGINE_GUI_BACKEND=glow|wgpu` selects the shared presentation backend.
+//! `MODULE_ENGINE_GUI_BACKEND=glow|wgpu` selects the shared presentation renderer.
+//! Linux uses WGPU/Vulkan; `MODULE_ENGINE_WINDOW_SYSTEM=auto|wayland|x11`
+//! independently selects the display server. Windows keeps WGPU/DX12.
 
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -66,5 +68,5 @@ fn main() -> Result<(), String> {
             }))
         }),
     )
-    .map_err(|error| error.to_string())
+    .map_err(module_engine_player::ui::gui_startup_error)
 }

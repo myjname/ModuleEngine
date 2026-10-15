@@ -3631,6 +3631,17 @@ fn connect_pins(
 }
 #[cfg(test)]
 mod tests {
+    /// Native host/Play tests exercise silent fixtures on platforms without
+    /// a WAV endpoint. Production templates and audio contract tests retain
+    /// their authored requests and explicit unsupported-service diagnostics.
+    fn native_test_document() -> GraphDocument {
+        let mut document = crate::game_host::demo_document();
+        if !module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+            document.game.as_mut().unwrap().audio_cues.clear();
+        }
+        document
+    }
+
     #[test]
     #[ignore = "latency acceptance: run explicitly without competing Rust/GPU setup"]
     fn interactive_game_ui_keeps_drawing_and_applying_rust_during_slow_ticks() {
@@ -3694,7 +3705,7 @@ mod tests {
             "// module-engine-state: {{\"schema\":\"async.ui\",\"initial\":{{\"ticks\":0}}}}\nfn update(ctx: &mut ScriptContext) {{ std::fs::write({:?}, b\"tick\").unwrap(); std::thread::sleep(std::time::Duration::from_millis(80)); ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap()+1); }}",
             marker.to_string_lossy()
         );
-        let mut document = game_host::demo_document();
+        let mut document = native_test_document();
         document.custom_sources.insert(id.into(), source.clone());
         let kind = game_host::world_kind(&document).unwrap();
         let ctx = egui::Context::default();
@@ -3828,7 +3839,7 @@ mod tests {
     }
     #[test]
     fn pending_worker_document_coalesces_to_one_latest_candidate() {
-        let document = game_host::demo_document();
+        let document = native_test_document();
         let mut workbench = GameWorkbench::default();
         workbench.next_worker_request(WorkerRequest::Document(Arc::new(document.clone())));
         let mut latest = document.clone();
@@ -3854,7 +3865,7 @@ mod tests {
     #[test]
     fn interactive_undo_reverts_failed_gpu_target_and_paused_restart_bypasses_input_backlog() {
         let root = crate::project::source_root();
-        let document = game_host::demo_document();
+        let document = native_test_document();
         let mut workbench = GameWorkbench::default();
         workbench
             .ensure(&document, &root, Some(&root), WorldKind::Ecs)
@@ -4222,7 +4233,7 @@ mod tests {
         // This fixture exercises the legacy Object route explicitly. New game
         // templates now default to ECS; stale-candidate checks compare the
         // selected world with the prepared context.
-        let mut document = game_host::demo_document();
+        let mut document = native_test_document();
         document
             .root
             .nodes
@@ -4385,7 +4396,7 @@ mod tests {
             .unwrap();
         let mut workbench = GameWorkbench::default();
         workbench.set_engine_context(Some(&root), &root);
-        let mut document = game_host::demo_document();
+        let mut document = native_test_document();
         workbench
             .ensure(&document, &root, Some(&root), WorldKind::Ecs)
             .unwrap();
@@ -5097,7 +5108,7 @@ mod tests {
         let first = "// module-engine-state: {\"schema\":\"ui.a\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap() + 1); }";
         let second = first.replace("ui.a", "ui.b");
         let third = first.replace("ui.a", "ui.c");
-        let mut document = game_host::demo_document();
+        let mut document = native_test_document();
         document.custom_sources.insert(id.into(), first.into());
         let mut workbench = GameWorkbench::default();
         workbench
@@ -5496,7 +5507,7 @@ mod tests {
         .unwrap();
         let id = "game-controller";
         let source = "// module-engine-state: {\"schema\":\"owned.ui/1\",\"initial\":{\"ticks\":0}}\nfn update(ctx: &mut ScriptContext) { ctx.state[\"ticks\"] = serde_json::json!(ctx.state[\"ticks\"].as_u64().unwrap() + 1); }";
-        let mut document = game_host::demo_document();
+        let mut document = native_test_document();
         document.custom_sources.insert(id.into(), source.into());
         let composition = crate::host::composition_at(&root).unwrap();
         let world_node = composition

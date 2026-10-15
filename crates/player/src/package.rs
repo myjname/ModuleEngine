@@ -13,6 +13,24 @@ use std::{
     path::Path,
 };
 
+/// Native packages contain binaries for the machine that built them. A Linux
+/// export must never look for a Windows executable merely because its source
+/// project was authored there.
+pub const PLAYER_EXECUTABLE: &str = if cfg!(windows) {
+    "Player.exe"
+} else {
+    "Player"
+};
+pub const CARGO_PLAYER_EXECUTABLE: &str = if cfg!(windows) {
+    "module-engine-player.exe"
+} else {
+    "module-engine-player"
+};
+
+pub fn native_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerManifest {
@@ -22,6 +40,10 @@ pub struct PlayerManifest {
     pub files: BTreeMap<String, String>,
     pub native_features: Vec<String>,
     pub sdk_data_api_fingerprint: String,
+    /// Older schema-2 Windows packages omitted this field. New packages make
+    /// their native platform explicit without changing authored project data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_platform: Option<String>,
 }
 
 fn read_manifest(root: &Path) -> Result<PlayerManifest, String> {
@@ -34,6 +56,14 @@ fn read_manifest(root: &Path) -> Result<PlayerManifest, String> {
     }
     if manifest.sdk_data_api_fingerprint != SDK_DATA_API_FINGERPRINT {
         return Err("Player package SDK data/API fingerprint differs from this build".into());
+    }
+    if let Some(platform) = &manifest.native_platform
+        && platform != &native_platform()
+    {
+        return Err(format!(
+            "Player native platform differs: package {platform}, running {}. Export the package on its target platform.",
+            native_platform()
+        ));
     }
     let features: BTreeSet<_> = manifest.native_features.iter().cloned().collect();
     if features.len() != manifest.native_features.len()
@@ -321,6 +351,7 @@ mod tests {
                     files: BTreeMap::new(),
                     native_features: crate::compiled_features().into_iter().collect(),
                     sdk_data_api_fingerprint: SDK_DATA_API_FINGERPRINT.into(),
+                    native_platform: Some(native_platform()),
                 },
             };
             fixture.write_document();
@@ -448,6 +479,50 @@ mod tests {
             fs::read(fixture.root.join("project.json")).unwrap(),
             b"corrupted authored bytes"
         );
+    }
+
+    #[test]
+    fn native_platform_mismatch_is_rejected_without_touching_authored_data() {
+        let mut fixture = Fixture::new();
+        let before = fs::read(fixture.root.join("project.json")).unwrap();
+        fixture.manifest.native_platform = Some("foreign-os-foreign-arch".into());
+        fixture.write_manifest();
+        for error in [
+            validate_package(&fixture.root).unwrap_err(),
+            validate_package_metadata(&fixture.root).unwrap_err(),
+        ] {
+            assert!(error.contains("native platform differs"), "{error}");
+        }
+        assert_eq!(fs::read(fixture.root.join("project.json")).unwrap(), before);
+        assert!(!fixture.root.join(".work").exists());
+        // Existing schema-2 packages retain their compatibility: an omitted
+        // optional field is never synthesized into player.json on a read.
+        fixture.manifest.native_platform = None;
+        fixture.write_manifest();
+        let manifest_before = fs::read(fixture.root.join("player.json")).unwrap();
+        assert_eq!(validate_package(&fixture.root).unwrap(), fixture.document);
+        assert_eq!(
+            fs::read(fixture.root.join("player.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn native_executable_names_match_the_compiled_target() {
+        assert_eq!(
+            PLAYER_EXECUTABLE,
+            format!("Player{}", std::env::consts::EXE_SUFFIX)
+        );
+        assert_eq!(
+            CARGO_PLAYER_EXECUTABLE,
+            format!("module-engine-player{}", std::env::consts::EXE_SUFFIX)
+        );
+        assert_eq!(
+            native_platform(),
+            format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+        );
+        #[cfg(target_os = "linux")]
+        assert!(!PLAYER_EXECUTABLE.ends_with(".exe"));
     }
 
     #[test]

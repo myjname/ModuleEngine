@@ -121,6 +121,7 @@ fn wait_snapshot(
     mut ready: impl FnMut(&GameSnapshot) -> bool,
 ) -> Result<Arc<GameSnapshot>, String> {
     let deadline = Instant::now() + WAIT;
+    let mut latest = None;
     loop {
         if let Some(snapshot) = poll(worker, timings) {
             if ready(&snapshot) {
@@ -132,8 +133,28 @@ fn wait_snapshot(
                     snapshot.fault
                 ));
             }
+            latest = Some(snapshot);
         }
-        ensure(Instant::now() < deadline, format!("Timed out: {reason}"))?;
+        if Instant::now() >= deadline {
+            let status = latest.as_ref().map(|snapshot| {
+                json!({
+                    "actor_id": snapshot.actor_id,
+                    "epoch": snapshot.epoch,
+                    "tick": snapshot.state.tick,
+                    "playing": snapshot.playing,
+                    "fault": snapshot.fault.as_deref().map(|fault| fault.chars().take(4096).collect::<String>()),
+                    "input_ack": snapshot.input_ack,
+                    "cancelled_input_ack": snapshot.cancelled_input_ack,
+                    "last_step_ms": snapshot.last_step_ms,
+                    "last_render_ms": snapshot.last_render_ms,
+                    "result_count": snapshot.results.len(),
+                })
+            });
+            return Err(format!(
+                "Timed out: {reason}; worker_alive={}; latest_snapshot={status:?}",
+                worker.is_alive()
+            ));
+        }
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -348,7 +369,7 @@ fn lifecycle(backend: &Path, compile: &Path, output: &Path) -> Result<Value, Str
     let accepted = wait_snapshot(
         &mut worker,
         &mut timings,
-        "ordered input edges committed",
+        &format!("ordered input edges committed (expected_ack={last_edge}, sequences={edges:?})"),
         |snapshot| snapshot.input_ack >= last_edge,
     )?;
     ensure(

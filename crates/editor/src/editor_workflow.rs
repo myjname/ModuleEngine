@@ -174,10 +174,21 @@ impl Workflow {
 
 impl Editor {
     pub(super) fn initialize_workflow(&mut self) {
-        self.workflow.recent_path = self
-            .distribution
-            .as_ref()
-            .map(|d| d.package_root.join(".user/editor-recent-projects.json"));
+        #[cfg(test)]
+        {
+            self.workflow.recent_path = Some(
+                self.test_personal_settings
+                    .path()
+                    .join(".user/editor-recent-projects.json"),
+            );
+        }
+        #[cfg(not(test))]
+        {
+            self.workflow.recent_path = self
+                .distribution
+                .as_ref()
+                .map(|d| d.package_root.join(".user/editor-recent-projects.json"));
+        }
         if let Some(path) = &self.workflow.recent_path
             && let Ok(bytes) = fs::read(path)
             && let Ok(mut recent) = serde_json::from_slice::<RecentProjects>(&bytes)
@@ -190,9 +201,7 @@ impl Editor {
     }
     fn remember_project(&mut self) {
         self.workflow.recent.remember(Path::new(&self.path));
-        if !cfg!(test)
-            && let Some(path) = &self.workflow.recent_path
-        {
+        if let Some(path) = &self.workflow.recent_path {
             let result = path
                 .parent()
                 .ok_or("Recent projects have no parent".to_string())
@@ -1586,6 +1595,54 @@ mod workflow_tests {
                 let _ = fs::remove_dir_all(root);
             }
         }
+    }
+
+    #[test]
+    fn recent_projects_save_load_is_isolated_per_test_editor() {
+        let (fixture, mut first) = Fixture::new(false);
+        let first_path = first.workflow.recent_path.clone().unwrap();
+        assert!(first_path.starts_with(first.test_personal_settings.path()));
+        assert_ne!(
+            first_path,
+            first
+                .distribution
+                .as_ref()
+                .unwrap()
+                .package_root
+                .join(".user/editor-recent-projects.json")
+        );
+        let additional_project = fixture.root.join("another-project.json");
+        fs::write(&additional_project, b"{}").unwrap();
+        first.path = additional_project.to_string_lossy().into_owned();
+        first.remember_project();
+        let written: RecentProjects =
+            serde_json::from_slice(&fs::read(&first_path).unwrap()).unwrap();
+        assert_eq!(written.version, 1);
+        assert_eq!(written.paths[0], additional_project.canonicalize().unwrap());
+        first.workflow.recent = RecentProjects::default();
+        first.path = fixture.path.to_string_lossy().into_owned();
+        first.initialize_workflow();
+        assert!(
+            first
+                .workflow
+                .recent
+                .paths
+                .contains(&additional_project.canonicalize().unwrap())
+        );
+        assert_eq!(
+            first.workflow.recent.paths[0],
+            fixture.path.canonicalize().unwrap()
+        );
+        let mut second = Editor::new(first.document.clone(), fixture.path.clone());
+        let second_path = second.workflow.recent_path.clone().unwrap();
+        assert_ne!(first_path, second_path);
+        assert!(second_path.starts_with(second.test_personal_settings.path()));
+        second.initialize_workflow();
+        assert_eq!(
+            second.workflow.recent.paths,
+            vec![fixture.path.canonicalize().unwrap()]
+        );
+        assert!(first_path.is_file() && second_path.is_file());
     }
 
     fn edit_name(editor: &mut Editor) {

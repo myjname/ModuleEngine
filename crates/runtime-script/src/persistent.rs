@@ -519,16 +519,7 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = super::OwnedChild::new(
-            command
-                .spawn()
-                .map_err(|e| ScriptError::Worker(e.to_string()))?,
-        )?;
+        let mut child = super::OwnedChild::spawn(&mut command)?;
         let mut stdin = child.stdin.take().unwrap();
         let (input, requests) = mpsc::sync_channel::<Vec<u8>>(1);
         thread::spawn(move || {

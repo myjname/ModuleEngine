@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "purpose": "Explicit Linux tool restoration metadata; no automatic installation",
+  "platform": "linux-x86_64",
+  "rust": {
+    "version": "1.99.0",
+    "target": "x86_64-unknown-linux-gnu",
+    "components": [
+      "rustfmt",
+      "clippy"
+    ],
+    "channel_manifest_url": "https://static.rust-lang.org/dist/channel-rust-1.99.0.toml",
+    "channel_manifest_sha256": "ce6dddc886364f8d786514771212cebe9b731ba82d6b859951c6b0ccc516b6a2"
+  },
+  "rustup": {
+    "url": "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init",
+    "sha256": "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71",
+    "installation": "Use separate native Linux CARGO_HOME/RUSTUP_HOME; --no-modify-path; do not reuse Windows portable tools."
+  },
+  "dxc": {
+    "release": "v1.9.2609",
+    "url": "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/linux_dxc_2026_09_28.x86_x64.tar.gz",
+    "sha256": "96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1",
+    "relative_executable": "tools/dxc/bin/dxc",
+    "files": {
+      "tools/dxc/bin/dxv-3.7": "33778294d67143d9f81526f4759c66d5a67a95ea9873448ef3595650a643cbd3",
+      "tools/dxc/bin/dxc": "3dfc856b76291ffc7e45e21fd37ab80e85b34101de76a03253df6608785c92a0",
+      "tools/dxc/lib/libdxcompiler.so": "d40e4a7b3b46490313f4bfd08101946483a673831b3ea65c93d746de1c2f9216",
+      "tools/dxc/lib/libdxil.so": "730b31420ea0c38f711c1eb581613bfd0797c53371a55f721838b29d10881c8c",
+      "tools/dxc/bin/dxv": "33778294d67143d9f81526f4759c66d5a67a95ea9873448ef3595650a643cbd3"
+    }
+  },
+  "native_requirements": [
+    "Native C/C++ linker and pkg-config",
+    "Wayland or X11 session, xkbcommon and its X11 bridge for X11",
+    "Vulkan loader and ICD supporting the actual render feature requirements",
+    "System shared libraries required by this DXC and native build"
+  ]
+}

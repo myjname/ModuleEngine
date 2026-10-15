@@ -10,6 +10,9 @@
 /tools/dxc/*.exe
 /tools/dxc/*.dll
 /tools/dxc/download.json
+/tools/dxc/bin/
+/tools/dxc/lib/
+/tools/dxc/download-linux.json
 *.tmp
 *.tmp-*
 *.backup-*

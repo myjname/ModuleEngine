@@ -11,6 +11,7 @@ use std::{
 };
 
 pub use module_engine_player::package::PlayerManifest;
+use module_engine_player::package::{CARGO_PLAYER_EXECUTABLE, PLAYER_EXECUTABLE, native_platform};
 
 pub(crate) fn selected_features(
     document: &GraphDocument,
@@ -84,14 +85,18 @@ pub fn build_native_player(document: &GraphDocument, backend: &Path) -> Result<P
     build_native_player_variant(document, backend, selected_features(document, backend)?)
 }
 /// Team data may add/remove cues without changing its frozen audio system.
-/// Deliver both exact native variants so either permitted project can export.
+/// Deliver both exact native variants on hosts that implement audio. A host
+/// without playback may package only projects that explicitly request no audio.
 pub fn team_feature_sets(
     document: &GraphDocument,
     backend: &Path,
 ) -> Result<Vec<BTreeSet<String>>, String> {
     let base = selected_features(document, backend)?;
+    require_native_service_support(&base)?;
     let activity = crate::host::composition_at(backend)?.activity(document)?;
-    if activity.modules.contains("game.audio") {
+    if activity.modules.contains("game.audio")
+        && module_engine_host_services::WAV_PLAYBACK_SUPPORTED
+    {
         let mut without = base.clone();
         without.remove("audio");
         let mut with = base;
@@ -121,6 +126,7 @@ fn build_native_player_variant(
     backend: &Path,
     features: BTreeSet<String>,
 ) -> Result<PathBuf, String> {
+    require_native_service_support(&features)?;
     let subset = module_engine_player::composition_for_features(backend, &features)?;
     module_engine_project::EngineProfile::from_document(document)?.validate_with_sdk(
         document,
@@ -128,14 +134,14 @@ fn build_native_player_variant(
         Some(&module_engine_core::SdkIdentity::current()),
     )?;
     let key = features.iter().cloned().collect::<Vec<_>>().join("-");
-    let prebuilt = backend.join("players").join(&key).join("Player.exe");
+    let prebuilt = backend.join("players").join(&key).join(PLAYER_EXECUTABLE);
     if prebuilt.is_file() {
         let manifest: crate::distribution::PackageManifest = serde_json::from_slice(
             &fs::read(backend.join(crate::distribution::MANIFEST_NAME))
                 .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-        let relative = format!("players/{key}/Player.exe");
+        let relative = format!("players/{key}/{PLAYER_EXECUTABLE}");
         if manifest.backend_files.get(&relative) != Some(&hash_file(&prebuilt)?) {
             return Err("Prebuilt Player is not covered by the checked backend inventory".into());
         }
@@ -146,7 +152,8 @@ fn build_native_player_variant(
             "This installation lacks the '{key}' native Player; rebuild the Team package from Full sources"
         ));
     }
-    fs::create_dir_all(backend.join(".work/player-build")).map_err(|e| e.to_string())?;
+    let build_root = native_cache_root(backend, "player-build");
+    fs::create_dir_all(&build_root).map_err(|e| e.to_string())?;
     // One shared dependency target; serialize build + immutable snapshot creation
     // across exporting editor/CLI processes. Windows closes this lease on crash.
     #[cfg(windows)]
@@ -160,7 +167,7 @@ fn build_native_player_variant(
                 .create(true)
                 .truncate(false)
                 .share_mode(0)
-                .open(backend.join(".work/player-build/build.lock"))
+                .open(build_root.join("build.lock"))
             {
                 Ok(file) => break file,
                 Err(error)
@@ -173,8 +180,32 @@ fn build_native_player_variant(
             }
         }
     };
-    let compiler = ScriptCompiler::new(backend.into(), backend.join(".work/player-build"));
-    let target = backend.join(".work/player-native-target");
+    // Cargo serializes compilation, but its lock ends before we hash/copy the
+    // result. Hold our own lease through immutable snapshot publication too.
+    #[cfg(unix)]
+    let _build_lease = {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(build_root.join("build.lock"))
+            .map_err(|error| format!("Native Player build lease: {error}"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => break file,
+                Err(fs::TryLockError::WouldBlock)
+                    if started.elapsed() < std::time::Duration::from_secs(600) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(error) => return Err(format!("Native Player build lease: {error}")),
+            }
+        }
+    };
+    let compiler = ScriptCompiler::new(backend.into(), build_root.clone());
+    let target = native_cache_root(backend, "player-native-target");
     let mut command = std::process::Command::new(
         compiler
             .cargo_binary
@@ -220,24 +251,23 @@ fn build_native_player_variant(
         .output()
         .map_err(|e| format!("Player Cargo launch: {e}"))?;
     let log = String::from_utf8_lossy(&output.stderr);
-    fs::create_dir_all(backend.join(".work/player-build")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&build_root).map_err(|e| e.to_string())?;
     fs::write(
-        backend.join(format!(".work/player-build/{key}.log")),
+        build_root.join(format!("{key}.log")),
         output.stderr.as_slice(),
     )
     .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!("Selected Player build failed: {log}"));
     }
-    let executable = target.join("release/module-engine-player.exe");
+    let executable = target.join("release").join(CARGO_PLAYER_EXECUTABLE);
     if !executable.is_file() {
         return Err("Cargo did not produce the selected Player executable".into());
     }
-    let snapshot = backend
-        .join(".work/player-build")
+    let snapshot = build_root
         .join(&key)
         .join(hash_file(&executable)?)
-        .join("Player.exe");
+        .join(PLAYER_EXECUTABLE);
     if !snapshot.is_file() {
         fs::create_dir_all(snapshot.parent().unwrap()).map_err(|e| e.to_string())?;
         fs::copy(&executable, &snapshot).map_err(|e| e.to_string())?;
@@ -246,6 +276,30 @@ fn build_native_player_variant(
         return Err("Native Player snapshot integrity mismatch".into());
     }
     Ok(snapshot)
+}
+
+fn native_cache_root(backend: &Path, directory: &str) -> PathBuf {
+    let root = backend.join(".work").join(directory);
+    // A Windows checkout can also be used through WSL. Keep its already tested
+    // Windows cache in place, and isolate non-Windows host Cargo outputs/leases.
+    if cfg!(windows) {
+        root
+    } else {
+        root.join(native_platform())
+    }
+}
+
+/// Feature closure and platform capability are distinct. Never silently remove
+/// a requested service to produce a package that only works in its verifier,
+/// where external effects are intentionally disabled.
+fn require_native_service_support(features: &BTreeSet<String>) -> Result<(), String> {
+    if features.contains("audio") && !module_engine_host_services::WAV_PLAYBACK_SUPPORTED {
+        return Err(format!(
+            "Native Player export requests host service 'audio.wav', but native WAV playback is unavailable on {}. Explicitly remove the audio request/cues or choose an Engine profile without this service; the exporter will not change authored data or silently disable sound.",
+            std::env::consts::OS
+        ));
+    }
+    Ok(())
 }
 fn select_player_assets(document: &mut GraphDocument, backend: &Path) -> Result<(), String> {
     let composition = crate::host::composition_at(backend)?;
@@ -419,7 +473,42 @@ fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let source = CString::new(stage.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+    let target =
+        CString::new(destination.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+    // Never replace a racing empty directory: exists()+rename() is not atomic
+    // on Unix. An unsupported kernel/filesystem fails instead of weakening the
+    // established no-replace publication guarantee.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+        ) {
+            return Err(format!(
+                "Player destination filesystem/kernel does not support atomic no-replace directory publication ({error}). Choose a native Linux filesystem such as ext4 instead of this mounted filesystem. Export refused without falling back to replacement."
+            ));
+        }
+        return Err(format!(
+            "Player destination was not published atomically without replacement: {error}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
     if destination.exists() {
         return Err("Player destination appeared during export".into());
@@ -442,6 +531,7 @@ fn export_into_staging(
     }
     select_player_assets(&mut prepared, backend_root)?;
     let features = selected_features(&prepared, backend_root)?;
+    require_native_service_support(&features)?;
     let document = &prepared;
     let game = document
         .game
@@ -525,13 +615,13 @@ fn export_into_staging(
         )?;
     }
     let player = build_native_player(document, &backend_root)?;
-    fs::copy(player, destination.join("Player.exe")).map_err(|e| e.to_string())?;
+    fs::copy(player, destination.join(PLAYER_EXECUTABLE)).map_err(|e| e.to_string())?;
     fs::write(
         destination.join("project.json"),
         serde_json::to_vec_pretty(document).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    fs::write(destination.join("README.txt"),format!("ModuleEngine standalone Player\r\nLaunch Player.exe. Rust, Cargo, DXC and engine sources are not required.\r\nSelected native features: {}\r\nR restarts; Escape closes. Gameplay controls are shown by the selected project.\r\nAn installed compatible GPU driver is required for GPU rendering.\r\n",features.iter().cloned().collect::<Vec<_>>().join(", "))).map_err(|e|e.to_string())?;
+    fs::write(destination.join("README.txt"),format!("ModuleEngine standalone Player\nLaunch ./{PLAYER_EXECUTABLE}. Rust, Cargo, DXC and engine sources are not required.\nNative platform: {}. Packages are not cross-platform binaries.\nSelected native features: {}\nR restarts; Escape closes. Gameplay controls are shown by the selected project.\nAn installed compatible GPU driver is required for GPU rendering; Linux GUI also requires a working Wayland or X11 session and the system runtime libraries used by this native build.\n",native_platform(),features.iter().cloned().collect::<Vec<_>>().join(", "))).map_err(|e|e.to_string())?;
     let mut files = BTreeSet::new();
     collect_files(&destination, &destination, &mut files)?;
     let hashes = files
@@ -550,6 +640,7 @@ fn export_into_staging(
         engine_version: env!("CARGO_PKG_VERSION").into(),
         project: "project.json".into(),
         files: hashes,
+        native_platform: Some(native_platform()),
     };
     fs::write(
         destination.join("player.json"),
@@ -571,22 +662,35 @@ fn verify_native_player(root: &Path) -> Result<(), String> {
     };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let prefix = std::env::temp_dir().join(format!(
-        "module-player-verify-{}-{}",
+        "module-player-verify-{}-{}-{}",
         std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let output_path = prefix.with_extension("stdout");
     let error_path = prefix.with_extension("stderr");
-    let mut command = Command::new(root.join("Player.exe"));
+    struct TemporaryLogs([PathBuf; 2]);
+    impl Drop for TemporaryLogs {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    let _temporary_logs = TemporaryLogs([output_path.clone(), error_path.clone()]);
+    let mut command = Command::new(root.join(PLAYER_EXECUTABLE));
     command
         .arg("--verify-package")
         .arg(root)
         .current_dir(root)
         .stdout(Stdio::from(
-            fs::File::create(&output_path).map_err(|e| e.to_string())?,
+            fs::File::create_new(&output_path).map_err(|e| e.to_string())?,
         ))
         .stderr(Stdio::from(
-            fs::File::create(&error_path).map_err(|e| e.to_string())?,
+            fs::File::create_new(&error_path).map_err(|e| e.to_string())?,
         ));
     #[cfg(windows)]
     {
@@ -609,8 +713,6 @@ fn verify_native_player(root: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(10));
     };
     let error = fs::read_to_string(&error_path).unwrap_or_default();
-    let _ = fs::remove_file(output_path);
-    let _ = fs::remove_file(error_path);
     if !status.success() {
         return Err(format!("Copied Player verification failed: {error}"));
     }
@@ -655,6 +757,7 @@ fn reserved_player_path(relative: &str, scripts: &BTreeSet<String>) -> bool {
     if matches!(
         first,
         "player.exe"
+            | "player"
             | "player.json"
             | "project.json"
             | "readme.txt"
@@ -827,7 +930,16 @@ mod tests {
             .unwrap()
     }
     fn fixture() -> PathBuf {
-        let folder = backend_root().join(".work").join(format!(
+        // Publication tests need the atomic rename guarantees of their native
+        // filesystem. A WSL source checkout can live on DrvFS, which rejects
+        // RENAME_NOREPLACE; TMPDIR points these disposable cases at native Linux
+        // storage without changing the actual backend or weakening export.
+        let root = if cfg!(target_os = "linux") {
+            std::env::temp_dir()
+        } else {
+            backend_root().join(".work")
+        };
+        let folder = root.join(format!(
             "player-plan-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -849,6 +961,50 @@ mod tests {
             }
         }
         document
+    }
+
+    #[test]
+    fn native_build_cache_keeps_windows_path_and_isolates_unix_hosts() {
+        let backend = Path::new("backend");
+        let cache = native_cache_root(backend, "player-native-target");
+        #[cfg(windows)]
+        assert_eq!(cache, backend.join(".work/player-native-target"));
+        #[cfg(unix)]
+        assert_eq!(
+            cache,
+            backend
+                .join(".work/player-native-target")
+                .join(native_platform())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_requested_audio_rejects_export_without_mutating_the_project() {
+        let backend = backend_root();
+        let document = crate::game_host::demo_document();
+        let before = serde_json::to_vec(&document).unwrap();
+        assert!(
+            selected_features(&document, &backend)
+                .unwrap()
+                .contains("audio")
+        );
+        let folder = fixture();
+        let destination = folder.join("unsupported audio export");
+        let error = export(&document, &backend, &backend, &backend, &destination).unwrap_err();
+        assert!(
+            error.contains("audio.wav") && error.contains("Explicitly remove"),
+            "{error}"
+        );
+        assert!(!destination.exists());
+        assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+        assert!(!fs::read_dir(&folder).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".module-engine-game-export-")
+        }));
     }
 
     #[test]
@@ -899,7 +1055,10 @@ mod tests {
         validate_package(&exported).unwrap();
         assert!(
             exported
-                .join("scripts/game-controller/worker.exe")
+                .join(format!(
+                    "scripts/game-controller/worker{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
                 .is_file()
         );
         assert_eq!(
@@ -933,6 +1092,14 @@ mod tests {
                 destination
             };
             assert_eq!(fs::read_to_string(existing).unwrap(), "other writer");
+        }
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let empty_racer = folder.join("racing-empty-directory");
+            fs::create_dir(&empty_racer).unwrap();
+            assert!(publish_new_directory(&stage, &empty_racer).is_err());
+            assert!(fs::read_dir(&empty_racer).unwrap().next().is_none());
+            assert!(stage.join("new.txt").is_file());
         }
         let destination = folder.join("ready");
         publish_new_directory(&stage, &destination).unwrap();
@@ -1104,6 +1271,7 @@ mod tests {
         let backend = backend_root();
         for path in [
             "Player.EXE",
+            "Player",
             "assets/../project.json",
             "player.json",
             "README.txt",

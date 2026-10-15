@@ -1,8 +1,10 @@
 //! Original GameHost regressions against the extracted generic host.
+#[cfg(windows)]
+use super::test_support::audio_played;
 use super::test_support::{
-    active_graph, aim_at, approve_fixture, audio_played, demo_document, game_registry,
-    graphics_only_change, modules, new_host, new_host_at, render_graph, retained_render_controls,
-    selected_render_graph, validate_candidate_controls, validate_render_settings_at,
+    active_graph, aim_at, approve_fixture, demo_document, game_registry, graphics_only_change,
+    modules, new_host, new_host_at, render_graph, retained_render_controls, selected_render_graph,
+    validate_candidate_controls, validate_render_settings_at,
 };
 use super::*;
 use module_engine_vulkan::{RenderPath, VulkanRenderer};
@@ -270,7 +272,13 @@ fn host_restart_restores_world_script_render_audio_and_camera_without_recompilin
             4
         ])
         .unwrap();
+    #[cfg(windows)]
     assert_eq!(audio_played(&host), 4);
+    #[cfg(not(windows))]
+    assert!(
+        host.services.is_empty(),
+        "Unsupported native audio stays unallocated"
+    );
     let frame_interface = active_graph(&host)
         .nodes
         .iter()
@@ -303,7 +311,13 @@ fn host_restart_restores_world_script_render_audio_and_camera_without_recompilin
     assert_ne!(host.presentation_revision(), revision);
     assert_eq!(host.session.state(), &initial);
     assert_eq!(host.camera, camera);
+    #[cfg(windows)]
     assert_eq!(audio_played(&host), 0);
+    #[cfg(not(windows))]
+    assert!(
+        host.services.is_empty(),
+        "Restart must not allocate an unsupported audio endpoint"
+    );
     assert!(!host.services.enabled());
     assert!(Arc::ptr_eq(&slot, &host.slots["game-controller"]));
     assert_eq!(slot.lock().unwrap().executable(), executable);
