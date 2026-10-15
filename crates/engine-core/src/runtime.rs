@@ -1,0 +1,786 @@
+use crate::{
+    Camera, ControlCommand, Diagnostic, Frame, FrameRenderer, Graph, GraphDocument, ModuleRegistry,
+    Node, RenderOverrides, SceneSnapshot, Severity, WorldKind, WorldObject, WorldProvider,
+    validate_graph,
+};
+use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Mutex;
+
+#[derive(Clone, Debug)]
+pub struct CommandSource {
+    pub source_id: String,
+    pub world: bool,
+    pub render: bool,
+}
+
+/// A rejected graph or executable route. Type-valid graphs are not automatically
+/// promises of installed execution support.
+#[derive(Clone, Debug)]
+pub struct RuntimeError {
+    pub message: String,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+/// An executable route built from a validated graph, not from a world dropdown.
+///
+/// Scalar graph evaluation belongs to the host. Use world_speed_source to follow
+/// the actual connected source, evaluate that Scalar subgraph, then call step.
+/// The renderer consumes the selected provider's snapshot through scene.extract.
+pub struct Runtime {
+    provider: Box<dyn WorldProvider>,
+    kind: WorldKind,
+    world_node_id: String,
+    world_module_id: String,
+    speed_source: Option<String>,
+    document: GraphDocument,
+    registry: ModuleRegistry,
+    renderer: Mutex<Box<dyn FrameRenderer>>,
+    renderer_node_id: String,
+    overrides: RenderOverrides,
+}
+
+impl Runtime {
+    /// Construct one viewport -> compound Software3D -> scene extraction -> World
+    /// route. Missing connections and unsupported edits are reported as errors.
+    pub fn from_document(
+        document: &GraphDocument,
+        registry: &ModuleRegistry,
+    ) -> Result<Self, RuntimeError> {
+        let diagnostics = validate_graph(document, registry);
+        if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+            let message = diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(RuntimeError {
+                message,
+                diagnostics,
+            });
+        }
+        let graph = &document.root;
+        let viewports: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.module == "viewport.output")
+            .collect();
+        if viewports.len() != 1 {
+            return Err(route_error("Runtime requires exactly one viewport.output"));
+        }
+        let viewport = viewports[0];
+        let renderer = upstream(graph, viewport, "frame", "frame")?;
+        if !registry.is_renderer(&renderer.module) {
+            return Err(route_error(
+                "Viewport needs a registered executable renderer module",
+            ));
+        }
+        require_no_params(viewport)?;
+        if renderer.module == "render.software3d" {
+            require_no_params(renderer)?;
+            validate_renderer_route(renderer)?;
+        }
+        let extract = upstream(graph, renderer, "scene", "scene")?;
+        if extract.module != "scene.extract" {
+            return Err(route_error(
+                "Renderer needs the installed scene.extract adapter",
+            ));
+        }
+        require_no_params(extract)?;
+        let world = upstream(graph, extract, "world", "world")?;
+        if !registry.is_world_provider(&world.module) {
+            return Err(route_error(format!(
+                "Module '{}' has no installed World provider",
+                world.module
+            )));
+        }
+        if world.subgraph.is_some() || extract.subgraph.is_some() || viewport.subgraph.is_some() {
+            return Err(route_error(
+                "World, extraction and viewport do not execute nested graphs",
+            ));
+        }
+        let speed_source = graph
+            .edges
+            .iter()
+            .find(|e| e.to_node == world.id && e.to_port == "speed")
+            .map(|e| e.from_node.clone());
+        let mut active = BTreeSet::new();
+        let mut pending = vec![viewport.id.clone()];
+        while let Some(id) = pending.pop() {
+            if active.insert(id.clone()) {
+                pending.extend(
+                    graph
+                        .edges
+                        .iter()
+                        .filter(|e| e.to_node == id)
+                        .map(|e| e.from_node.clone()),
+                );
+            }
+        }
+        for node in graph.nodes.iter().filter(|n| active.contains(&n.id)) {
+            if registry.is_world_provider(&node.module) || registry.is_renderer(&node.module) {
+                continue;
+            }
+            match node.module.as_str() {
+                "scene.extract" | "viewport.output" => {}
+                "custom.rust.update" => {
+                    require_parameter_keys(
+                        node,
+                        &["source_id", "code_layout", "code_layout_keys"],
+                    )?;
+                    if node.subgraph.is_some() {
+                        return Err(route_error(
+                            "Rust update uses source, not a module subgraph",
+                        ));
+                    }
+                }
+                "scalar.value" | "clock.time" | "custom.rust" => {
+                    if node.subgraph.is_some() {
+                        return Err(route_error(format!(
+                            "Scalar module '{}' does not execute nested graphs",
+                            node.id
+                        )));
+                    }
+                    if node.module == "clock.time" {
+                        require_no_params(node)?;
+                    }
+                    if node.module == "scalar.value" {
+                        require_parameter_keys(node, &["value"])?;
+                    }
+                    if node.module == "custom.rust" {
+                        require_parameter_keys(
+                            node,
+                            &["source_id", "code_layout", "code_layout_keys"],
+                        )?;
+                    }
+                }
+                _ => {
+                    return Err(route_error(format!(
+                        "Active module '{}' has no supported execution route",
+                        node.module
+                    )));
+                }
+            }
+        }
+        let provider = registry
+            .create_world(&world.module, &world.params)
+            .map_err(route_error)?;
+        let executable_renderer = registry
+            .create_renderer(renderer, document)
+            .map_err(route_error)?;
+        validate_live_properties(document, provider.as_ref()).map_err(route_error)?;
+        if document.engine.initialized {
+            // A permitted preset must be executable before the engine exposes it.
+            let mut groups = document.engine.exposure.variants.values();
+            let mut checks = vec![crate::project_commands(document, 0.0).map_err(route_error)?];
+            for group in &mut groups {
+                for variant in group.options.values() {
+                    checks.push(
+                        variant
+                            .commands
+                            .iter()
+                            .cloned()
+                            .map(ControlCommand::Render)
+                            .collect(),
+                    );
+                }
+            }
+            for commands in checks {
+                let render = commands
+                    .into_iter()
+                    .filter_map(|c| match c {
+                        ControlCommand::Render(c) => Some(c),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let mut overrides = RenderOverrides::default();
+                overrides.apply_commands(&render).map_err(route_error)?;
+                executable_renderer
+                    .validate_overrides(&overrides)
+                    .map_err(route_error)?;
+            }
+        }
+        let kind = match world.module.as_str() {
+            "world.objects" => WorldKind::Objects,
+            "world.ecs" => WorldKind::Ecs,
+            _ => WorldKind::Custom,
+        };
+        Ok(Self {
+            provider,
+            kind,
+            world_node_id: world.id.clone(),
+            world_module_id: world.module.clone(),
+            speed_source,
+            document: document.clone(),
+            registry: registry.clone(),
+            renderer: Mutex::new(executable_renderer),
+            renderer_node_id: renderer.id.clone(),
+            overrides: RenderOverrides::default(),
+        })
+    }
+
+    /// Advance with a host-evaluated Scalar value. Invalid numeric values are
+    /// ignored; dt is clamped to zero on negative inputs, without truncating long
+    /// valid steps. The host owns wall-clock scheduling.
+    pub fn step(&mut self, dt: f32, speed: f32) {
+        if dt.is_finite() && speed.is_finite() {
+            self.provider.step(dt.max(0.0), speed);
+        }
+    }
+
+    /// Execute the supported extraction/rasterization route into RGBA8.
+    pub fn render(&self, width: usize, height: usize, camera: Camera) -> Result<Frame, String> {
+        self.renderer
+            .lock()
+            .map_err(|_| "Renderer lock is poisoned".to_string())?
+            .render(
+                &self.provider.snapshot(),
+                camera,
+                width,
+                height,
+                &self.overrides,
+            )
+    }
+
+    pub fn backend_name(&self) -> String {
+        self.renderer
+            .lock()
+            .map(|r| r.backend_name().to_owned())
+            .unwrap_or_else(|_| "Unavailable renderer".into())
+    }
+
+    pub fn objects(&self) -> Result<Vec<WorldObject>, String> {
+        self.provider.objects()
+    }
+
+    /// The project boundary uses the same gate for native UI and compiled Rust.
+    /// Engine-authoring apply_controls remains available for trusted tooling.
+    pub fn apply_project_controls(&mut self, commands: &[ControlCommand]) -> Result<(), String> {
+        crate::validate_project_controls(&self.document, commands)?;
+        self.apply_controls(commands)
+    }
+
+    /// Apply exposed values and the first matching ready-variant rule per group.
+    /// The host calls this once per tick before project script commands.
+    pub fn apply_project_settings(&mut self, time: f64) -> Result<(), String> {
+        if !self.document.engine.initialized {
+            return Ok(());
+        }
+        let commands = crate::project_commands(&self.document, time)?;
+        self.apply_project_controls(&commands)
+    }
+
+    /// Commit validated active fields for actual live objects, independent of the
+    /// selected Object/ECS storage. The archive is never sent to a script.
+    pub fn set_properties(&mut self, properties: crate::PropertyStore) -> Result<(), String> {
+        let mut candidate = self.document.clone();
+        candidate.properties = properties;
+        crate::validate_settings(&candidate, &self.registry)?;
+        validate_live_properties(&candidate, self.provider.as_ref())?;
+        self.document.properties = candidate.properties;
+        Ok(())
+    }
+
+    /// Update project values/rules without allowing architecture edits.
+    pub fn set_project_configuration(
+        &mut self,
+        project: crate::ProjectConfiguration,
+    ) -> Result<(), String> {
+        let mut candidate = self.document.clone();
+        candidate.project = project;
+        crate::validate_settings(&candidate, &self.registry)?;
+        self.document.project = candidate.project;
+        Ok(())
+    }
+
+    /// Fill the portable owned packet with typed settings and participating data.
+    pub fn fill_script_context(&self, context: &mut crate::ScriptContext) {
+        context.parameters = crate::resolved_parameters(&self.document);
+        let objects = self
+            .provider
+            .objects()
+            .map(|v| v.into_iter().map(|o| o.id).collect())
+            .unwrap_or_else(|_| {
+                self.provider
+                    .snapshot()
+                    .items
+                    .into_iter()
+                    .map(|o| o.id)
+                    .collect()
+            });
+        context.properties = crate::resolved_properties(&self.document, &self.registry, &objects);
+    }
+
+    pub fn properties(&self) -> &crate::PropertyStore {
+        &self.document.properties
+    }
+
+    /// Validate the render batch before changing the world. Each provider applies
+    /// its world batch transactionally. Resource commands are per-frame actions.
+    pub fn apply_controls(&mut self, commands: &[ControlCommand]) -> Result<(), String> {
+        let world = commands
+            .iter()
+            .filter_map(|c| match c {
+                ControlCommand::World(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let render = commands
+            .iter()
+            .filter_map(|c| match c {
+                ControlCommand::Render(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut candidate = self.overrides.clone();
+        candidate.apply_commands(&render)?;
+        if !world.is_empty() {
+            self.provider.validate_commands(&world)?;
+        }
+        self.renderer
+            .lock()
+            .map_err(|_| "Renderer lock is poisoned".to_string())?
+            .validate_overrides(&candidate)?;
+        if !world.is_empty() {
+            self.provider.apply_commands(&world)?;
+        }
+        self.overrides = candidate;
+        Ok(())
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.overrides.begin_frame();
+    }
+
+    /// Keep owned world state when only renderer/source/layout changes. Explicit
+    /// world module or creation-parameter changes construct a fresh provider.
+    pub fn adopt_world(&mut self, previous: &mut Self) -> bool {
+        let same_params = self
+            .document
+            .root
+            .nodes
+            .iter()
+            .find(|n| n.id == self.world_node_id)
+            .map(|n| &n.params)
+            == previous
+                .document
+                .root
+                .nodes
+                .iter()
+                .find(|n| n.id == previous.world_node_id)
+                .map(|n| &n.params);
+        if self.world_module_id == previous.world_module_id
+            && self.world_node_id == previous.world_node_id
+            && same_params
+        {
+            std::mem::swap(&mut self.provider, &mut previous.provider);
+            let mut retained = previous.overrides.clone();
+            retained.begin_frame();
+            let mut retained_commands = vec![];
+            for (pass, parameters) in &retained.parameters {
+                for (name, value) in parameters {
+                    retained_commands.push(ControlCommand::Render(
+                        crate::RenderCommand::SetParameter {
+                            pass: pass.clone(),
+                            name: name.clone(),
+                            value: value.clone(),
+                        },
+                    ));
+                }
+            }
+            for (pass, enabled) in &retained.enabled {
+                retained_commands.push(ControlCommand::Render(crate::RenderCommand::SetEnabled {
+                    pass: pass.clone(),
+                    enabled: *enabled,
+                }));
+            }
+            // Pass/resource identities may change with a replacement render graph.
+            // Retain controls only when their contract still validates.
+            if crate::validate_project_controls(&self.document, &retained_commands).is_ok()
+                && self
+                    .renderer
+                    .lock()
+                    .is_ok_and(|renderer| renderer.validate_overrides(&retained).is_ok())
+            {
+                self.overrides = retained;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reconfigure(&mut self, document: &GraphDocument) -> Result<bool, RuntimeError> {
+        let mut candidate = Self::from_document(document, &self.registry)?;
+        let kept = candidate.adopt_world(self);
+        *self = candidate;
+        Ok(kept)
+    }
+
+    /// Only connected command outputs are executed. One compiled source can feed
+    /// both outputs without evaluating the user's update function twice.
+    pub fn command_sources(&self) -> Vec<CommandSource> {
+        let mut sources = std::collections::BTreeMap::<String, CommandSource>::new();
+        for edge in &self.document.root.edges {
+            let world = edge.to_node == self.world_node_id && edge.to_port == "commands";
+            let render = edge.to_node == self.renderer_node_id && edge.to_port == "commands";
+            if !(world || render) {
+                continue;
+            }
+            let Some(node) = self
+                .document
+                .root
+                .nodes
+                .iter()
+                .find(|n| n.id == edge.from_node && n.module == "custom.rust.update")
+            else {
+                continue;
+            };
+            let Some(source_id) = node
+                .params
+                .get("source_id")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let source = sources
+                .entry(source_id.to_owned())
+                .or_insert(CommandSource {
+                    source_id: source_id.to_owned(),
+                    world: false,
+                    render: false,
+                });
+            source.world |= world;
+            source.render |= render;
+        }
+        sources.into_values().collect()
+    }
+
+    /// The selected built-in storage type, or Custom for a registered provider.
+    pub fn world_kind(&self) -> WorldKind {
+        self.kind
+    }
+
+    /// Registered executable source ID selected by the actual graph route.
+    pub fn world_module_id(&self) -> &str {
+        &self.world_module_id
+    }
+
+    /// Selected world node ID; useful for graph-driven host scalar evaluation.
+    pub fn world_node_id(&self) -> &str {
+        &self.world_node_id
+    }
+
+    /// Upstream node connected to speed, or None if the host should use its
+    /// documented unconnected default. Pin type has already been validated.
+    pub fn world_speed_source(&self) -> Option<String> {
+        self.speed_source.clone()
+    }
+
+    /// Current neutral scene count rather than a hard-coded demo count.
+    pub fn object_count(&self) -> usize {
+        self.provider.snapshot().items.len()
+    }
+
+    /// Deterministic neutral scene for verification, exporting and rendering.
+    pub fn snapshot(&self) -> SceneSnapshot {
+        self.provider.snapshot()
+    }
+
+    /// Switch between installed built-in worlds and reset their simulation state.
+    /// Custom leaves the current provider unchanged; a custom module is selected
+    /// by changing its graph module ID and rebuilding with from_document.
+    pub fn set_world_kind(&mut self, kind: WorldKind) {
+        let module = match kind {
+            WorldKind::Objects => "world.objects",
+            WorldKind::Ecs => "world.ecs",
+            WorldKind::Custom => return,
+        };
+        let mut document = self.document.clone();
+        if let Some(world) = document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == self.world_node_id)
+        {
+            world.module = module.into();
+            world.params = serde_json::json!({});
+        }
+        if let Ok(runtime) = Self::from_document(&document, &self.registry) {
+            *self = runtime;
+        }
+    }
+}
+
+fn validate_live_properties(
+    document: &GraphDocument,
+    provider: &dyn WorldProvider,
+) -> Result<(), String> {
+    let ids: BTreeSet<_> = provider
+        .objects()
+        .map(|objects| objects.into_iter().map(|o| o.id).collect())
+        .unwrap_or_else(|_| {
+            provider
+                .snapshot()
+                .items
+                .into_iter()
+                .map(|o| o.id)
+                .collect()
+        });
+    for id in document
+        .properties
+        .active
+        .objects
+        .keys()
+        .chain(document.properties.active.components.keys())
+    {
+        if !ids.contains(id) {
+            return Err(format!(
+                "Active properties refer to missing world object {id}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn route_error(message: impl Into<String>) -> RuntimeError {
+    RuntimeError {
+        message: message.into(),
+        diagnostics: vec![],
+    }
+}
+
+fn upstream<'a>(
+    graph: &'a Graph,
+    node: &Node,
+    input: &str,
+    expected_output: &str,
+) -> Result<&'a Node, RuntimeError> {
+    let edge = graph
+        .edges
+        .iter()
+        .find(|e| e.to_node == node.id && e.to_port == input)
+        .ok_or_else(|| route_error(format!("Missing input {}.{}", node.id, input)))?;
+    if edge.from_port != expected_output {
+        return Err(route_error(format!(
+            "Unsupported source output '{}' for {}.{}",
+            edge.from_port, node.id, input
+        )));
+    }
+    graph
+        .nodes
+        .iter()
+        .find(|n| n.id == edge.from_node)
+        .ok_or_else(|| route_error("Source node disappeared"))
+}
+
+fn require_parameter_keys(node: &Node, supported: &[&str]) -> Result<(), RuntimeError> {
+    if node.params.is_null() {
+        return Ok(());
+    }
+    let object = node
+        .params
+        .as_object()
+        .ok_or_else(|| route_error(format!("Parameters of '{}' must be an object", node.id)))?;
+    if let Some(key) = object.keys().find(|k| !supported.contains(&k.as_str())) {
+        return Err(route_error(format!(
+            "Module '{}' does not execute parameter '{}'",
+            node.module, key
+        )));
+    }
+    Ok(())
+}
+
+fn require_no_params(node: &Node) -> Result<(), RuntimeError> {
+    require_parameter_keys(node, &[])
+}
+
+fn validate_renderer_route(node: &Node) -> Result<(), RuntimeError> {
+    let graph = node
+        .subgraph
+        .as_deref()
+        .ok_or_else(|| route_error("Software3D needs its internal graph"))?;
+    if graph.nodes.len() != 3 || graph.edges.len() != 2 {
+        return Err(route_error(
+            "Software3D currently executes exactly input -> rasterize -> output; edited passes are not implemented",
+        ));
+    }
+    let output = graph
+        .nodes
+        .iter()
+        .find(|n| n.module == "interface.output")
+        .ok_or_else(|| route_error("Renderer has no output interface"))?;
+    let rasterizer = upstream(graph, output, "value", "frame")?;
+    if rasterizer.module != "render.rasterize" {
+        return Err(route_error(
+            "Software3D output must come from render.rasterize",
+        ));
+    }
+    require_no_params(rasterizer)?;
+    if rasterizer.subgraph.is_some() {
+        return Err(route_error(
+            "Nested rasterizer execution is not implemented",
+        ));
+    }
+    let input = upstream(graph, rasterizer, "scene", "value")?;
+    if input.module != "interface.input" || input.subgraph.is_some() || output.subgraph.is_some() {
+        return Err(route_error(
+            "Software3D needs a direct input interface -> rasterizer -> output interface route",
+        ));
+    }
+    require_parameter_keys(input, &["port", "data_type"])?;
+    require_parameter_keys(output, &["port", "data_type"])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Mesh, RenderItem, Transform, demo_document, make_edge, make_node, world_descriptor,
+    };
+
+    #[test]
+    fn graph_selects_world_and_speed_source_and_renders_identically() {
+        let registry = ModuleRegistry::builtin();
+        let mut objects =
+            Runtime::from_document(&demo_document(WorldKind::Objects), &registry).unwrap();
+        let mut ecs = Runtime::from_document(&demo_document(WorldKind::Ecs), &registry).unwrap();
+        assert_eq!(objects.world_kind(), WorldKind::Objects);
+        assert_eq!(ecs.world_kind(), WorldKind::Ecs);
+        assert_eq!(objects.world_speed_source().as_deref(), Some("speed"));
+        objects.step(0.2, 0.7);
+        ecs.step(0.2, 0.7);
+        assert_eq!(objects.snapshot(), ecs.snapshot());
+        assert_eq!(
+            objects.render(160, 120, Camera::default()).unwrap().rgba,
+            ecs.render(160, 120, Camera::default()).unwrap().rgba
+        );
+        let mut d = demo_document(WorldKind::Objects);
+        d.root
+            .edges
+            .retain(|e| !(e.to_node == "world" && e.to_port == "speed"));
+        d.root
+            .edges
+            .push(make_edge("base", "value", "world", "speed"));
+        let runtime = Runtime::from_document(&d, &registry).unwrap();
+        assert_eq!(runtime.world_speed_source().as_deref(), Some("base"));
+    }
+
+    #[test]
+    fn a_third_source_provider_works_without_core_or_renderer_changes() {
+        struct SingleCube;
+        impl WorldProvider for SingleCube {
+            fn step(&mut self, _: f32, _: f32) {}
+            fn snapshot(&self) -> SceneSnapshot {
+                SceneSnapshot {
+                    items: vec![RenderItem {
+                        material: Default::default(),
+                        id: 90,
+                        mesh: Mesh::cube(),
+                        model: Transform::default().matrix(),
+                        color: [250, 140, 60, 255],
+                    }],
+                    time: 0.0,
+                }
+            }
+        }
+        let mut registry = ModuleRegistry::builtin();
+        registry
+            .register_world(
+                world_descriptor("test.single", "Single cube", "Independent test provider"),
+                |_| Ok(Box::new(SingleCube)),
+            )
+            .unwrap();
+        let mut d = demo_document(WorldKind::Objects);
+        d.root
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "world")
+            .unwrap()
+            .module = "test.single".into();
+        let runtime = Runtime::from_document(&d, &registry).unwrap();
+        assert_eq!(runtime.world_kind(), WorldKind::Custom);
+        assert_eq!(runtime.world_module_id(), "test.single");
+        assert_eq!(runtime.object_count(), 1);
+        assert!(
+            runtime
+                .render(128, 128, Camera::default())
+                .unwrap()
+                .stats
+                .shaded_pixels
+                > 100
+        );
+    }
+
+    #[test]
+    fn valid_but_unsupported_renderer_edits_are_rejected() {
+        let registry = ModuleRegistry::builtin();
+        let mut d = demo_document(WorldKind::Objects);
+        let internal = d
+            .root
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "renderer")
+            .unwrap()
+            .subgraph
+            .as_mut()
+            .unwrap();
+        internal.nodes.push(make_node(
+            "unused-scalar",
+            "scalar.value",
+            "Extra pass",
+            [0., 0.],
+            serde_json::json!({"value":2.0}),
+        ));
+        assert!(
+            !validate_graph(&d, &registry)
+                .iter()
+                .any(|d| d.severity == Severity::Error)
+        );
+        let Err(error) = Runtime::from_document(&d, &registry) else {
+            panic!("expected runtime rejection");
+        };
+        assert!(error.message.contains("edited passes"));
+    }
+
+    #[test]
+    fn incompatible_module_pin_and_unsupported_render_batch_are_explicit_errors() {
+        let registry = ModuleRegistry::builtin();
+        let mut document = demo_document(WorldKind::Objects);
+        document
+            .module_versions
+            .insert("world.objects".into(), "999.0.0".into());
+        assert!(
+            Runtime::from_document(&document, &registry)
+                .err()
+                .unwrap()
+                .message
+                .contains("requires version")
+        );
+        document.module_versions.clear();
+        let mut runtime = Runtime::from_document(&document, &registry).unwrap();
+        let before = runtime.objects().unwrap();
+        let commands = vec![
+            ControlCommand::World(crate::WorldCommand::Translate {
+                id: 1,
+                delta: [1., 0., 0.],
+            }),
+            ControlCommand::Render(crate::RenderCommand::SetEnabled {
+                pass: "nonexistent".into(),
+                enabled: false,
+            }),
+        ];
+        assert!(runtime.apply_controls(&commands).is_err());
+        assert_eq!(runtime.objects().unwrap(), before);
+    }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "module-engine-content"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
+serde_json.workspace = true
+

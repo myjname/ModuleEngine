@@ -1,0 +1,52 @@
+{
+  "build_profile": "debug",
+  "fixture": "Authored two-arena project; pre-opened stopped Game and Scene; real egui pointer gestures in root and nested GPU graph",
+  "scope": "Graph draw/model editing plus stopped Game tick and Scene ensure. Cold host preparation, native presentation and 3D rasterization excluded.",
+  "sampling": "Before: 12 input frames per graph. After: 120, including 113 actual node-move frames. Initial events below egui drag threshold are included; compare freeze peaks and retained resources, not raw medians across sample lengths.",
+  "before": [
+    {
+      "frames": 12,
+      "game_host_retained": false,
+      "max_ms": 2298.3412,
+      "median_ms": 2.8099000000000003,
+      "p95_ms": 2298.3412,
+      "scene_host_retained": false,
+      "scope": "root",
+      "timing_scope": "Headless egui graph draw/model edit plus stopped Game tick and Scene ensure; excludes native presentation and viewport rasterization"
+    },
+    {
+      "frames": 12,
+      "game_host_retained": false,
+      "max_ms": 2334.8271999999997,
+      "median_ms": 3.0136999999999996,
+      "p95_ms": 2334.8271999999997,
+      "scene_host_retained": false,
+      "scope": "gpu",
+      "timing_scope": "Headless egui graph draw/model edit plus stopped Game tick and Scene ensure; excludes native presentation and viewport rasterization"
+    }
+  ],
+  "after": [
+    {
+      "frames": 120,
+      "game_host_retained": true,
+      "max_ms": 7.0425,
+      "median_ms": 5.6547,
+      "moved_frames": 113,
+      "p95_ms": 6.513,
+      "scene_host_retained": true,
+      "scope": "root",
+      "timing_scope": "Headless egui graph draw/model edit plus stopped Game tick and Scene ensure; excludes native presentation and viewport rasterization"
+    },
+    {
+      "frames": 120,
+      "game_host_retained": true,
+      "max_ms": 8.0669,
+      "median_ms": 5.6441,
+      "moved_frames": 113,
+      "p95_ms": 6.538399999999999,
+      "scene_host_retained": true,
+      "scope": "gpu",
+      "timing_scope": "Headless egui graph draw/model edit plus stopped Game tick and Scene ensure; excludes native presentation and viewport rasterization"
+    }
+  ]
+}

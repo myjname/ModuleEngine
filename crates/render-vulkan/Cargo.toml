@@ -1,0 +1,15 @@
+[package]
+name = "module-engine-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+ash = "0.38"
+serde.workspace = true
+serde_json.workspace = true
+png.workspace = true
+
+[dev-dependencies]
+module-engine-content = { path = "../engine-content" }

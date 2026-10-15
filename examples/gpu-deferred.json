@@ -1,0 +1,305 @@
+{
+  "schema_version": 2,
+  "name": "Objects / Deferred / Vulkan",
+  "root": {
+    "nodes": [
+      {
+        "id": "world",
+        "module": "world.objects",
+        "label": "World",
+        "position": [
+          70.0,
+          120.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "extract",
+        "module": "scene.extract",
+        "label": "Extract scene",
+        "position": [
+          325.0,
+          120.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "renderer",
+        "module": "render.vulkan",
+        "label": "Vulkan renderer",
+        "position": [
+          580.0,
+          120.0
+        ],
+        "params": {},
+        "subgraph": {
+          "nodes": [
+            {
+              "id": "scene",
+              "module": "interface.input",
+              "label": "Scene input",
+              "position": [
+                20.0,
+                90.0
+              ],
+              "params": {
+                "data_type": "Scene3D",
+                "port": "scene"
+              }
+            },
+            {
+              "id": "geometry",
+              "module": "gpu.gbuffer",
+              "label": "Geometry GPU pass",
+              "position": [
+                245.0,
+                90.0
+              ],
+              "params": {}
+            },
+            {
+              "id": "lighting",
+              "module": "gpu.deferred",
+              "label": "Deferred lighting",
+              "position": [
+                470.0,
+                90.0
+              ],
+              "params": {}
+            },
+            {
+              "id": "ao",
+              "module": "gpu.ssao",
+              "label": "ao",
+              "position": [
+                695.0,
+                90.0
+              ],
+              "params": {
+                "strength": 0.8
+              }
+            },
+            {
+              "id": "tonemap",
+              "module": "gpu.tonemap",
+              "label": "tonemap",
+              "position": [
+                920.0,
+                90.0
+              ],
+              "params": {
+                "exposure": 1.0,
+                "mode": "aces"
+              }
+            },
+            {
+              "id": "aa",
+              "module": "gpu.fxaa",
+              "label": "aa",
+              "position": [
+                1145.0,
+                90.0
+              ],
+              "params": {}
+            },
+            {
+              "id": "encode",
+              "module": "gpu.color_encode",
+              "label": "encode",
+              "position": [
+                1370.0,
+                90.0
+              ],
+              "params": {}
+            },
+            {
+              "id": "frame",
+              "module": "interface.output",
+              "label": "Frame output",
+              "position": [
+                1595.0,
+                90.0
+              ],
+              "params": {
+                "data_type": "Frame3D",
+                "port": "frame"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "scene",
+              "from_port": "value",
+              "to_node": "geometry",
+              "to_port": "scene"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "albedo",
+              "to_node": "lighting",
+              "to_port": "albedo"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "normals",
+              "to_node": "lighting",
+              "to_port": "normals"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "depth",
+              "to_node": "lighting",
+              "to_port": "depth"
+            },
+            {
+              "from_node": "lighting",
+              "from_port": "color",
+              "to_node": "ao",
+              "to_port": "color"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "normals",
+              "to_node": "ao",
+              "to_port": "normals"
+            },
+            {
+              "from_node": "geometry",
+              "from_port": "depth",
+              "to_node": "ao",
+              "to_port": "depth"
+            },
+            {
+              "from_node": "ao",
+              "from_port": "color",
+              "to_node": "tonemap",
+              "to_port": "color"
+            },
+            {
+              "from_node": "tonemap",
+              "from_port": "color",
+              "to_node": "aa",
+              "to_port": "color"
+            },
+            {
+              "from_node": "aa",
+              "from_port": "color",
+              "to_node": "encode",
+              "to_port": "color"
+            },
+            {
+              "from_node": "encode",
+              "from_port": "frame",
+              "to_node": "frame",
+              "to_port": "value"
+            }
+          ]
+        }
+      },
+      {
+        "id": "viewport",
+        "module": "viewport.output",
+        "label": "Viewport",
+        "position": [
+          840.0,
+          120.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "clock",
+        "module": "clock.time",
+        "label": "Time",
+        "position": [
+          40.0,
+          375.0
+        ],
+        "params": {}
+      },
+      {
+        "id": "base",
+        "module": "scalar.value",
+        "label": "Base speed",
+        "position": [
+          40.0,
+          540.0
+        ],
+        "params": {
+          "value": 1.0
+        }
+      },
+      {
+        "id": "speed",
+        "module": "custom.rust",
+        "label": "Custom speed",
+        "position": [
+          315.0,
+          400.0
+        ],
+        "params": {
+          "source_id": "speed"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from_node": "world",
+        "from_port": "world",
+        "to_node": "extract",
+        "to_port": "world"
+      },
+      {
+        "from_node": "extract",
+        "from_port": "scene",
+        "to_node": "renderer",
+        "to_port": "scene"
+      },
+      {
+        "from_node": "renderer",
+        "from_port": "frame",
+        "to_node": "viewport",
+        "to_port": "frame"
+      },
+      {
+        "from_node": "clock",
+        "from_port": "value",
+        "to_node": "speed",
+        "to_port": "time"
+      },
+      {
+        "from_node": "base",
+        "from_port": "value",
+        "to_node": "speed",
+        "to_port": "base"
+      },
+      {
+        "from_node": "speed",
+        "from_port": "value",
+        "to_node": "world",
+        "to_port": "speed"
+      }
+    ]
+  },
+  "custom_sources": {
+    "speed": "fn speed(time: f64, base: f64) -> f64 {\n    let wave = time.sin();\n    base + wave * 0.25\n}\n"
+  },
+  "shader_sources": {},
+  "asset_manifest": null,
+  "module_versions": {
+    "clock.time": "0.2.0",
+    "custom.rust": "0.2.0",
+    "gpu.color_encode": "0.2.0",
+    "gpu.deferred": "0.2.0",
+    "gpu.fxaa": "0.2.0",
+    "gpu.gbuffer": "0.2.0",
+    "gpu.ssao": "0.2.0",
+    "gpu.tonemap": "0.2.0",
+    "interface.input": "0.2.0",
+    "interface.output": "0.2.0",
+    "render.vulkan": "0.2.0",
+    "scalar.value": "0.2.0",
+    "scene.extract": "0.2.0",
+    "viewport.output": "0.2.0",
+    "world.objects": "0.2.0"
+  }
+}

@@ -1,0 +1,211 @@
+{
+  "before": "outputs/graph-workflow-performance-verification/native-before-repeat/report.json",
+  "after": "outputs/graph-workflow-performance-verification/native-after/report.json",
+  "comparable_metadata": true,
+  "mismatches": [],
+  "warnings": [
+    "before/stopped-pan: visibility unspecified for 90 frames",
+    "before/play-pan: visibility unspecified for 90 frames",
+    "after/stopped-pan: visibility unspecified for 90 frames",
+    "after/play-pan: visibility unspecified for 90 frames"
+  ],
+  "unit": "milliseconds; lower is better; no FPS conversion",
+  "limitations": [
+    "Scripted native egui MMB input; physical mouse input latency and display scanout are not measured.",
+    "Framework CPU includes the unchanged diagnostic wrapper plus egui/OpenGL draw and upload; excludes vsync waiting.",
+    "Frame intervals include scheduler and vsync; reported maxima describe only these 90 sampled frames per phase.",
+    "Stopped Game and Scene may reuse completed textures after the fix; frame counts are UI frames, not GPU-render counts.",
+    "Play uses actual elapsed time. Equal sampled frame counts do not mean identical simulation time, positions or pixels.",
+    "Two sequential runs cannot establish general performance for other projects or rule out external workload noise."
+  ],
+  "simulation_time": {
+    "before": [
+      {
+        "phase": "stopped-pan",
+        "game_time_first": 0.0,
+        "game_time_last": 0.0
+      },
+      {
+        "phase": "play-pan",
+        "game_time_first": 0.36666666666666664,
+        "game_time_last": 1.1666666666666674
+      }
+    ],
+    "after": [
+      {
+        "phase": "stopped-pan",
+        "game_time_first": 0.0,
+        "game_time_last": 0.0
+      },
+      {
+        "phase": "play-pan",
+        "game_time_first": 0.3333333333333333,
+        "game_time_last": 0.9500000000000013
+      }
+    ]
+  },
+  "rows": [
+    {
+      "phase": "stopped-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "median_ms",
+      "before_ms": 4.7653,
+      "after_ms": 0.6983,
+      "delta_ms": -4.067,
+      "reduction_percent": 85.34614819633603
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "p95_ms",
+      "before_ms": 5.5565,
+      "after_ms": 1.8599,
+      "delta_ms": -3.6965999999999997,
+      "reduction_percent": 66.52749032664447
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "max_ms",
+      "before_ms": 5.7957,
+      "after_ms": 2.2883999999999998,
+      "delta_ms": -3.5073000000000003,
+      "reduction_percent": 60.515554635333096
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "median_ms",
+      "before_ms": 5.93779981136322,
+      "after_ms": 1.3568499707616866,
+      "delta_ms": -4.580949840601534,
+      "reduction_percent": 77.14894381981233
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "p95_ms",
+      "before_ms": 7.037299685180187,
+      "after_ms": 2.6986999437212944,
+      "delta_ms": -4.338599741458893,
+      "reduction_percent": 61.651484739175274
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "max_ms",
+      "before_ms": 7.1737999096512794,
+      "after_ms": 3.5711999516934156,
+      "delta_ms": -3.602599957957864,
+      "reduction_percent": 50.218851979842675
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "median_ms",
+      "before_ms": 6.86445,
+      "after_ms": 6.94305,
+      "delta_ms": 0.07860000000000067,
+      "reduction_percent": -1.1450298275899842
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "p95_ms",
+      "before_ms": 8.117600000000001,
+      "after_ms": 7.2184,
+      "delta_ms": -0.8992000000000013,
+      "reduction_percent": 11.077165664728506
+    },
+    {
+      "phase": "stopped-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "max_ms",
+      "before_ms": 13.483699999999999,
+      "after_ms": 7.5674,
+      "delta_ms": -5.916299999999999,
+      "reduction_percent": 43.87742236923099
+    },
+    {
+      "phase": "play-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "median_ms",
+      "before_ms": 7.1385000000000005,
+      "after_ms": 2.0254000000000003,
+      "delta_ms": -5.1131,
+      "reduction_percent": 71.62709252644112
+    },
+    {
+      "phase": "play-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "p95_ms",
+      "before_ms": 9.7737,
+      "after_ms": 4.1232999999999995,
+      "delta_ms": -5.6504,
+      "reduction_percent": 57.81229217184895
+    },
+    {
+      "phase": "play-pan",
+      "metric": "editor_handler_ms",
+      "statistic": "max_ms",
+      "before_ms": 11.5744,
+      "after_ms": 4.4989,
+      "delta_ms": -7.075500000000001,
+      "reduction_percent": 61.13059856234449
+    },
+    {
+      "phase": "play-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "median_ms",
+      "before_ms": 8.289549965411425,
+      "after_ms": 2.935799886472523,
+      "delta_ms": -5.353750078938901,
+      "reduction_percent": 64.58432727081325
+    },
+    {
+      "phase": "play-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "p95_ms",
+      "before_ms": 11.765699833631516,
+      "after_ms": 4.861699882894754,
+      "delta_ms": -6.903999950736761,
+      "reduction_percent": 58.679042032009946
+    },
+    {
+      "phase": "play-pan",
+      "metric": "framework_cpu_ms",
+      "statistic": "max_ms",
+      "before_ms": 13.353100046515465,
+      "after_ms": 5.291000008583069,
+      "delta_ms": -8.062100037932396,
+      "reduction_percent": 60.376242294658965
+    },
+    {
+      "phase": "play-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "median_ms",
+      "before_ms": 9.081199999999999,
+      "after_ms": 6.9437,
+      "delta_ms": -2.1374999999999993,
+      "reduction_percent": 23.537638197595026
+    },
+    {
+      "phase": "play-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "p95_ms",
+      "before_ms": 14.3262,
+      "after_ms": 7.2736,
+      "delta_ms": -7.0526,
+      "reduction_percent": 49.228685904147646
+    },
+    {
+      "phase": "play-pan",
+      "metric": "frame_interval_ms",
+      "statistic": "max_ms",
+      "before_ms": 18.2189,
+      "after_ms": 8.8842,
+      "delta_ms": -9.334700000000002,
+      "reduction_percent": 51.236353457124196
+    }
+  ]
+}

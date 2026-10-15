@@ -1,0 +1,16 @@
+/target/
+/.work/
+/outputs/
+/exports/
+/.tools/
+/.history/
+/.asset-history/
+/.asset-trash/
+/.user/
+/tools/dxc/*.exe
+/tools/dxc/*.dll
+/tools/dxc/download.json
+*.tmp
+*.tmp-*
+*.backup-*
+

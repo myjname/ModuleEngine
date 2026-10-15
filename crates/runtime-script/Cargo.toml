@@ -1,0 +1,13 @@
+[package]
+name = "module-engine-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+syn.workspace = true
+

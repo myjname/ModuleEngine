@@ -1,0 +1,15 @@
+[package]
+name = "module-engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[[example]]
+name = "third_world"
+path = "../../examples/third_world.rs"
+

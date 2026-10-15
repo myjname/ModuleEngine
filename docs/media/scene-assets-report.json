@@ -1,0 +1,115 @@
+{
+  "asset_id": "a-1792014896794-45436-17",
+  "case": "E:\\ModuleEngine\\outputs\\scene-assets-verification\\case-1792014896544654500",
+  "detach_keeps_object": true,
+  "drag_benchmark": [
+    {
+      "active_scene_objects": 1,
+      "commits": 1,
+      "compiled_custom_slots_retained": true,
+      "compiled_slot_count": 1,
+      "decoded_model_retained": true,
+      "frames": 120,
+      "geometry_pixels": 34421,
+      "gesture_begins": 1,
+      "max_ms": 7.3384,
+      "median_ms": 3.5241000000000002,
+      "p95_ms": 5.1568,
+      "scenario": "single-model",
+      "transform_updates": 122,
+      "undo_entries_added": 1,
+      "undo_redo": true,
+      "viewport": [
+        944,
+        563
+      ],
+      "world": "Objects"
+    },
+    {
+      "active_scene_objects": 1,
+      "commits": 1,
+      "compiled_custom_slots_retained": true,
+      "compiled_slot_count": 1,
+      "decoded_model_retained": true,
+      "frames": 120,
+      "geometry_pixels": 34421,
+      "gesture_begins": 1,
+      "max_ms": 6.9312000000000005,
+      "median_ms": 4.097499999999999,
+      "p95_ms": 6.120900000000001,
+      "scenario": "single-model",
+      "transform_updates": 122,
+      "undo_entries_added": 1,
+      "undo_redo": true,
+      "viewport": [
+        944,
+        563
+      ],
+      "world": "Ecs"
+    },
+    {
+      "active_scene_objects": 29,
+      "commits": 1,
+      "compiled_custom_slots_retained": true,
+      "compiled_slot_count": 1,
+      "decoded_model_retained": true,
+      "frames": 120,
+      "geometry_pixels": 385114,
+      "gesture_begins": 1,
+      "max_ms": 6.6838,
+      "median_ms": 4.6534,
+      "p95_ms": 5.923,
+      "scenario": "two-arenas",
+      "transform_updates": 122,
+      "undo_entries_added": 1,
+      "undo_redo": true,
+      "viewport": [
+        944,
+        563
+      ],
+      "world": "Objects"
+    },
+    {
+      "active_scene_objects": 29,
+      "commits": 1,
+      "compiled_custom_slots_retained": true,
+      "compiled_slot_count": 1,
+      "decoded_model_retained": true,
+      "frames": 120,
+      "geometry_pixels": 385114,
+      "gesture_begins": 1,
+      "max_ms": 6.510400000000001,
+      "median_ms": 4.4185,
+      "p95_ms": 5.6441,
+      "scenario": "two-arenas",
+      "transform_updates": 122,
+      "undo_entries_added": 1,
+      "undo_redo": true,
+      "viewport": [
+        944,
+        563
+      ],
+      "world": "Ecs"
+    }
+  ],
+  "exports": {
+    "full": "\\\\?\\E:\\ModuleEngine\\outputs\\scene-assets-verification\\case-1792014896544654500\\full",
+    "full_engine_available": true,
+    "player": "\\\\?\\E:\\ModuleEngine\\outputs\\scene-assets-verification\\case-1792014896544654500\\player",
+    "player_precompiled_render_pixels": 1942,
+    "team": "\\\\?\\E:\\ModuleEngine\\outputs\\scene-assets-verification\\case-1792014896544654500\\team",
+    "team_engine_available": false
+  },
+  "import_undo_redo": true,
+  "passed": true,
+  "reference": "asset://a-1792014896794-45436-17",
+  "rename_undo_redo": true,
+  "save_as_relocation": true,
+  "source_unchanged": true,
+  "timing_scope": "Actual egui pointer events, Scene actions, author-preview validation/update, synchronous Vulkan rendering/readback, RGBA conversion and egui TextureHandle update queue. Headless egui; excludes native window/compositor, egui GPU texture upload, vsync, cold compilation and initial GPU setup.",
+  "trash_restore_keeps_id": true,
+  "usage_locations": [
+    "/game/scenes/scene/objects/0/components/mesh/path"
+  ],
+  "used_delete_guard": true
+}

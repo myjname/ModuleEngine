@@ -1,0 +1,19 @@
+[package]
+name = "module-engine-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+module-engine-custom = { path = "../custom-rust" }
+module-engine-vulkan = { path = "../render-vulkan" }
+module-engine-script = { path = "../runtime-script" }
+module-engine-project = { path = "../project-tools" }
+module-engine-content = { path = "../engine-content" }
+eframe.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+png.workspace = true
+
+
