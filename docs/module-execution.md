@@ -118,11 +118,43 @@ their own rollback; they are not made reversible by the JSON snapshot. A rollbac
 failure is reported explicitly. Source modules are trusted code, not sandboxed
 plugins.
 
-`replace_system(instance, registry, migration, reset)` constructs a replacement
-first. Matching schemas retain state. A different schema requires an explicitly
-supplied migrated value or `reset = true`; otherwise the previous implementation
-continues to be installed. This is an executable system boundary, independent of
-the compiler-specific Custom source editor.
+`replace_system(instance, registry, migration, reset)` prepares a replacement
+without changing the active implementation. Its ports (including types/access),
+component contributions and preceding module requirements must match the
+installed contract. Matching state schemas retain portable JSON state; a
+different schema requires an explicitly supplied migrated value or `reset = true`.
+Contract, schema and factory failures retain the active and any already prepared
+replacement. `SystemExecutor::states()` shows the prepared portable state, or
+null for a reset awaiting initialization. Repeated preparations supersede the
+uninitialized candidate; shutdown cancels it without lifecycle calls.
+
+Activation waits until the next tick reaches this instance's authored schedule
+position, so preceding producers run before its `initialize`. Every replacement
+is initialized, including those retaining or migrating state. Its initializer
+receives the selected portable state, but that explicit retained/migrated value
+wins over any JSON defaults the initializer writes. A reset or an instance
+replaced before its first initialization uses the new initializer's defaults.
+Initialization writes to game data, resources and events join the same host tick
+transaction as `step` and publish only when the tick succeeds.
+
+After successful initialization the old initialized implementation receives one
+`stop` attempt before the candidate is installed. This replacement teardown uses
+copies of its portable context/state; teardown writes are discarded. A failed
+candidate initialization is cleaned up with `rollback_tick` and `stop`, then
+discarded while the old implementation remains installed. A failed old `stop`
+also rejects and cleans up the candidate, retains the old portable state/context,
+and marks the old implementation for reinitialization on a later tick. Its stop
+attempt is not repeated until it has initialized again. Native private or
+external lifecycle effects still require module-owned cleanup; copying JSON does
+not reverse an OS call or a private mutation.
+
+Once installed, a replacement follows ordinary tick rollback semantics. If its
+first tick or host publication fails, it remains installed with pre-initialization
+portable state and retries initialization on the next tick; the retired old
+implementation is not restored or stopped again. This executable boundary is
+independent of the compiler-specific Custom source editor. Session transitions
+and restarts still construct their systems from the session's installed registry;
+preparing one live instance does not rewrite that registry.
 
 ## Simulation and rendering
 

@@ -389,12 +389,39 @@ impl SystemRegistry {
     }
 }
 
+struct PreparedReplacement {
+    descriptor: SystemDescriptor,
+    implementation: Box<dyn ExecutableSystem>,
+    /// None uses initialize's defaults; Some retains explicitly portable state.
+    state: Option<Value>,
+}
+
+impl PreparedReplacement {
+    fn cleanup(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Vec<String> {
+        let mut errors = vec![];
+        if let Err(error) = self.implementation.rollback_tick() {
+            errors.push(format!("rollback: {error}"));
+        }
+        if let Err(error) = self.implementation.stop(ctx, state) {
+            errors.push(format!("stop: {error}"));
+        }
+        errors
+    }
+}
+
 struct LiveSystem {
     node: SystemNode,
-    schema: String,
+    descriptor: SystemDescriptor,
     implementation: Box<dyn ExecutableSystem>,
     state: Value,
     initialized: bool,
+    preserve_on_initialize: bool,
+    pending: Option<PreparedReplacement>,
+}
+
+struct TickCheckpoint {
+    states: Vec<(Value, bool)>,
+    entered: usize,
 }
 
 /// Executor of arbitrary registered systems; it does not inspect module IDs.
@@ -411,10 +438,12 @@ impl SystemExecutor {
             let (d, f) = &registry.entries[&node.module];
             systems.push(LiveSystem {
                 node: node.clone(),
-                schema: d.state_schema.clone(),
+                descriptor: d.clone(),
                 implementation: f(&node.params)?,
                 state: Value::Null,
                 initialized: false,
+                preserve_on_initialize: false,
+                pending: None,
             });
         }
         let resources = graph
@@ -453,16 +482,18 @@ impl SystemExecutor {
         let original_game = game.clone();
         let original_resources = self.resources.clone();
         let original_events = events.clone();
-        let original_states: Vec<_> = self
-            .systems
-            .iter()
-            .map(|s| (s.state.clone(), s.initialized))
-            .collect();
-        let mut entered = 0;
-        let mut result = self.run_tick(game, input, dt, events, &mut entered, transaction);
+        let mut checkpoint = TickCheckpoint {
+            states: self
+                .systems
+                .iter()
+                .map(|s| (s.state.clone(), s.initialized))
+                .collect(),
+            entered: 0,
+        };
+        let mut result = self.run_tick(game, input, dt, events, &mut checkpoint, transaction);
         if result.is_err() {
             let mut rollback_errors = vec![];
-            for system in self.systems.iter_mut().take(entered).rev() {
+            for system in self.systems.iter_mut().take(checkpoint.entered).rev() {
                 if let Err(error) = system.implementation.rollback_tick() {
                     rollback_errors.push(format!("{}: {error}", system.node.id));
                 }
@@ -473,7 +504,7 @@ impl SystemExecutor {
             *game = original_game;
             self.resources = original_resources;
             *events = original_events;
-            for (system, (state, initialized)) in self.systems.iter_mut().zip(original_states) {
+            for (system, (state, initialized)) in self.systems.iter_mut().zip(checkpoint.states) {
                 system.state = state;
                 system.initialized = initialized;
             }
@@ -487,26 +518,129 @@ impl SystemExecutor {
         }
         result
     }
+    /// Activation needs a real tick context. Initialization writes join this
+    /// tick's transaction; teardown writes are discarded with its scratch DTOs.
+    fn activate_replacement(
+        &mut self,
+        index: usize,
+        game: &mut GameState,
+        input: &GameInput,
+        dt: f32,
+        events: &mut Vec<GameEvent>,
+        rollback_state: &mut (Value, bool),
+    ) -> Result<(), String> {
+        let system = &mut self.systems[index];
+        let Some(mut candidate) = system.pending.take() else {
+            return Ok(());
+        };
+        let mut old_game = game.clone();
+        let mut old_resources = self.resources.clone();
+        let mut old_events = events.clone();
+        let before_initialize = candidate.state.clone().unwrap_or(Value::Null);
+        let mut candidate_state = before_initialize.clone();
+        let initialization = {
+            let mut ctx = SystemContext {
+                game,
+                resources: &mut self.resources,
+                events,
+                dt,
+                input,
+                bindings: &system.node.bindings,
+            };
+            candidate
+                .implementation
+                .initialize(&mut ctx, &mut candidate_state)
+        };
+        let mut teardown = SystemContext {
+            game: &mut old_game,
+            resources: &mut old_resources,
+            events: &mut old_events,
+            dt: 0.,
+            input,
+            bindings: &system.node.bindings,
+        };
+        if let Err(error) = initialization {
+            let cleanup = candidate.cleanup(&mut teardown, &mut candidate_state);
+            let detail = if cleanup.is_empty() {
+                String::new()
+            } else {
+                format!("; replacement cleanup failed: {}", cleanup.join("; "))
+            };
+            return Err(format!(
+                "System '{}' replacement initialize: {error}{detail}",
+                system.node.id
+            ));
+        }
+        if system.initialized {
+            // A stop hook can have irreversible private effects. Attempt it
+            // once, retaining portable state and requiring reinitialization
+            // if shutdown rejects the replacement.
+            system.initialized = false;
+            system.preserve_on_initialize = true;
+            rollback_state.1 = false;
+            let mut old_state = system.state.clone();
+            if let Err(error) = system.implementation.stop(&mut teardown, &mut old_state) {
+                let cleanup = candidate.cleanup(&mut teardown, &mut candidate_state);
+                let detail = if cleanup.is_empty() {
+                    String::new()
+                } else {
+                    format!("; replacement cleanup failed: {}", cleanup.join("; "))
+                };
+                return Err(format!(
+                    "System '{}' replacement stop: {error}{detail}",
+                    system.node.id
+                ));
+            }
+        }
+        // initialize always sets up the new implementation, but an explicit
+        // retain/migrate choice wins over any JSON defaults it writes.
+        if let Some(state) = &candidate.state {
+            candidate_state = state.clone();
+        }
+        *rollback_state = (before_initialize, false);
+        system.preserve_on_initialize = candidate.state.is_some();
+        system.descriptor = candidate.descriptor;
+        system.implementation = candidate.implementation;
+        system.state = candidate_state;
+        system.initialized = true;
+        Ok(())
+    }
+    fn refresh_service_resources(
+        resources: &mut ResourceStore,
+        input: &GameInput,
+        events: &[GameEvent],
+    ) -> Result<(), String> {
+        for resource in resources.values_mut() {
+            resource.value = match resource.data_type.as_str() {
+                "GameInput" => serde_json::to_value(input).map_err(|e| e.to_string())?,
+                "GameEvents" => serde_json::to_value(events).map_err(|e| e.to_string())?,
+                // GameWorld uses the typed capability, without copying entities.
+                _ => resource.value.clone(),
+            };
+        }
+        Ok(())
+    }
     fn run_tick(
         &mut self,
         game: &mut GameState,
         input: &GameInput,
         dt: f32,
         events: &mut Vec<GameEvent>,
-        entered: &mut usize,
+        checkpoint: &mut TickCheckpoint,
         transaction: &mut dyn TickTransaction,
     ) -> Result<(), String> {
-        for (index, system) in self.systems.iter_mut().enumerate() {
-            *entered = index + 1;
-            for resource in self.resources.values_mut() {
-                resource.value = match resource.data_type.as_str() {
-                    "GameInput" => serde_json::to_value(input).map_err(|e| e.to_string())?,
-                    "GameEvents" => serde_json::to_value(&*events).map_err(|e| e.to_string())?,
-                    // GameWorld uses the typed game capability; duplicating all
-                    // entities into JSON before every system is unnecessary.
-                    _ => resource.value.clone(),
-                };
-            }
+        for index in 0..self.systems.len() {
+            Self::refresh_service_resources(&mut self.resources, input, events)?;
+            self.activate_replacement(
+                index,
+                game,
+                input,
+                dt,
+                events,
+                &mut checkpoint.states[index],
+            )?;
+            checkpoint.entered = index + 1;
+            let system = &mut self.systems[index];
             let mut ctx = SystemContext {
                 game,
                 resources: &mut self.resources,
@@ -516,9 +650,13 @@ impl SystemExecutor {
                 bindings: &system.node.bindings,
             };
             if !system.initialized {
+                let retained = system.preserve_on_initialize.then(|| system.state.clone());
                 system
                     .implementation
                     .initialize(&mut ctx, &mut system.state)?;
+                if let Some(state) = retained {
+                    system.state = state;
+                }
                 system.initialized = true;
             }
             system
@@ -554,6 +692,9 @@ impl SystemExecutor {
         let input = GameInput::default();
         let mut errors = vec![];
         for system in self.systems.iter_mut().rev() {
+            // Prepared candidates never received initialize and own no active
+            // lifecycle. Shutdown cancels them without invoking stop.
+            system.pending = None;
             if system.initialized {
                 // Mark first so a later best-effort shutdown cannot invoke a
                 // failing stop hook twice; other instances still receive stop.
@@ -580,14 +721,22 @@ impl SystemExecutor {
     pub fn states(&self) -> BTreeMap<String, Value> {
         self.systems
             .iter()
-            .map(|s| (s.node.id.clone(), s.state.clone()))
+            .map(|s| {
+                let state = s.pending.as_ref().map_or_else(
+                    || s.state.clone(),
+                    |candidate| candidate.state.clone().unwrap_or(Value::Null),
+                );
+                (s.node.id.clone(), state)
+            })
             .collect()
     }
     pub fn resources(&self) -> &ResourceStore {
         &self.resources
     }
-    /// Stage a replacement only when the state contract matches. A caller can
-    /// explicitly migrate state or request a reset instead of losing it silently.
+    /// Prepare a replacement without changing the active implementation. The
+    /// next tick initializes it before retiring the old instance. Its scheduling
+    /// and component contracts must remain unchanged; a different state schema
+    /// requires explicit migration or reset. `states` exposes the prepared state.
     pub fn replace(
         &mut self,
         id: &str,
@@ -604,18 +753,38 @@ impl SystemExecutor {
             .entries
             .get(&live.node.module)
             .ok_or_else(|| "Replacement module is missing".to_string())?;
-        if live.schema != d.state_schema && !reset && migrated.is_none() {
+        let current = live
+            .pending
+            .as_ref()
+            .map_or(&live.descriptor, |p| &p.descriptor);
+        let current_ports: BTreeMap<_, _> = current.ports.iter().map(|p| (&p.name, p)).collect();
+        let replacement_ports: BTreeMap<_, _> = d.ports.iter().map(|p| (&p.name, p)).collect();
+        if current_ports != replacement_ports
+            || current.components.iter().collect::<BTreeSet<_>>() != d.components.iter().collect()
+            || current.requires.iter().collect::<BTreeSet<_>>() != d.requires.iter().collect()
+        {
+            return Err("Incompatible execution/component contract: ports, components and requires must remain unchanged; previous implementation retained".into());
+        }
+        if current.state_schema != d.state_schema && !reset && migrated.is_none() {
             return Err("Incompatible state schema: explicit reset or migration required; previous implementation retained".into());
         }
         let replacement = f(&live.node.params)?;
-        live.implementation = replacement;
-        live.schema = d.state_schema.clone();
-        if reset {
-            live.state = Value::Null;
-            live.initialized = false;
+        let state = if reset {
+            None
         } else if let Some(state) = migrated {
-            live.state = state;
-        }
+            Some(state)
+        } else if let Some(candidate) = &live.pending {
+            candidate.state.clone()
+        } else if live.initialized || !live.state.is_null() || live.preserve_on_initialize {
+            Some(live.state.clone())
+        } else {
+            None
+        };
+        live.pending = Some(PreparedReplacement {
+            descriptor: d.clone(),
+            implementation: replacement,
+            state,
+        });
         Ok(())
     }
 }
@@ -698,6 +867,558 @@ mod tests {
         g.stages[0].nodes[0].module = "custom.missing".into();
         assert!(r.validate(&g).unwrap_err().contains("factory"));
     }
+
+    #[derive(Clone)]
+    struct LifecycleConfig {
+        label: &'static str,
+        default_state: u64,
+        reject_initialize: bool,
+        reject_step: bool,
+        reject_stop: bool,
+        initialize_outputs: bool,
+    }
+
+    impl LifecycleConfig {
+        fn new(label: &'static str, default_state: u64) -> Self {
+            Self {
+                label,
+                default_state,
+                reject_initialize: false,
+                reject_step: false,
+                reject_stop: false,
+                initialize_outputs: false,
+            }
+        }
+    }
+
+    struct LifecycleProbe {
+        config: LifecycleConfig,
+        initialized: bool,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ExecutableSystem for LifecycleProbe {
+        fn initialize(
+            &mut self,
+            ctx: &mut SystemContext<'_>,
+            state: &mut Value,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:initialize:{state}", self.config.label));
+            self.initialized = true;
+            *state = json!(self.config.default_state);
+            if self.config.initialize_outputs {
+                ctx.game.time += 50.;
+                ctx.set_resource("value", json!(77))?;
+                ctx.events.push(GameEvent::Custom {
+                    name: self.config.label.into(),
+                    payload: json!("initialized"),
+                });
+            }
+            if self.config.reject_initialize {
+                Err("initialize rejected".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn step(&mut self, _: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:step:{state}", self.config.label));
+            if !self.initialized {
+                return Err("step without initialize".into());
+            }
+            *state = json!(state.as_u64().unwrap() + 1);
+            if self.config.reject_step {
+                Err("step rejected".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn rollback_tick(&mut self) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:rollback", self.config.label));
+            Ok(())
+        }
+
+        fn stop(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:stop", self.config.label));
+            self.initialized = false;
+            // Teardown is allowed to mutate its context, but these writes must
+            // not replace the active portable state during hot replacement.
+            *state = json!(999);
+            ctx.game.time = 999.;
+            ctx.set_resource("value", json!(999))?;
+            ctx.events.push(GameEvent::Custom {
+                name: "teardown".into(),
+                payload: Value::Null,
+            });
+            if self.config.reject_stop {
+                Err("stop rejected".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn lifecycle_descriptor(schema: &str) -> SystemDescriptor {
+        SystemDescriptor {
+            id: "test.lifecycle".into(),
+            state_schema: schema.into(),
+            components: vec!["test-component".into()],
+            ports: vec![SystemPort {
+                name: "value".into(),
+                data_type: "Number".into(),
+                access: ResourceAccess::ReadWrite,
+            }],
+            requires: vec![],
+        }
+    }
+
+    fn lifecycle_registry(
+        schema: &str,
+        config: LifecycleConfig,
+        calls: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> SystemRegistry {
+        let mut registry = SystemRegistry::default();
+        let calls = calls.clone();
+        registry
+            .register(lifecycle_descriptor(schema), move |_| {
+                Ok(Box::new(LifecycleProbe {
+                    config: config.clone(),
+                    initialized: false,
+                    calls: calls.clone(),
+                }))
+            })
+            .unwrap();
+        registry
+    }
+
+    fn lifecycle_fixture(registry: &SystemRegistry) -> (SystemExecutor, GameState) {
+        let graph = ExecutionGraph {
+            resources: vec![SystemResource {
+                name: "counter".into(),
+                data_type: "Number".into(),
+                external: true,
+                initial: json!(0),
+            }],
+            stages: vec![SystemStage {
+                name: "Lifecycle".into(),
+                nodes: vec![SystemNode {
+                    id: "probe".into(),
+                    module: "test.lifecycle".into(),
+                    params: Value::Null,
+                    bindings: BTreeMap::from([("value".into(), "counter".into())]),
+                    after: vec![],
+                }],
+            }],
+        };
+        let game = crate::GameSession::new(crate::GameProject::demo(), crate::WorldKind::Objects)
+            .unwrap()
+            .state()
+            .clone();
+        (SystemExecutor::new(&graph, registry).unwrap(), game)
+    }
+
+    fn call_count(calls: &Arc<std::sync::Mutex<Vec<String>>>, name: &str) -> usize {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.starts_with(name))
+            .count()
+    }
+
+    #[test]
+    fn replacement_initializes_retains_state_and_stops_each_live_implementation_once() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let new = lifecycle_registry("1", LifecycleConfig::new("new", 100), &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(executor.states()["probe"], json!(11));
+        executor.replace("probe", &new, None, false).unwrap();
+        assert_eq!(executor.states()["probe"], json!(11));
+        assert_eq!(
+            call_count(&calls, "old:stop"),
+            0,
+            "activation needs a tick context"
+        );
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(
+            executor.states()["probe"],
+            json!(12),
+            "initializer defaults must not overwrite retained state"
+        );
+        assert_eq!(call_count(&calls, "new:initialize:11"), 1);
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(
+            game.time, 0.,
+            "old teardown must not publish context writes"
+        );
+        assert_eq!(executor.resources()["counter"].value, json!(0));
+        assert!(events.is_empty());
+        executor.stop(&mut game, &mut events).unwrap();
+        executor.stop(&mut game, &mut events).unwrap();
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(call_count(&calls, "new:stop"), 1);
+    }
+
+    #[test]
+    fn replacement_before_first_tick_can_be_superseded_migrated_and_reset() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let superseded = lifecycle_registry("2", LifecycleConfig::new("superseded", 20), &calls);
+        let new = lifecycle_registry("2", LifecycleConfig::new("new", 30), &calls);
+        let reset = lifecycle_registry("3", LifecycleConfig::new("reset", 40), &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .replace("probe", &superseded, Some(json!(7)), false)
+            .unwrap();
+        executor.replace("probe", &new, None, false).unwrap();
+        assert_eq!(executor.states()["probe"], json!(7));
+        let mut broken = SystemRegistry::default();
+        broken
+            .register(
+                lifecycle_descriptor("2"),
+                |_| Err("factory rejected".into()),
+            )
+            .unwrap();
+        assert!(
+            executor
+                .replace("probe", &broken, None, false)
+                .unwrap_err()
+                .contains("factory rejected")
+        );
+        assert_eq!(
+            executor.states()["probe"],
+            json!(7),
+            "a rejected factory must retain the prepared candidate"
+        );
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(executor.states()["probe"], json!(8));
+        assert_eq!(call_count(&calls, "old:"), 0);
+        assert_eq!(call_count(&calls, "superseded:"), 0);
+        assert_eq!(call_count(&calls, "new:initialize:7"), 1);
+        executor.replace("probe", &reset, None, true).unwrap();
+        assert!(executor.states()["probe"].is_null());
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(
+            executor.states()["probe"],
+            json!(41),
+            "reset uses initialization defaults"
+        );
+        assert_eq!(call_count(&calls, "new:stop"), 1);
+        assert_eq!(call_count(&calls, "reset:initialize:null"), 1);
+    }
+
+    #[test]
+    fn replacement_initialize_failure_discards_candidate_and_retains_old_context() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let mut config = LifecycleConfig::new("rejected", 100);
+        config.reject_initialize = true;
+        config.initialize_outputs = true;
+        let rejected = lifecycle_registry("1", config, &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        let original_game = game.clone();
+        let original_resources = executor.resources().clone();
+        executor.replace("probe", &rejected, None, false).unwrap();
+        assert!(
+            executor
+                .step(&mut game, &GameInput::default(), 0.01, &mut events)
+                .unwrap_err()
+                .contains("replacement initialize")
+        );
+        assert_eq!(game, original_game);
+        assert_eq!(executor.resources(), &original_resources);
+        assert!(events.is_empty());
+        assert_eq!(executor.states()["probe"], json!(11));
+        assert_eq!(call_count(&calls, "old:stop"), 0);
+        assert_eq!(call_count(&calls, "rejected:rollback"), 1);
+        assert_eq!(call_count(&calls, "rejected:stop"), 1);
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(executor.states()["probe"], json!(12));
+        assert_eq!(call_count(&calls, "old:initialize"), 1);
+        assert_eq!(call_count(&calls, "rejected:initialize"), 1);
+    }
+
+    #[test]
+    fn replacement_stop_failure_retains_portable_state_and_reinitializes_old() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let mut config = LifecycleConfig::new("old", 10);
+        config.reject_stop = true;
+        let old = lifecycle_registry("1", config, &calls);
+        let mut config = LifecycleConfig::new("new", 100);
+        config.initialize_outputs = true;
+        let new = lifecycle_registry("1", config, &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        let original_game = game.clone();
+        let original_resources = executor.resources().clone();
+        executor.replace("probe", &new, None, false).unwrap();
+        assert!(
+            executor
+                .step(&mut game, &GameInput::default(), 0.01, &mut events)
+                .unwrap_err()
+                .contains("replacement stop")
+        );
+        assert_eq!(game, original_game);
+        assert_eq!(executor.resources(), &original_resources);
+        assert!(events.is_empty());
+        assert_eq!(executor.states()["probe"], json!(11));
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(call_count(&calls, "new:stop"), 1);
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(executor.states()["probe"], json!(12));
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(call_count(&calls, "old:initialize:11"), 1);
+        assert_eq!(call_count(&calls, "new:initialize"), 1);
+    }
+
+    #[derive(Default)]
+    struct InitializationTransaction {
+        reject: bool,
+        validated_times: Vec<f64>,
+        commits: usize,
+        rollbacks: usize,
+    }
+
+    impl TickTransaction for InitializationTransaction {
+        fn validate(&mut self, candidate: &GameState) -> Result<(), String> {
+            self.validated_times.push(candidate.time);
+            if self.reject {
+                Err("host rejected".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn commit(&mut self, _: &GameState) -> Result<(), String> {
+            self.commits += 1;
+            Ok(())
+        }
+
+        fn rollback(&mut self) -> Result<(), String> {
+            self.rollbacks += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn replacement_initialize_outputs_publish_with_tick_and_retry_after_host_rejection() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let mut config = LifecycleConfig::new("new", 100);
+        config.initialize_outputs = true;
+        let new = lifecycle_registry("1", config, &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        let original_game = game.clone();
+        let original_resources = executor.resources().clone();
+        executor.replace("probe", &new, None, false).unwrap();
+        let mut transaction = InitializationTransaction {
+            reject: true,
+            ..Default::default()
+        };
+        assert!(
+            executor
+                .step_with_transaction(
+                    &mut game,
+                    &GameInput::default(),
+                    0.01,
+                    &mut events,
+                    &mut transaction
+                )
+                .is_err()
+        );
+        assert_eq!(game, original_game);
+        assert_eq!(executor.resources(), &original_resources);
+        assert!(events.is_empty());
+        assert_eq!(executor.states()["probe"], json!(11));
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(call_count(&calls, "new:rollback"), 1);
+        transaction.reject = false;
+        executor
+            .step_with_transaction(
+                &mut game,
+                &GameInput::default(),
+                0.01,
+                &mut events,
+                &mut transaction,
+            )
+            .unwrap();
+        assert_eq!(game.time, 50.);
+        assert_eq!(executor.resources()["counter"].value, json!(77));
+        assert_eq!(
+            events,
+            vec![GameEvent::Custom {
+                name: "new".into(),
+                payload: json!("initialized")
+            }]
+        );
+        assert_eq!(executor.states()["probe"], json!(12));
+        assert_eq!(call_count(&calls, "new:initialize:11"), 2);
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(transaction.validated_times, vec![50., 50.]);
+        assert_eq!(transaction.commits, 1);
+        assert_eq!(transaction.rollbacks, 1);
+    }
+
+    #[test]
+    fn replacement_initialize_reads_resources_after_authored_predecessors_run() {
+        struct InitializedConsumer;
+        impl ExecutableSystem for InitializedConsumer {
+            fn initialize(
+                &mut self,
+                ctx: &mut SystemContext<'_>,
+                state: &mut Value,
+            ) -> Result<(), String> {
+                let produced = ctx
+                    .resource("value")?
+                    .as_u64()
+                    .ok_or("predecessor has not produced its resource")?;
+                *state = json!(produced);
+                Ok(())
+            }
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let (graph, registry) = graph_registry(false, "1");
+        let mut replacement = SystemRegistry::default();
+        replacement
+            .register(
+                registry.descriptor("third.consumer").unwrap().clone(),
+                |_| Ok(Box::new(InitializedConsumer)),
+            )
+            .unwrap();
+        let mut executor = SystemExecutor::new(&graph, &registry).unwrap();
+        let mut game =
+            crate::GameSession::new(crate::GameProject::demo(), crate::WorldKind::Objects)
+                .unwrap()
+                .state()
+                .clone();
+        executor.replace("b", &replacement, None, false).unwrap();
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut vec![])
+            .unwrap();
+        assert_eq!(executor.states()["a"], json!(1));
+        assert_eq!(executor.states()["b"], json!(1));
+    }
+
+    #[test]
+    fn replacement_contract_changes_are_rejected_before_factory_or_state_mutation() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        let factories = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut contracts = vec![];
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.components.clear();
+        contracts.push(descriptor);
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.ports[0].name = "renamed".into();
+        contracts.push(descriptor);
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.ports[0].data_type = "Text".into();
+        contracts.push(descriptor);
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.ports[0].access = ResourceAccess::Read;
+        contracts.push(descriptor);
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.ports.clear();
+        contracts.push(descriptor);
+        let mut descriptor = lifecycle_descriptor("2");
+        descriptor.requires.push("missing.predecessor".into());
+        contracts.push(descriptor);
+        for descriptor in contracts {
+            let factories = factories.clone();
+            let mut registry = SystemRegistry::default();
+            registry
+                .register(descriptor, move |_| {
+                    factories.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("must not construct an incompatible replacement".into())
+                })
+                .unwrap();
+            assert!(
+                executor
+                    .replace("probe", &registry, Some(json!(700)), true)
+                    .unwrap_err()
+                    .contains("contract")
+            );
+            assert_eq!(executor.states()["probe"], json!(11));
+        }
+        assert_eq!(factories.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(call_count(&calls, "old:stop"), 0);
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        assert_eq!(executor.states()["probe"], json!(12));
+    }
+
+    #[test]
+    fn shutdown_cancels_a_prepared_replacement_without_initializing_it() {
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let old = lifecycle_registry("1", LifecycleConfig::new("old", 10), &calls);
+        let new = lifecycle_registry("1", LifecycleConfig::new("new", 100), &calls);
+        let (mut executor, mut game) = lifecycle_fixture(&old);
+        let mut events = vec![];
+        executor
+            .step(&mut game, &GameInput::default(), 0.01, &mut events)
+            .unwrap();
+        executor
+            .replace("probe", &new, Some(json!(55)), false)
+            .unwrap();
+        executor.stop(&mut game, &mut events).unwrap();
+        executor.stop(&mut game, &mut events).unwrap();
+        assert_eq!(call_count(&calls, "old:stop"), 1);
+        assert_eq!(call_count(&calls, "new:"), 0);
+        assert_eq!(
+            executor.states()["probe"],
+            json!(999),
+            "shutdown cancels the prepared state"
+        );
+    }
+
     struct Producer;
     impl ExecutableSystem for Producer {
         fn step(&mut self, ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {

@@ -284,20 +284,7 @@ impl GameSession {
         project.validate_with_registry(&registry)?;
         let active_components = registry.active_components(&project.execution)?;
         let state = Self::load_state(&project, &project.entry_scene, 0., 0, &active_components)?;
-        let provider = world_factory(state.entities.values().map(|e| e.object.clone()).collect())?;
-        let loaded = provider.objects()?;
-        crate::validate_world_commands(&loaded, &[])?;
-        if object_map(&loaded)
-            != object_map(
-                &state
-                    .entities
-                    .values()
-                    .map(|e| e.object.clone())
-                    .collect::<Vec<_>>(),
-            )
-        {
-            return Err("World factory did not load the supplied authored objects".into());
-        }
+        let provider = Self::load_provider(&world_factory, &state)?;
         let executor = SystemExecutor::new(&project.execution, &registry)?;
         Ok(Self {
             project,
@@ -313,6 +300,20 @@ impl GameSession {
             world_factory,
             active_components,
         })
+    }
+    fn load_provider(
+        world_factory: &GameWorldFactory,
+        state: &GameState,
+    ) -> Result<Box<dyn WorldProvider>, String> {
+        let objects: Vec<_> = state.entities.values().map(|e| e.object.clone()).collect();
+        crate::validate_world_commands(&objects, &[])?;
+        let provider = world_factory(objects.clone())?;
+        let loaded = provider.objects()?;
+        crate::validate_world_commands(&loaded, &[])?;
+        if object_map(&loaded) != object_map(&objects) {
+            return Err("World factory did not load the supplied authored objects".into());
+        }
+        Ok(provider)
     }
     fn load_state(
         project: &GameProject,
@@ -487,7 +488,8 @@ impl GameSession {
         self.accumulator
     }
     /// Explicit scene transition reloads scene-owned state, preserving entities
-    /// marked persistent. Destination-authored positions/references remain local.
+    /// marked persistent. Destination-authored hierarchy/transforms/references
+    /// remain local.
     pub fn transition(&mut self, id: &str) -> Result<(), String> {
         let from = self.state.scene.clone();
         let carried: Vec<_> = self
@@ -507,6 +509,7 @@ impl GameSession {
         )?;
         for mut entity in carried {
             if let Some(destination) = next.entities.get(&entity.object.id) {
+                entity.object.parent = destination.object.parent;
                 entity.object.transform = destination.object.transform;
                 entity.references = destination.references.clone();
             } else {
@@ -518,13 +521,19 @@ impl GameSession {
             }
             next.entities.insert(entity.object.id, entity);
         }
-        let provider =
-            (self.world_factory)(next.entities.values().map(|e| e.object.clone()).collect())?;
+        let provider = Self::load_provider(&self.world_factory, &next)?;
         let executor = SystemExecutor::new(&self.project.execution, &self.registry)?;
-        self.executor.stop(&mut self.state, &mut self.events)?;
+        // Stop hooks can fail after mutating their context. Keep the visible
+        // scene/events until replacement succeeds; external shutdown effects
+        // still follow the executor's best-effort, exactly-once contract.
+        let mut stopped_state = self.state.clone();
+        let mut stopped_events = self.events.clone();
+        self.executor
+            .stop(&mut stopped_state, &mut stopped_events)?;
         self.state = next;
         self.provider = provider;
         self.executor = executor;
+        self.events = stopped_events;
         self.events.push(GameEvent::SceneChanged {
             from,
             to: id.into(),
@@ -538,7 +547,10 @@ impl GameSession {
             self.registry.clone(),
             self.world_factory.clone(),
         )?;
-        self.executor.stop(&mut self.state, &mut self.events)?;
+        let mut stopped_state = self.state.clone();
+        let mut stopped_events = self.events.clone();
+        self.executor
+            .stop(&mut stopped_state, &mut stopped_events)?;
         *self = replacement;
         Ok(())
     }
@@ -1240,36 +1252,52 @@ fn health_system(ctx: &mut SystemContext<'_>, state: &mut Value) -> Result<(), S
     } else {
         serde_json::from_value(state.clone()).map_err(|e| e.to_string())?
     };
+    // Only retained dead entities need duplicate suppression. Removed IDs can
+    // be spawned again, and a revived entity can die again in a later tick.
+    emitted.retain(|id| {
+        ctx.game
+            .entities
+            .get(id)
+            .is_some_and(|e| e.components.contains_key("health") && health(e) <= 0.)
+    });
     let dead: Vec<_> = ctx
         .game
         .entities
         .values()
         .filter(|e| e.components.contains_key("health") && health(e) <= 0.)
-        .map(|e| e.object.id)
+        // Capture death metadata before removing a parent can remove another
+        // dead entity in this same batch.
+        .map(|e| {
+            (
+                e.object.id,
+                e.components.contains_key("player"),
+                e.components
+                    .get("boss")
+                    .and_then(|v| v.get("victory_on_death"))
+                    .and_then(Value::as_bool)
+                    == Some(true),
+            )
+        })
         .collect();
-    for id in dead {
+    for (id, player, victory) in dead {
         if emitted.contains(&id) {
             continue;
         }
         emitted.push(id);
-        let entity = &ctx.game.entities[&id];
         ctx.events.push(GameEvent::Death { object: id });
-        if entity.components.contains_key("player") {
+        if player {
             ctx.game.status = GameStatus::Defeat;
         } else {
-            if entity
-                .components
-                .get("boss")
-                .and_then(|v| v.get("victory_on_death"))
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
+            if victory {
                 ctx.game.status = GameStatus::Victory;
                 ctx.events.push(GameEvent::Victory);
             }
-            ctx.game.apply_commands(&[WorldCommand::Remove { id }])?;
+            if ctx.game.entities.contains_key(&id) {
+                ctx.game.apply_commands(&[WorldCommand::Remove { id }])?;
+            }
         }
     }
+    emitted.retain(|id| ctx.game.entities.contains_key(id));
     *state = json!(emitted);
     Ok(())
 }
@@ -1347,6 +1375,338 @@ mod tests {
         let scene = p.scenes.get_mut("arena").unwrap();
         scene.objects.retain(|e| e.prefab.is_none());
         p
+    }
+    fn test_object(id: u64, parent: Option<u64>) -> crate::AuthoredObject {
+        crate::AuthoredObject::new(WorldObject {
+            id,
+            parent,
+            transform: crate::Transform::default(),
+            color: [80, 120, 160, 255],
+        })
+    }
+    fn focused_project(objects: Vec<crate::AuthoredObject>, modules: &[&str]) -> GameProject {
+        let mut project = GameProject::demo();
+        project.entry_scene = "source".into();
+        project.scenes = BTreeMap::from([(
+            "source".into(),
+            crate::AuthoredScene {
+                name: "Source".into(),
+                objects,
+            },
+        )]);
+        project.prefabs.clear();
+        project.audio_cues.clear();
+        project.execution.stages.retain_mut(|stage| {
+            stage.nodes.retain_mut(|node| {
+                node.after.clear();
+                modules.contains(&node.module.as_str())
+            });
+            !stage.nodes.is_empty()
+        });
+        project
+    }
+    fn dead_object(id: u64, parent: Option<u64>) -> crate::AuthoredObject {
+        let mut object = test_object(id, parent);
+        object
+            .components
+            .insert("health".into(), json!({"maximum":10.,"current":0.}));
+        object
+    }
+    #[test]
+    fn health_subtree_removal_captures_dead_descendant_metadata() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            for player in [false, true] {
+                let mut child = dead_object(20, Some(10));
+                child.components.insert(
+                    if player { "player" } else { "boss" }.into(),
+                    if player {
+                        json!({})
+                    } else {
+                        json!({"victory_on_death":true})
+                    },
+                );
+                let project = focused_project(
+                    vec![
+                        dead_object(10, None),
+                        child,
+                        test_object(30, Some(20)),
+                        dead_object(40, Some(30)),
+                    ],
+                    &["game.health"],
+                );
+                let mut session = GameSession::new(project, kind).unwrap();
+                session.step(1. / 60., &GameInput::default()).unwrap();
+                let deaths: Vec<_> = session
+                    .events()
+                    .iter()
+                    .filter_map(|event| {
+                        if let GameEvent::Death { object } = event {
+                            Some(*object)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(deaths, vec![10, 20, 40]);
+                assert_eq!(
+                    session.state().status,
+                    if player {
+                        GameStatus::Defeat
+                    } else {
+                        GameStatus::Victory
+                    }
+                );
+                assert_eq!(session.events().contains(&GameEvent::Victory), !player);
+                assert!(session.state().entities.is_empty());
+                assert!(session.provider.objects().unwrap().is_empty());
+                assert!(session.snapshot().items.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn health_reused_removed_id_emits_another_death() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let project = focused_project(vec![dead_object(10, None)], &["game.health"]);
+            let mut session = GameSession::new(project, kind).unwrap();
+            for _ in 0..2 {
+                session.step(1. / 60., &GameInput::default()).unwrap();
+                assert_eq!(session.events(), &[GameEvent::Death { object: 10 }]);
+                assert!(session.state().entities.is_empty());
+                assert!(session.provider.objects().unwrap().is_empty());
+                session
+                    .apply_commands(&[WorldCommand::Spawn {
+                        object: test_object(10, None).object,
+                    }])
+                    .unwrap();
+                session
+                    .state
+                    .entities
+                    .get_mut(&10)
+                    .unwrap()
+                    .components
+                    .insert("health".into(), json!({"maximum":10.,"current":0.}));
+            }
+        }
+    }
+    struct RejectHealthPublication(Arc<std::sync::atomic::AtomicBool>);
+    impl ExecutableSystem for RejectHealthPublication {
+        fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            Ok(())
+        }
+        fn commit_tick(&mut self) -> Result<(), String> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("Reject health publication".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn append_test_system(project: &mut GameProject, id: &str) {
+        project.execution.stages.push(crate::SystemStage {
+            name: id.into(),
+            nodes: vec![crate::SystemNode {
+                id: id.into(),
+                module: id.into(),
+                params: Value::Null,
+                bindings: BTreeMap::new(),
+                after: vec![],
+            }],
+        });
+    }
+    fn test_system_descriptor(id: &str) -> SystemDescriptor {
+        SystemDescriptor {
+            id: id.into(),
+            state_schema: "1".into(),
+            components: vec![],
+            ports: vec![],
+            requires: vec![],
+        }
+    }
+    #[test]
+    fn rejected_health_publication_restores_subtrees_events_and_death_state() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let reject = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let control = reject.clone();
+            let mut registry = SystemRegistry::builtin();
+            registry
+                .register(test_system_descriptor("test.reject-health"), move |_| {
+                    Ok(Box::new(RejectHealthPublication(control.clone())))
+                })
+                .unwrap();
+            let mut project = focused_project(
+                vec![dead_object(10, None), dead_object(20, Some(10))],
+                &["game.health"],
+            );
+            append_test_system(&mut project, "test.reject-health");
+            let mut session = GameSession::new_with_registry(project, kind, registry).unwrap();
+            let state = session.state().clone();
+            let snapshot = session.snapshot();
+            let system_states = session.system_states();
+            assert!(
+                session
+                    .step(1. / 60., &GameInput::default())
+                    .unwrap_err()
+                    .contains("Reject health publication")
+            );
+            assert_eq!(session.state(), &state);
+            assert_eq!(session.snapshot(), snapshot);
+            assert_eq!(session.system_states(), system_states);
+            assert!(session.events().is_empty());
+            reject.store(false, std::sync::atomic::Ordering::SeqCst);
+            session.step_budget(0., &GameInput::default(), 1).unwrap();
+            assert_eq!(
+                session.events(),
+                &[
+                    GameEvent::Death { object: 10 },
+                    GameEvent::Death { object: 20 }
+                ]
+            );
+            assert!(session.state().entities.is_empty());
+            assert!(session.provider.objects().unwrap().is_empty());
+        }
+    }
+    fn persistent_hierarchy_project() -> GameProject {
+        let mut carried = test_object(2, Some(1));
+        carried.components = BTreeMap::from([
+            ("persistent".into(), json!({})),
+            ("health".into(), json!({"maximum":10.,"current":6.})),
+        ]);
+        carried.references.insert("home".into(), 1);
+        let mut absent = carried.clone();
+        absent.object.id = 4;
+        let mut project = focused_project(
+            vec![test_object(1, None), carried, absent],
+            &["game.health", "game.portals"],
+        );
+        let mut parent = test_object(3, None);
+        parent.object.transform.translation = [20., 0., 0.];
+        let mut destination = test_object(2, Some(3));
+        destination.object.transform.translation = [4., 0., 1.];
+        destination
+            .components
+            .insert("health".into(), json!({"maximum":10.,"current":10.}));
+        destination.references.insert("home".into(), 3);
+        project.scenes.insert(
+            "destination".into(),
+            crate::AuthoredScene {
+                name: "Destination".into(),
+                objects: vec![parent, destination],
+            },
+        );
+        project
+    }
+    #[test]
+    fn persistent_entities_use_destination_hierarchy_and_detach_when_absent() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let project = persistent_hierarchy_project();
+            let authored = project.clone();
+            let destination = project
+                .resolve_scene("destination")
+                .unwrap()
+                .into_iter()
+                .find(|e| e.object.id == 2)
+                .unwrap();
+            let mut session = GameSession::new(project, kind).unwrap();
+            session.transition("destination").unwrap();
+            let carried = &session.state().entities[&2];
+            assert_eq!(carried.object, destination.object);
+            assert_eq!(carried.references, destination.references);
+            assert_eq!(health(carried), 6.);
+            assert!(carried.components.contains_key("persistent"));
+            let absent = &session.state().entities[&4];
+            assert_eq!(absent.object.parent, None);
+            assert!(absent.references.is_empty());
+            assert_eq!(
+                object_map(&session.provider.objects().unwrap()),
+                object_map(&session.world_objects())
+            );
+            assert_eq!(
+                session
+                    .snapshot()
+                    .items
+                    .iter()
+                    .find(|item| item.id == 2)
+                    .unwrap()
+                    .model[0][3],
+                24.
+            );
+            assert_eq!(session.project(), &authored);
+        }
+    }
+    #[test]
+    fn replacement_provider_must_load_exact_candidate_before_old_scene_is_changed() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            for restart in [false, true] {
+                let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut session = GameSession::new_with_world_factory(
+                    persistent_hierarchy_project(),
+                    kind,
+                    SystemRegistry::builtin(),
+                    move |mut objects| {
+                        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                            objects[0].color = [1, 2, 3, 4];
+                        }
+                        make_provider(kind, objects)
+                    },
+                )
+                .unwrap();
+                let state = session.state().clone();
+                let snapshot = session.snapshot();
+                let events = session.events().to_vec();
+                let error = if restart {
+                    session.restart()
+                } else {
+                    session.transition("destination")
+                }
+                .unwrap_err();
+                assert!(error.contains("did not load the supplied authored objects"));
+                assert_eq!(session.state(), &state);
+                assert_eq!(session.snapshot(), snapshot);
+                assert_eq!(session.events(), events);
+            }
+        }
+    }
+    struct MutatingFailedStop;
+    impl ExecutableSystem for MutatingFailedStop {
+        fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            Ok(())
+        }
+        fn stop(&mut self, ctx: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            ctx.game.scene = "corrupted by stop".into();
+            ctx.game.entities.clear();
+            ctx.events.push(GameEvent::Victory);
+            Err("Stop failed".into())
+        }
+    }
+    #[test]
+    fn failed_replacement_stop_preserves_visible_scene_and_events() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            for restart in [false, true] {
+                let mut project = persistent_hierarchy_project();
+                append_test_system(&mut project, "test.failed-stop");
+                let mut registry = SystemRegistry::builtin();
+                registry
+                    .register(test_system_descriptor("test.failed-stop"), |_| {
+                        Ok(Box::new(MutatingFailedStop))
+                    })
+                    .unwrap();
+                let mut session = GameSession::new_with_registry(project, kind, registry).unwrap();
+                session.step(1. / 60., &GameInput::default()).unwrap();
+                let state = session.state().clone();
+                let snapshot = session.snapshot();
+                let events = session.events().to_vec();
+                let error = if restart {
+                    session.restart()
+                } else {
+                    session.transition("destination")
+                }
+                .unwrap_err();
+                assert!(error.contains("Stop failed"));
+                assert_eq!(session.state(), &state);
+                assert_eq!(session.snapshot(), snapshot);
+                assert_eq!(session.events(), events);
+            }
+        }
     }
     #[test]
     fn fixed_tick_preserves_short_frame_attack_and_world_parity() {

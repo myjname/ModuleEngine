@@ -93,10 +93,18 @@ external side effects need their own rollback semantics. See
 `portal` components declare destination scene, trigger radius, destination spawn
 and whether all opposing enemies must be dead. Entering an enabled trigger loads
 the other scene. Entities with `persistent` components retain their runtime
-components (including health), while destination-authored transforms/references
-remain local. The portal's spawn overrides the carried entity position. Other
+components (including health), while destination-authored parents, local
+transforms and references replace their source-scene values. A carried ID absent
+from the destination becomes a root and clears its source-scene references. The
+portal's spawn overrides the carried entity position. Other
 scene objects and per-system state are unloaded and recreated. A transition emits
 `GameEvent::SceneChanged`.
+
+The candidate provider must expose exactly the supplied destination objects
+before the current scene is stopped. A rejected load retains the current scene.
+If a stop hook fails, its edits to the visible scene and events are discarded;
+shutdown itself remains best-effort and exactly-once, so external stop effects
+and executor lifecycle flags cannot be rolled back.
 
 This is synchronous scene replacement with a permitted short loading pause. It
 does not yet stream scene chunks or save game progress to disk. Authoring data and
