@@ -1,7 +1,7 @@
 //! Ownership-based cleanup. Never sweep unmarked pre-existing work or a shared
 //! dependency cache. Completed failed candidates retain their source and log.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
     sync::{
@@ -226,6 +226,8 @@ pub(crate) struct CandidateArtifacts {
     pub(crate) directory: PathBuf,
     parent: PathBuf,
     target: PathBuf,
+    build_profiles: Mutex<BTreeSet<PathBuf>>,
+    build_products: Mutex<BTreeSet<PathBuf>>,
     executable_directory: Option<PathBuf>,
     package: String,
     ready: AtomicBool,
@@ -250,6 +252,8 @@ impl CandidateArtifacts {
         let this = Self {
             directory,
             parent,
+            build_profiles: Mutex::new(BTreeSet::from([target.join("debug")])),
+            build_products: Mutex::default(),
             target,
             executable_directory: None,
             package: package.into(),
@@ -286,6 +290,81 @@ impl CandidateArtifacts {
             .as_ref()
             .unwrap_or(&self.directory)
             .join(format!("worker{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    // Pre-register only the two supported layouts, so cancellation before a
+    // complete JSON line still retires this unique package's partial products.
+    pub(crate) fn register_native_profile(&self, host: &str) -> Result<(), String> {
+        if host.is_empty()
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            || matches!(host, "." | "..")
+        {
+            return Err("Invalid native host target directory".into());
+        }
+        self.build_profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.target.join(host).join("debug"));
+        Ok(())
+    }
+
+    pub(crate) fn register_products(&self, products: &BTreeSet<PathBuf>) {
+        let profiles = self
+            .build_profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut owned = self
+            .build_products
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for product in products {
+            // Product paths may include build/<package>-<hash>/out or a build
+            // script executable. Admit only the known default/native profile,
+            // never an arbitrary path supplied in a compiler message.
+            let Ok(product) = product.canonicalize() else {
+                continue;
+            };
+            if !product.starts_with(&self.target) {
+                continue;
+            }
+            for profile in profiles.iter() {
+                let Ok(profile) = profile.canonicalize() else {
+                    continue;
+                };
+                if !profile.starts_with(&self.target) {
+                    continue;
+                }
+                let Ok(relative) = product.strip_prefix(&profile) else {
+                    continue;
+                };
+                let parts: Vec<_> = relative.components().collect();
+                let leaf = match parts.as_slice() {
+                    [Component::Normal(name)]
+                        if package_name(name.to_string_lossy().as_ref(), &self.package) =>
+                    {
+                        Some(product.clone())
+                    }
+                    [Component::Normal(folder), Component::Normal(name)]
+                        if *folder == "deps"
+                            && package_name(name.to_string_lossy().as_ref(), &self.package) =>
+                    {
+                        Some(product.clone())
+                    }
+                    [Component::Normal(folder), Component::Normal(name), ..]
+                        if *folder == "build"
+                            && package_name(name.to_string_lossy().as_ref(), &self.package) =>
+                    {
+                        Some(profile.join("build").join(name))
+                    }
+                    _ => None,
+                };
+                if let Some(leaf) = leaf {
+                    owned.insert(leaf);
+                }
+            }
+        }
     }
 
     fn mark(&self, state: &str) {
@@ -328,7 +407,29 @@ impl CandidateArtifacts {
         if self.target.starts_with(&self.directory) && self.target != self.directory {
             remove_or_defer(self.target.clone(), self.directory.clone());
         } else {
-            trim_package(&self.target, &self.package);
+            for product in self
+                .build_products
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                remove_or_defer(product.clone(), self.target.clone());
+            }
+            for profile in self
+                .build_profiles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                // Check the profile against the canonical target before using
+                // it as a cleanup boundary (including symlinked target dirs).
+                if let Ok(resolved) = profile.canonicalize()
+                    && resolved.starts_with(&self.target)
+                    && resolved != self.target
+                {
+                    trim_package(&resolved, &self.package);
+                }
+            }
         }
     }
 }
@@ -349,6 +450,16 @@ impl Drop for CandidateArtifacts {
         let directory = self.directory.clone();
         let parent = self.parent.clone();
         let target = self.target.clone();
+        let build_profiles = self
+            .build_profiles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let build_products = self
+            .build_products
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let executable_directory = self.executable_directory.clone();
         let package = self.package.clone();
         let ready = self.ready.load(Ordering::Acquire);
@@ -359,6 +470,8 @@ impl Drop for CandidateArtifacts {
                 directory,
                 parent,
                 target,
+                build_profiles: Mutex::new(build_profiles),
+                build_products: Mutex::new(build_products),
                 executable_directory,
                 package,
                 ready: AtomicBool::new(ready),
@@ -401,27 +514,45 @@ impl CandidateArtifacts {
     }
 }
 
-fn trim_package(target: &Path, package: &str) {
-    for relative in [
-        "debug",
-        "debug/deps",
-        "debug/.fingerprint",
-        "debug/incremental",
-    ] {
-        let folder = target.join(relative);
+fn trim_package(profile: &Path, package: &str) {
+    for relative in ["", "deps", ".fingerprint", "incremental", "build"] {
+        let folder = profile.join(relative);
+        let Ok(resolved) = folder.canonicalize() else {
+            continue;
+        };
+        if !resolved.starts_with(profile) {
+            continue;
+        }
         let Ok(entries) = fs::read_dir(&folder) else {
             continue;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.strip_prefix(package).is_some_and(|rest| {
-                rest.is_empty() || rest.starts_with('.') || rest.starts_with('-')
-            }) {
+            if package_name(&name, package) {
                 remove_or_defer(entry.path(), folder.clone());
             }
         }
     }
+}
+
+fn package_name(name: &str, package: &str) -> bool {
+    let Some(rest) = name.strip_prefix(package) else {
+        return false;
+    };
+    let suffix = |suffix: &str| matches!(suffix, "" | ".exe" | ".pdb" | ".d" | ".rlib" | ".rmeta");
+    if suffix(rest) {
+        return true;
+    }
+    let Some(hashed) = rest.strip_prefix('-') else {
+        return false;
+    };
+    let hash = hashed.split('.').next().unwrap_or_default();
+    hash.len() == 16
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && suffix(&hashed[hash.len()..])
 }
 
 fn prune_failed(parent: &Path) {
@@ -554,6 +685,68 @@ fn remove_or_defer(path: PathBuf, parent: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_profile_and_host_build_products_cleanup_keeps_other_owners() {
+        let guard =
+            TestArtifactGuard::new(&std::env::temp_dir(), "module-native-products").unwrap();
+        let target = guard.path().join("target");
+        let name = "module_engine_worker_native";
+        let candidate = Arc::new(
+            CandidateArtifacts::create(&guard.path().join("work"), &target, name, None).unwrap(),
+        );
+        candidate.register_native_profile("native-host").unwrap();
+        assert!(candidate.register_native_profile("../foreign").is_err());
+        let mut owned = BTreeSet::new();
+        let mut keep = vec![];
+        for profile in [target.join("debug"), target.join("native-host/debug")] {
+            for folder in ["", "deps", ".fingerprint", "incremental", "build"] {
+                let folder = profile.join(folder);
+                fs::create_dir_all(&folder).unwrap();
+                let own = folder.join(format!("{name}-0123456789abcdef"));
+                let neighbor = folder.join(format!("{name}_neighbor"));
+                fs::write(&own, "own product").unwrap();
+                fs::write(&neighbor, "another owner").unwrap();
+                owned.insert(own);
+                keep.push(neighbor);
+                for suffix in [
+                    "-other-owner",
+                    ".notes",
+                    "-0123456789abcdef.notes",
+                    "-0123456789abcdef0123",
+                    "-0123456789abcdeg",
+                    "-ABCDEFABCDEFABCD",
+                ] {
+                    let neighbor = folder.join(format!("{name}{suffix}"));
+                    fs::write(&neighbor, "similar name belongs to someone else").unwrap();
+                    keep.push(neighbor);
+                }
+            }
+        }
+        let foreign = target.join("foreign/debug");
+        fs::create_dir_all(&foreign).unwrap();
+        let foreign_product = foreign.join(name);
+        fs::write(&foreign_product, "unknown build scope").unwrap();
+        let unowned = guard.path().join("unowned");
+        fs::write(&unowned, "outside target").unwrap();
+        let mut messages = owned.clone();
+        messages.insert(unowned.clone());
+        messages.insert(foreign_product.clone());
+        candidate.register_products(&messages);
+        let executable = candidate.executable_path();
+        fs::write(&executable, "leased executable").unwrap();
+        let lease = candidate.clone();
+        drop(candidate);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(owned.iter().all(|path| path.exists()));
+        assert!(executable.exists());
+        drop(lease);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(owned.iter().all(|path| !path.exists()));
+        assert!(keep.iter().all(|path| path.exists()));
+        assert!(unowned.exists() && foreign_product.exists());
+        assert!(!executable.exists());
+    }
 
     #[test]
     fn guard_waits_for_background_owner_and_preserves_failure_diagnostics() {

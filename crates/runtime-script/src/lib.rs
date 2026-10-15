@@ -21,6 +21,7 @@ use thiserror::Error;
 
 mod persistent;
 pub use persistent::StateDeclaration;
+mod cargo_build;
 mod cleanup;
 pub use cleanup::{
     TestArtifactGuard, TestArtifactLease, finish_artifact_cleanup, retain_test_artifacts,
@@ -302,6 +303,45 @@ impl ScriptCompiler {
                 }
                 command
             };
+            // Query the selected native compiler under the same explicit tool
+            // environment used by Cargo. Cargo's own HOST/TARGET proof below
+            // also catches an incompatible compiler selected by Cargo config.
+            let mut rustc = Command::new(
+                self.rustc_binary
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("rustc")),
+            );
+            let environment = make_command();
+            for (key, value) in environment.get_envs() {
+                if let Some(value) = value {
+                    rustc.env(key, value);
+                } else {
+                    rustc.env_remove(key);
+                }
+            }
+            rustc.current_dir(directory).arg("-vV");
+            let version = run_bounded(
+                rustc,
+                vec![],
+                self.compile_timeout,
+                cancelled,
+                Some((&artifacts, "Selected rustc host")),
+            )?;
+            if !version.success {
+                return Err(ScriptError::Setup(format!(
+                    "Selected rustc -vV failed: {}{}",
+                    version.stderr, version.stdout
+                )));
+            }
+            let native_host = cargo_build::native_host(&version.stdout)?;
+            artifacts
+                .register_native_profile(&native_host)
+                .map_err(ScriptError::Setup)?;
+            fs::write(
+                directory.join("build.rs"),
+                cargo_build::build_script(&native_host),
+            )
+            .map_err(|error| ScriptError::Setup(error.to_string()))?;
             // Cargo may prune unused root-workspace packages and normalize the newly
             // inserted worker entry. Resolve before building, preserving seeded pins.
             let mut metadata = make_command();
@@ -322,6 +362,11 @@ impl ScriptCompiler {
                     resolved.stderr, resolved.stdout
                 )));
             }
+            let selector = cargo_build::Selector::from_metadata(
+                &resolved.stdout,
+                &directory.join("Cargo.toml"),
+                &name,
+            )?;
             let dependency_versions = verify_worker_lock(
                 &root_lock,
                 &fs::read_to_string(&worker_lock).map_err(|e| ScriptError::Setup(e.to_string()))?,
@@ -332,6 +377,7 @@ impl ScriptCompiler {
                 .arg("build")
                 .arg("--offline")
                 .arg("--locked")
+                .arg("--message-format=json-render-diagnostics")
                 .arg("--manifest-path")
                 .arg(directory.join("Cargo.toml"))
                 .env("CARGO_TARGET_DIR", &target)
@@ -340,27 +386,31 @@ impl ScriptCompiler {
             if let Some(home) = &self.cargo_home {
                 command.env("CARGO_HOME", home);
             }
-            let output = run_bounded(
+            let output = run_bounded_capture(
                 command,
                 vec![],
                 self.compile_timeout,
                 cancelled,
                 Some((&artifacts, "Cargo build")),
+                Some(selector),
             )?;
             if !output.success {
                 return Err(ScriptError::Compile(format!(
                     "{}{}",
-                    output.stderr, output.stdout
+                    output.stderr,
+                    output
+                        .cargo
+                        .as_ref()
+                        .map(|cargo| cargo.diagnostics.as_str())
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or("\nCargo reported a failed build; see the retained build.log for details.")
                 )));
             }
-            let built_executable = target
-                .join("debug")
-                .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-            if !built_executable.is_file() {
-                return Err(ScriptError::Compile(
-                    "Cargo succeeded without producing the worker executable".into(),
-                ));
-            }
+            let built_executable = output
+                .cargo
+                .as_ref()
+                .ok_or_else(|| ScriptError::Compile("Cargo product capture is missing".into()))?
+                .executable(&native_host, &target)?;
             let executable = artifacts.executable_path();
             fs::copy(&built_executable, &executable)
                 .map_err(|error| ScriptError::Setup(error.to_string()))?;
@@ -839,13 +889,24 @@ struct ProcessOutput {
     success: bool,
     stdout: String,
     stderr: String,
+    cargo: Option<cargo_build::BuildOutput>,
 }
 
-fn read_pipe(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<(Vec<u8>, bool)> {
+struct PipeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+    cargo: Option<cargo_build::BuildOutput>,
+}
+
+fn read_pipe(
+    mut pipe: impl Read + Send + 'static,
+    selector: Option<cargo_build::Selector>,
+) -> mpsc::Receiver<PipeOutput> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut result = Vec::new();
         let mut truncated = false;
+        let mut cargo = selector.map(cargo_build::Collector::new);
         let mut buffer = [0_u8; 8192];
         while let Ok(count) = pipe.read(&mut buffer) {
             if count == 0 {
@@ -854,18 +915,36 @@ fn read_pipe(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<(Vec<u8>, b
             let take = count.min(MAX_PACKET.saturating_sub(result.len()));
             result.extend_from_slice(&buffer[..take]);
             truncated |= take < count;
+            if let Some(cargo) = &mut cargo {
+                cargo.feed(&buffer[..count]);
+            }
         }
-        let _ = sender.send((result, truncated));
+        let _ = sender.send(PipeOutput {
+            bytes: result,
+            truncated,
+            cargo: cargo.map(cargo_build::Collector::finish),
+        });
     });
     receiver
 }
 
 fn run_bounded(
+    command: Command,
+    input: Vec<u8>,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+    log: Option<(&cleanup::CandidateArtifacts, &str)>,
+) -> Result<ProcessOutput, ScriptError> {
+    run_bounded_capture(command, input, timeout, cancelled, log, None)
+}
+
+fn run_bounded_capture(
     mut command: Command,
     input: Vec<u8>,
     timeout: Duration,
     cancelled: &AtomicBool,
     log: Option<(&cleanup::CandidateArtifacts, &str)>,
+    selector: Option<cargo_build::Selector>,
 ) -> Result<ProcessOutput, ScriptError> {
     if cancelled.load(Ordering::Acquire) {
         return Err(ScriptError::Worker("compilation cancelled".into()));
@@ -876,8 +955,8 @@ fn run_bounded(
         .stderr(Stdio::piped());
     let mut process = OwnedChild::spawn(&mut command)?;
     let child = &mut process;
-    let stdout = read_pipe(child.stdout.take().unwrap());
-    let stderr = read_pipe(child.stderr.take().unwrap());
+    let stdout = read_pipe(child.stdout.take().unwrap(), selector);
+    let stderr = read_pipe(child.stderr.take().unwrap(), None);
     let mut stdin = child.stdin.take().unwrap();
     // A worker stuck before reading input cannot block the caller in write_all.
     thread::spawn(move || {
@@ -901,18 +980,27 @@ fn run_bounded(
             None => thread::sleep(Duration::from_millis(2)),
         }
     };
-    let collect = |receiver: mpsc::Receiver<(Vec<u8>, bool)>| -> Result<String, ScriptError> {
-        let (bytes, truncated) = receiver
+    let collect = |receiver: mpsc::Receiver<PipeOutput>| -> Result<PipeOutput, ScriptError> {
+        let output = receiver
             .recv_timeout(Duration::from_millis(150))
             .map_err(|_| ScriptError::Worker("worker left an output pipe open".into()))?;
-        if truncated {
+        if output.truncated && output.cargo.is_none() {
             return Err(ScriptError::Packet("worker output exceeds 1 MiB".into()));
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(output)
     };
     let stdout = collect(stdout);
     let stderr = collect(stderr);
+    let mut cargo = None;
+    let stdout = stdout.map(|output| {
+        cargo = output.cargo;
+        String::from_utf8_lossy(&output.bytes).into_owned()
+    });
+    let stderr = stderr.map(|output| String::from_utf8_lossy(&output.bytes).into_owned());
     if let Some((artifacts, phase)) = log {
+        if let Some(cargo) = &cargo {
+            artifacts.register_products(&cargo.products);
+        }
         artifacts.log(
             phase,
             stdout
@@ -929,6 +1017,7 @@ fn run_bounded(
         success: status?.success(),
         stdout: stdout?,
         stderr: stderr?,
+        cargo,
     })
 }
 
@@ -1195,6 +1284,343 @@ mod tests {
     use super::*;
     use module_engine_core::{EcsWorld, ObjectsWorld, RenderOverrides, WorldProvider};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn cargo_stream_capture_drains_large_output_and_cancellation_retires_owned_products() {
+        const CHILD: &str = "MODULE_ENGINE_STAGE3_STREAM";
+        if let Some(payload) = std::env::var_os(CHILD) {
+            let payload = PathBuf::from(payload);
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(b"\n").unwrap();
+            let line = serde_json::json!({"reason":"compiler-artifact", "package_id":"dependency", "padding":"x".repeat(4096)}).to_string() + "\n";
+            for _ in 0..400 {
+                stdout.write_all(line.as_bytes()).unwrap();
+            }
+            stdout.write_all(&fs::read(&payload).unwrap()).unwrap();
+            stdout.flush().unwrap();
+            fs::write(payload.with_extension("started"), "1").unwrap();
+            if std::env::var_os("MODULE_ENGINE_STAGE3_STREAM_WAIT").is_some() {
+                thread::sleep(Duration::from_secs(30));
+            }
+            return;
+        }
+        let guard = TestArtifactGuard::new(&std::env::temp_dir(), "module-cargo-stream").unwrap();
+        let name = "module_engine_worker_stream";
+        let target = guard.path().join("target");
+        let candidate = Arc::new(
+            cleanup::CandidateArtifacts::create(&guard.path().join("work"), &target, name, None)
+                .unwrap(),
+        );
+        candidate.register_native_profile("native-host").unwrap();
+        let manifest = candidate.directory.join("Cargo.toml");
+        fs::write(&manifest, "owned manifest").unwrap();
+        let selector = cargo_build::Selector::from_metadata(&serde_json::json!({"resolve":{"root":"stream-id"},"packages":[{"id":"stream-id","name":name,"manifest_path":manifest}]}).to_string(), &manifest, name).unwrap();
+        let product = target.join("native-host/debug").join(name);
+        fs::create_dir_all(product.parent().unwrap()).unwrap();
+        fs::write(&product, "partial owned executable").unwrap();
+        let sentinel = product.with_file_name(format!("{name}_other"));
+        fs::write(&sentinel, "other owner").unwrap();
+        let payload = guard.path().join("payload.jsonl");
+        fs::write(&payload, format!("{}\n{}\n{}\n", serde_json::json!({"reason":"compiler-artifact","package_id":"stream-id","manifest_path":manifest,"target":{"name":name,"kind":["bin"]},"profile":{"test":false},"executable":product,"filenames":[product]}), serde_json::json!({"reason":"build-script-executed","package_id":"stream-id","env":[["MODULE_ENGINE_WORKER_BUILD_HOST","native-host"],["MODULE_ENGINE_WORKER_BUILD_TARGET","native-host"]]}),serde_json::json!({"reason":"build-finished","success":true}))).unwrap();
+        let child_command = || {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::cargo_stream_capture_drains_large_output_and_cancellation_retires_owned_products", "--nocapture"]).env(CHILD, &payload);
+            command
+        };
+        let output = run_bounded_capture(
+            child_command(),
+            vec![],
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+            Some((&candidate, "Large Cargo fixture")),
+            Some(selector.clone()),
+        )
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), MAX_PACKET, "bounded diagnostic prefix");
+        assert!(output.cargo.unwrap().products.contains(&product));
+        fs::remove_file(payload.with_extension("started")).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let started = payload.with_extension("started");
+        let waiter = thread::spawn(move || {
+            let start = Instant::now();
+            while !started.exists() && start.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(2));
+            }
+            let ready = started.exists();
+            signal.store(true, Ordering::Release);
+            ready
+        });
+        let mut command = child_command();
+        command.env("MODULE_ENGINE_STAGE3_STREAM_WAIT", "1");
+        let result = run_bounded_capture(
+            command,
+            vec![],
+            Duration::from_secs(10),
+            &cancelled,
+            Some((&candidate, "Cancelled Cargo fixture")),
+            Some(selector),
+        );
+        assert!(
+            waiter.join().unwrap(),
+            "fixture must actually stream before cancellation"
+        );
+        assert!(matches!(result, Err(ScriptError::Worker(error)) if error.contains("cancelled")));
+        let lease = candidate.clone();
+        drop(candidate);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(product.exists());
+        drop(lease);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(!product.exists());
+        assert!(sentinel.exists());
+    }
+
+    #[test]
+    fn native_cargo_target_modes_use_actual_artifacts_and_cleanup_scopes() {
+        const CHILD: &str = "MODULE_ENGINE_STAGE3_NATIVE_CASE";
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        if let Ok(mode) = std::env::var(CHILD) {
+            let sdk = PathBuf::from(std::env::var_os("MODULE_ENGINE_STAGE3_SDK").unwrap());
+            let shared = ScriptCompiler::new(workspace, sdk.join("unused"));
+            let mut compiler =
+                ScriptCompiler::new(sdk.clone(), sdk.join(format!("workers-{mode}")));
+            compiler.target_dir = shared.target_dir;
+            let compiled = compiler.compile("fn speed(_: f64, base: f64) -> f64 { base + 7.0 }");
+            if mode == "foreign" {
+                let error = match compiled {
+                    Ok(_) => panic!("foreign worker must never be published"),
+                    Err(error) => error,
+                };
+                assert!(
+                    matches!(error, ScriptError::Compile(_)),
+                    "foreign Cargo build must fail explicitly: {error}"
+                );
+                if error.to_string().contains("E0463") {
+                    assert!(
+                        !error
+                            .to_string()
+                            .contains("\"reason\":\"compiler-artifact\""),
+                        "rendered compiler errors must not expose the raw Cargo artifact stream"
+                    );
+                }
+                finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+                let candidates: Vec<_> = fs::read_dir(&compiler.work_dir)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .collect();
+                assert_eq!(candidates.len(), 1);
+                let directory = candidates[0].path();
+                let log = fs::read_to_string(directory.join("build.log")).unwrap();
+                assert!(
+                    !log.contains("Linked SDK probe"),
+                    "foreign build reached executable probe"
+                );
+                assert!(directory.join("failure.txt").is_file());
+                assert!(
+                    !directory
+                        .join(format!("worker{}", std::env::consts::EXE_SUFFIX))
+                        .exists()
+                );
+                println!("native Cargo rejected foreign target before SDK probe: {error}");
+                return;
+            }
+            let program = compiled.unwrap();
+            let context = ScriptContext::new(0., 0.01, vec![]);
+            assert_eq!(
+                program
+                    .tick(&context, Duration::from_secs(5))
+                    .unwrap()
+                    .speed,
+                Some(8.0)
+            );
+            let source = program.worker_lock().parent().unwrap();
+            assert!(source.join("build.rs").is_file());
+            let name = source.file_name().unwrap().to_str().unwrap();
+            let log = fs::read_to_string(source.join("build.log")).unwrap();
+            let host = log
+                .lines()
+                .find_map(|line| line.strip_prefix("host: "))
+                .unwrap();
+            let profile = if mode == "default" {
+                compiler.target_dir.as_ref().unwrap().join("debug")
+            } else {
+                compiler
+                    .target_dir
+                    .as_ref()
+                    .unwrap()
+                    .join(host)
+                    .join("debug")
+            };
+            for folder in [
+                profile.clone(),
+                profile.join("deps"),
+                profile.join("build"),
+                profile.join(".fingerprint"),
+            ] {
+                if folder.is_dir() {
+                    assert!(
+                        !fs::read_dir(folder)
+                            .unwrap()
+                            .filter_map(Result::ok)
+                            .any(|entry| entry.file_name().to_string_lossy().starts_with(name)),
+                        "owned product survived build trimming"
+                    );
+                }
+            }
+            let executable = program.executable().to_path_buf();
+            let lease = program.clone();
+            drop(program);
+            finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+            assert!(executable.is_file(), "a live lease lost its executable");
+            drop(lease);
+            drop(compiler);
+            finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+            assert!(!executable.exists());
+            println!("native Cargo {mode}: executable tick and actual-scope cleanup passed");
+            return;
+        }
+        fn copy_tree(from: &Path, to: &Path) {
+            fs::create_dir_all(to).unwrap();
+            for entry in fs::read_dir(from).unwrap().filter_map(Result::ok) {
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &to.join(entry.file_name()));
+                } else {
+                    fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        let guard = TestArtifactGuard::new(&std::env::temp_dir(), "module-native-cargo").unwrap();
+        let sdk = guard.path().join("sdk");
+        copy_tree(
+            &workspace.join("crates/engine-core"),
+            &sdk.join("crates/engine-core"),
+        );
+        let manifest = fs::read_to_string(workspace.join("Cargo.toml")).unwrap();
+        let (_, rest) = manifest.split_once("[workspace.package]").unwrap();
+        fs::write(sdk.join("Cargo.toml"), format!("[workspace]\nmembers=[\"crates/engine-core\"]\nresolver=\"3\"\n[workspace.package]{rest}")).unwrap();
+        for file in ["Cargo.lock", "engine-sdk.json"] {
+            fs::copy(workspace.join(file), sdk.join(file)).unwrap();
+        }
+        fs::create_dir_all(sdk.join("examples")).unwrap();
+        fs::copy(
+            workspace.join("examples/third_world.rs"),
+            sdk.join("examples/third_world.rs"),
+        )
+        .unwrap();
+        let compiler = ScriptCompiler::new(workspace.clone(), guard.path().join("unused"));
+        let mut rustc = Command::new(
+            compiler
+                .rustc_binary
+                .as_deref()
+                .unwrap_or_else(|| Path::new("rustc")),
+        );
+        rustc.arg("-vV");
+        let version = run_bounded(
+            rustc,
+            vec![],
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        let host = cargo_build::native_host(&version.stdout).unwrap();
+        for mode in ["default", "environment", "config", "foreign"] {
+            let config = sdk.join(".cargo/config.toml");
+            if mode == "config" {
+                fs::create_dir_all(config.parent().unwrap()).unwrap();
+                fs::write(&config, format!("[build]\ntarget = {host:?}\n")).unwrap();
+            }
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::native_cargo_target_modes_use_actual_artifacts_and_cleanup_scopes",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .env("MODULE_ENGINE_STAGE3_SDK", &sdk)
+                .env_remove("CARGO_BUILD_TARGET")
+                .current_dir(&workspace);
+            if mode == "environment" {
+                command.env("CARGO_BUILD_TARGET", &host);
+            }
+            if mode == "foreign" {
+                fs::remove_file(&config).unwrap();
+                command.env(
+                    "CARGO_BUILD_TARGET",
+                    if cfg!(windows) {
+                        "x86_64-unknown-linux-gnu"
+                    } else {
+                        "aarch64-unknown-linux-gnu"
+                    },
+                );
+            }
+            let result = run_bounded(
+                command,
+                vec![],
+                Duration::from_secs(180),
+                &AtomicBool::new(false),
+                None,
+            )
+            .unwrap();
+            assert!(
+                result.success,
+                "native Cargo {mode}: {}{}",
+                result.stdout, result.stderr
+            );
+            println!("{}", result.stdout);
+        }
+        // Exercise the exact generated guard as a native build-script program,
+        // without installing any foreign standard library or executing a worker.
+        let script = guard.path().join("build.rs");
+        fs::write(&script, cargo_build::build_script(&host)).unwrap();
+        let executable = guard
+            .path()
+            .join(format!("build-guard{}", std::env::consts::EXE_SUFFIX));
+        let mut command = Command::new(
+            compiler
+                .rustc_binary
+                .as_deref()
+                .unwrap_or_else(|| Path::new("rustc")),
+        );
+        command
+            .arg(&script)
+            .arg("--crate-name")
+            .arg("native_guard")
+            .arg("-o")
+            .arg(&executable);
+        let built = run_bounded(
+            command,
+            vec![],
+            Duration::from_secs(30),
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert!(built.success, "{}{}", built.stdout, built.stderr);
+        let mut command = Command::new(&executable);
+        command.env("HOST", &host).env("TARGET", "foreign-target");
+        let foreign = run_bounded(
+            command,
+            vec![],
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert!(!foreign.success);
+        assert!(
+            foreign
+                .stderr
+                .contains("MODULE_ENGINE_NATIVE_TARGET_REQUIRED")
+        );
+        assert!(!foreign.stdout.contains("cargo:rustc-env="));
+    }
 
     fn owned_program(source: &str, sdk_identity: SdkIdentity) -> CompiledScript {
         let declaration = StateDeclaration {
