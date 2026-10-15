@@ -30,6 +30,87 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+/// Explicit connection-only selection. Resolving this route creates no provider
+/// or renderer and is safe during authoring/headless installation preflight.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderRoute<'a> {
+    pub viewport: &'a Node,
+    pub renderer: &'a Node,
+    pub extract: &'a Node,
+    pub world: &'a Node,
+}
+
+impl ModuleRegistry {
+    /// Select a declared world by node identity, with no renderer requirement.
+    pub fn world_node<'a>(
+        &self,
+        document: &'a GraphDocument,
+        node_id: &str,
+    ) -> Result<&'a Node, String> {
+        let mut nodes = document.root.nodes.iter().filter(|node| node.id == node_id);
+        let node = nodes
+            .next()
+            .ok_or_else(|| format!("World node '{node_id}' is missing"))?;
+        if nodes.next().is_some() {
+            return Err(format!("World node '{node_id}' is duplicated"));
+        }
+        let metadata = self
+            .world_metadata(&node.module)
+            .ok_or_else(|| format!("Module '{}' has no installed World provider", node.module))?;
+        if node.subgraph.is_some() {
+            return Err("World modules do not execute nested graphs".into());
+        }
+        (metadata.validate_params)(&node.params)?;
+        Ok(node)
+    }
+
+    pub fn render_route<'a>(&self, document: &'a GraphDocument) -> Result<RenderRoute<'a>, String> {
+        let graph = &document.root;
+        let mut ids = BTreeSet::new();
+        if graph
+            .nodes
+            .iter()
+            .any(|node| node.id.trim().is_empty() || !ids.insert(node.id.as_str()))
+        {
+            return Err("Render route has empty or duplicate node IDs".into());
+        }
+        let mut outputs = graph
+            .nodes
+            .iter()
+            .filter(|node| node.module == "viewport.output");
+        let viewport = outputs
+            .next()
+            .ok_or("Runtime requires exactly one viewport.output")?;
+        if outputs.next().is_some() {
+            return Err("Runtime requires exactly one viewport.output".into());
+        }
+        require_no_params(viewport).map_err(|error| error.to_string())?;
+        let renderer =
+            upstream(graph, viewport, "frame", "frame").map_err(|error| error.to_string())?;
+        if !self.is_renderer(&renderer.module) {
+            return Err("Viewport needs a registered executable renderer module".into());
+        }
+        let extract =
+            upstream(graph, renderer, "scene", "scene").map_err(|error| error.to_string())?;
+        if extract.module != "scene.extract" {
+            return Err("Renderer needs the installed scene.extract adapter".into());
+        }
+        require_no_params(extract).map_err(|error| error.to_string())?;
+        let source =
+            upstream(graph, extract, "world", "world").map_err(|error| error.to_string())?;
+        let world = self.world_node(document, &source.id)?;
+        if extract.subgraph.is_some() || viewport.subgraph.is_some() {
+            return Err("Extraction and viewport do not execute nested graphs".into());
+        }
+        Ok(RenderRoute {
+            viewport,
+            renderer,
+            extract,
+            world,
+        })
+    }
+}
+
 /// An executable route built from a validated graph, not from a world dropdown.
 ///
 /// Scalar graph evaluation belongs to the host. Use world_speed_source to follow
@@ -69,45 +150,10 @@ impl Runtime {
             });
         }
         let graph = &document.root;
-        let viewports: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.module == "viewport.output")
-            .collect();
-        if viewports.len() != 1 {
-            return Err(route_error("Runtime requires exactly one viewport.output"));
-        }
-        let viewport = viewports[0];
-        let renderer = upstream(graph, viewport, "frame", "frame")?;
-        if !registry.is_renderer(&renderer.module) {
-            return Err(route_error(
-                "Viewport needs a registered executable renderer module",
-            ));
-        }
-        require_no_params(viewport)?;
-        if renderer.module == "render.software3d" {
-            require_no_params(renderer)?;
-            validate_renderer_route(renderer)?;
-        }
-        let extract = upstream(graph, renderer, "scene", "scene")?;
-        if extract.module != "scene.extract" {
-            return Err(route_error(
-                "Renderer needs the installed scene.extract adapter",
-            ));
-        }
-        require_no_params(extract)?;
-        let world = upstream(graph, extract, "world", "world")?;
-        if !registry.is_world_provider(&world.module) {
-            return Err(route_error(format!(
-                "Module '{}' has no installed World provider",
-                world.module
-            )));
-        }
-        if world.subgraph.is_some() || extract.subgraph.is_some() || viewport.subgraph.is_some() {
-            return Err(route_error(
-                "World, extraction and viewport do not execute nested graphs",
-            ));
-        }
+        let route = registry.render_route(document).map_err(route_error)?;
+        let viewport = route.viewport;
+        let renderer = route.renderer;
+        let world = route.world;
         let speed_source = graph
             .edges
             .iter()
@@ -209,11 +255,10 @@ impl Runtime {
                     .map_err(route_error)?;
             }
         }
-        let kind = match world.module.as_str() {
-            "world.objects" => WorldKind::Objects,
-            "world.ecs" => WorldKind::Ecs,
-            _ => WorldKind::Custom,
-        };
+        let kind = registry
+            .world_metadata(&world.module)
+            .expect("Selected registered world")
+            .kind;
         Ok(Self {
             provider,
             kind,
@@ -565,22 +610,33 @@ fn upstream<'a>(
     input: &str,
     expected_output: &str,
 ) -> Result<&'a Node, RuntimeError> {
-    let edge = graph
+    let mut edges = graph
         .edges
         .iter()
-        .find(|e| e.to_node == node.id && e.to_port == input)
+        .filter(|e| e.to_node == node.id && e.to_port == input);
+    let edge = edges
+        .next()
         .ok_or_else(|| route_error(format!("Missing input {}.{}", node.id, input)))?;
+    if edges.next().is_some() {
+        return Err(route_error(format!(
+            "Duplicate input {}.{}",
+            node.id, input
+        )));
+    }
     if edge.from_port != expected_output {
         return Err(route_error(format!(
             "Unsupported source output '{}' for {}.{}",
             edge.from_port, node.id, input
         )));
     }
-    graph
-        .nodes
-        .iter()
-        .find(|n| n.id == edge.from_node)
-        .ok_or_else(|| route_error("Source node disappeared"))
+    let mut sources = graph.nodes.iter().filter(|n| n.id == edge.from_node);
+    let source = sources
+        .next()
+        .ok_or_else(|| route_error("Source node disappeared"))?;
+    if sources.next().is_some() {
+        return Err(route_error("Source node is duplicated"));
+    }
+    Ok(source)
 }
 
 fn require_parameter_keys(node: &Node, supported: &[&str]) -> Result<(), RuntimeError> {
@@ -604,7 +660,8 @@ fn require_no_params(node: &Node) -> Result<(), RuntimeError> {
     require_parameter_keys(node, &[])
 }
 
-fn validate_renderer_route(node: &Node) -> Result<(), RuntimeError> {
+pub(crate) fn validate_software_renderer(node: &Node) -> Result<(), RuntimeError> {
+    require_no_params(node)?;
     let graph = node
         .subgraph
         .as_deref()

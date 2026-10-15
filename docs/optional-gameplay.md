@@ -147,8 +147,10 @@ route or goal value.
 The crate's default features are empty. Its optional `ui` feature adds egui for
 input collection, HUD and projected combat shapes. Pure hit-flash decoration
 remains usable without egui and only changes an extracted render snapshot.
-Core sessions do not require these presentation types or a GPU. The current
-`GameHost` still constructs Vulkan; a common headless host is not claimed yet.
+Core sessions do not require these presentation types or a GPU. The shared
+`module-engine-host` uses registered renderer interfaces and supports an explicit
+headless world. Optional service factories are installed by the application;
+omitted audio creates no endpoint. See `shared-game-host.md`.
 
 ## Actual example project
 

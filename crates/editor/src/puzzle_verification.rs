@@ -265,7 +265,7 @@ fn hosted_workflow(
     folder: &Path,
     label: &str,
 ) -> Result<(Value, GameState, Vec<u8>), String> {
-    let mut host = GameHost::new_at(document.clone(), asset_root, backend, None, kind)?;
+    let mut host = crate::game_host::new_at(document.clone(), asset_root, backend, None, kind)?;
     host.set_detailed_stats(true);
     require(host.slots.is_empty(), "Puzzle initialized a Custom worker")?;
     require(

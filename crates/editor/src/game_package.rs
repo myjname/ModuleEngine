@@ -1,5 +1,5 @@
 //! Standalone game export: runtime executable, authored data, assets and compiled code.
-use crate::game_host::{GameHost, render_graph, script_ids};
+use crate::game_host::{render_graph, script_ids};
 use module_engine_content::ContentLibrary;
 use module_engine_core::{GraphDocument, WorldKind};
 use module_engine_project::{AssetManifest, hash_file, resolve_relative};
@@ -275,8 +275,8 @@ fn export_into_staging(
     .map_err(|e| e.to_string())?;
     // Read from the actual exported root, with no compile root and sealed GPU artifacts.
     validate_package(&destination)?;
-    let mut host = GameHost::new(document.clone(), &destination, None, WorldKind::Objects)?;
-    host.audio.enabled = false;
+    let mut host = crate::game_host::new(document.clone(), &destination, None, WorldKind::Objects)?;
+    host.services.set_enabled(false);
     host.render(320, 180)?;
     Ok(destination)
 }
@@ -506,8 +506,12 @@ mod tests {
     }
     fn fixture() -> PathBuf {
         let folder = backend_root().join(".work").join(format!(
-            "player-plan-test-{}-{}",
+            "player-plan-test-{}-{}-{}",
             std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&folder).unwrap();

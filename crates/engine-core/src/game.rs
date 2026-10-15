@@ -1106,6 +1106,7 @@ mod tests {
                     }
                 },
                 diagnostics: |_| json!({}),
+                service_requests: |_| Ok(vec![]),
             })
             .unwrap();
         registry

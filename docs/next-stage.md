@@ -12,7 +12,7 @@
 | Статические модели и изображения | [engine-content/src/lib.rs](../crates/engine-content/src/lib.rs) | ContentLibrary; renderer-neutral Mesh/Material |
 | Rust Custom | [runtime-script/src/lib.rs](../crates/runtime-script/src/lib.rs) | Постоянный worker, ScriptTick, явно объявленное состояние |
 | Редактор сцен и графа систем | [editor/src/game_ui.rs](../crates/editor/src/game_ui.rs) | Авторские данные отдельно от Play-копии |
-| Общая сборка подсистем | [editor/src/game_host.rs](../crates/editor/src/game_host.rs) | Один GameHost для редактора и Player |
+| Общая сборка подсистем | [game-host/src/game_host.rs](../crates/game-host/src/game_host.rs) | Один GameHost для редактора и Player |
 | Отдельная игра и экспорт | [editor/src/player.rs](../crates/editor/src/player.rs), [game_package.rs](../crates/editor/src/game_package.rs) | Пакет player.json, Player.exe, ресурсы и скомпилированные программы |
 
 ## Проверяемый результат

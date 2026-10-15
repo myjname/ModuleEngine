@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+module-engine-host = { path = "../game-host" }
+module-engine-host-services = { path = "../host-services", features = ["audio"] }
 module-engine-core = { path = "../engine-core" }
 module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }
 module-engine-two-arenas = { path = "../example-two-arenas" }

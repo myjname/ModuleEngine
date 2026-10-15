@@ -1,61 +1,11 @@
 //! One composition root used by the editor, CLI and project exporter.
 
 use module_engine_core::{
-    Camera, CompositionContext, Frame, FrameRenderer, Graph, GraphDocument, ModuleDescriptor,
-    ModuleRegistry, PortDescriptor, RenderOverrides, ResourceAccess, SceneSnapshot,
-    SystemDescriptor, SystemPort, SystemRegistry, WorldKind, demo_document,
+    CompositionContext, GraphDocument, ModuleRegistry, ResourceAccess, SystemDescriptor,
+    SystemPort, SystemRegistry, WorldKind, demo_document,
 };
-use module_engine_vulkan::{RenderPath, VulkanRenderer};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
-
-type SharedVulkan = Arc<Mutex<Option<VulkanRenderer>>>;
-
-struct VulkanModule {
-    resource_root: std::path::PathBuf,
-    backend: SharedVulkan,
-    graph: Graph,
-    sources: BTreeMap<String, String>,
-    name: String,
-}
-
-impl FrameRenderer for VulkanModule {
-    fn render(
-        &mut self,
-        scene: &SceneSnapshot,
-        camera: Camera,
-        width: usize,
-        height: usize,
-        overrides: &RenderOverrides,
-    ) -> Result<Frame, String> {
-        // Candidate compilation holds the device lock off the UI thread. Keep
-        // the last image visible instead of waiting on that compilation here.
-        let mut lock = self
-            .backend
-            .try_lock()
-            .map_err(|_| "GPU готовит новую конфигурацию; показан последний кадр".to_string())?;
-        lock.as_mut()
-            .ok_or("Vulkan device not initialized")?
-            .render(
-                scene,
-                camera,
-                width,
-                height,
-                &self.graph,
-                &self.sources,
-                overrides,
-            )
-    }
-
-    fn backend_name(&self) -> &str {
-        &self.name
-    }
-    fn validate_overrides(&self, overrides: &RenderOverrides) -> Result<(), String> {
-        module_engine_vulkan::validate_overrides_at(&self.graph, overrides, &self.resource_root)
-    }
-}
+use module_engine_vulkan::RenderPath;
+use std::collections::BTreeMap;
 
 pub fn registry() -> Result<ModuleRegistry, String> {
     registry_at(&module_engine_vulkan::resource_root())
@@ -227,30 +177,8 @@ fn custom_system_descriptor() -> SystemDescriptor {
 }
 
 fn module_registry_at(resource_root: &std::path::Path) -> Result<ModuleRegistry, String> {
-    let resource_root = resource_root.to_path_buf();
     let mut registry = ModuleRegistry::builtin();
-    for descriptor in module_engine_vulkan::module_descriptors() {
-        if descriptor.id != "render.vulkan" {
-            registry.register_module(descriptor)?;
-        }
-    }
-    let backend: SharedVulkan = Arc::new(Mutex::new(None));
-    registry.register_renderer(ModuleDescriptor {
-        id:"render.vulkan".into(), label:"Vulkan renderer".into(),
-        description:"Editable Vulkan graphics/compute passes compiled from HLSL. Inspect the nested graph.".into(),
-        inputs:vec![PortDescriptor{name:"scene".into(),data_type:"Scene3D".into(),required:true},PortDescriptor{name:"commands".into(),data_type:"RenderCommands".into(),required:false}],
-        outputs:vec![PortDescriptor{name:"frame".into(),data_type:"Frame3D".into(),required:false}],properties:vec![],
-    }, move |node,document| {
-        if !node.params.is_null() && !node.params.as_object().is_some_and(|p|p.is_empty()) {return Err("Vulkan module parameters are declared in its passes; outer parameters must be empty".into());}
-        let graph = node.subgraph.as_deref().ok_or("Vulkan renderer needs a pass graph")?.clone();
-        let mut lock = backend.lock().map_err(|_| "Vulkan device lock is poisoned")?;
-        if lock.is_none() { *lock = Some(VulkanRenderer::new_at(resource_root.clone())?); }
-        let gpu = lock.as_mut().unwrap();
-        gpu.prepare(&graph,&document.shader_sources)?;
-        let name = format!("Vulkan / {}", gpu.device_name());
-        drop(lock);
-        Ok(Box::new(VulkanModule{backend:backend.clone(),graph,sources:document.shader_sources.clone(),name,resource_root:resource_root.clone()}))
-    })?;
+    module_engine_vulkan::install(&mut registry, resource_root)?;
     Ok(registry)
 }
 

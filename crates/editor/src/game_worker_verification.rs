@@ -229,8 +229,9 @@ fn host(
     backend: &Path,
     compile: &Path,
 ) -> Result<GameHost, String> {
-    let mut host = GameHost::new_at(document, root, backend, Some(compile), WorldKind::Objects)?;
-    host.audio.enabled = false;
+    let mut host =
+        crate::game_host::new_at(document, root, backend, Some(compile), WorldKind::Objects)?;
+    host.services.set_enabled(false);
     Ok(host)
 }
 fn configure(worker: &GameWorker, timings: &mut ClientTimings) -> Result<(), String> {

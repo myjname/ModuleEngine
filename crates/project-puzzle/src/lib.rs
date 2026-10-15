@@ -115,6 +115,7 @@ pub fn install(registry: &mut SystemRegistry) -> Result<(), String> {
         script_input: |input| serde_json::to_value(input).expect("Portable input"),
         validate_event: systems::validate_event,
         validate_state,
+        service_requests: |_| Ok(vec![]),
         diagnostics,
     })
 }

@@ -1226,12 +1226,40 @@ dependencies = [
  "module-engine-content",
  "module-engine-core",
  "module-engine-custom",
+ "module-engine-host",
+ "module-engine-host-services",
  "module-engine-project",
  "module-engine-project-puzzle",
  "module-engine-script",
  "module-engine-two-arenas",
  "module-engine-vulkan",
  "png",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "module-engine-host"
+version = "0.4.0"
+dependencies = [
+ "module-engine-arpg",
+ "module-engine-content",
+ "module-engine-core",
+ "module-engine-host-services",
+ "module-engine-project",
+ "module-engine-project-puzzle",
+ "module-engine-script",
+ "module-engine-two-arenas",
+ "module-engine-vulkan",
+ "serde_json",
+]
+
+[[package]]
+name = "module-engine-host-services"
+version = "0.4.0"
+dependencies = [
+ "module-engine-core",
+ "module-engine-project",
  "serde",
  "serde_json",
 ]

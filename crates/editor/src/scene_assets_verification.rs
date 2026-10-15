@@ -223,14 +223,14 @@ pub fn run(source: &Path, output: &Path) -> Result<Value, String> {
     )?;
     let player_document = crate::game_package::validate_package(&player)?;
     verify_exported_model(&player, &player_document, &reference)?;
-    let mut ready = GameHost::new_at(
+    let mut ready = crate::game_host::new_at(
         player_document.clone(),
         &player,
         &player,
         None,
         WorldKind::Objects,
     )?;
-    ready.audio.enabled = false;
+    ready.services.set_enabled(false);
     ready.set_detailed_stats(true);
     let player_frame = ready.render(640, 360)?;
     if player_frame.stats.shaded_pixels == 0 {
@@ -387,8 +387,8 @@ fn drag_benchmark(
     output: &Path,
     label: &str,
 ) -> Result<Value, String> {
-    let mut host = GameHost::new_at(document.clone(), root, backend, Some(compile), kind)?;
-    host.audio.enabled = false;
+    let mut host = crate::game_host::new_at(document.clone(), root, backend, Some(compile), kind)?;
+    host.services.set_enabled(false);
     let cached = host.content.load_model(reference)?;
     let slots: Vec<_> = host
         .slots

@@ -142,3 +142,5 @@ GPU использует synchronous offscreen readback для egui с повт�
 
 
 
+
+The shared execution and renderer/service boundaries are documented in [shared-game-host.md](docs/shared-game-host.md).

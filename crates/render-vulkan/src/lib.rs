@@ -1,9 +1,11 @@
 //! Native Vulkan renderer. All shading, postprocessing, and Custom passes execute
 //! on the GPU. Scene vertex preparation and final frame readback are CPU work.
+mod adapter;
 mod compiler;
 mod geometry;
 mod graph;
 mod vulkan;
+pub use adapter::{VulkanAdapter, install};
 pub use compiler::shader_dependency_revision_at;
 pub use compiler::{
     ShaderArtifact, ShaderPerformance, compile_hlsl, compile_hlsl_at, dxc_path,
@@ -16,7 +18,5 @@ pub use graph::{
     module_descriptors, port_type, remove_pass_with_bypass, render_graph_targets,
 };
 pub use graph::{custom_fullscreen_manifest, demo_custom_fullscreen_source};
-pub use vulkan::{
-    RenderGraphValidator, RendererPerformance, VulkanRenderer, validate_overrides,
-    validate_overrides_at,
-};
+pub use module_engine_core::RendererPerformance;
+pub use vulkan::{RenderGraphValidator, VulkanRenderer, validate_overrides, validate_overrides_at};

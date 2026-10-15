@@ -325,7 +325,7 @@ fn run() -> Result<(), String> {
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or(Path::new("."));
-                game_host::GameHost::new(
+                crate::game_host::new(
                     document,
                     asset_root,
                     Some(&distribution.compile_root()?),
@@ -372,7 +372,7 @@ fn run() -> Result<(), String> {
                 } else {
                     WorldKind::Objects
                 };
-                let mut host = game_host::GameHost::new(
+                let mut host = crate::game_host::new(
                     document,
                     Path::new(path)
                         .parent()
@@ -381,7 +381,7 @@ fn run() -> Result<(), String> {
                     Some(&distribution.compile_root()?),
                     kind,
                 )?;
-                host.audio.enabled = false;
+                host.services.set_enabled(false);
                 for _ in 0..90 {
                     host.step(1. / 60., &module_engine_core::GameInput::default())?;
                 }

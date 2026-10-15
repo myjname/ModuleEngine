@@ -1,5 +1,5 @@
 use crate::{GameStateExt, GameStatus, legacy_input};
-use module_engine_core::{Camera, GameContribution, GameProject, GameState};
+use module_engine_core::{Camera, GameContribution, GameProject, GameState, HostServiceRequest};
 use std::collections::BTreeSet;
 
 pub fn host_contribution() -> GameContribution {
@@ -25,8 +25,31 @@ pub fn host_contribution() -> GameContribution {
         script_input: legacy_input,
         validate_event: crate::validate_event,
         validate_state: |game| crate::state::read_frame(game).map(|_| ()),
+        service_requests,
         diagnostics,
     }
+}
+/// Removing the authored audio node disables this service without touching
+/// archived cues. Events may still exist without requesting a playback endpoint.
+pub fn service_requests(project: &GameProject) -> Result<Vec<HostServiceRequest>, String> {
+    if project.audio_cues.is_empty()
+        || !project
+            .execution
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.nodes)
+            .any(|node| node.module == "game.audio")
+    {
+        return Ok(vec![]);
+    }
+    Ok(vec![HostServiceRequest {
+        id: "audio.wav".into(),
+        config: serde_json::json!({
+            "cues":project.audio_cues,
+            "event":"Sound",
+            "cue_field":"cue",
+        }),
+    }])
 }
 pub fn initial_camera(_: &GameProject) -> Camera {
     Camera {
@@ -82,5 +105,46 @@ pub fn apply_hit_flashes(snapshot: &mut module_engine_core::SceneSnapshot, state
             item.material.base_color[channel] +=
                 (1. - item.material.base_color[channel]) * intensity;
         }
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn audio_service_discovery_uses_its_scheduled_node_and_preserves_raw_references() {
+        let mut project = crate::demo_project();
+        project.audio_cues =
+            std::collections::BTreeMap::from([("hit".into(), "asset://tone".into())]);
+        let before = project.clone();
+        let requests = (host_contribution().service_requests)(&project).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, "audio.wav");
+        assert_eq!(
+            requests[0].config,
+            json!({"cues":{"hit":"asset://tone"},"event":"Sound","cue_field":"cue"})
+        );
+        assert_eq!(
+            project, before,
+            "Discovery must not resolve/read or rewrite author data"
+        );
+        for stage in &mut project.execution.stages {
+            stage.nodes.retain(|node| node.module != "game.audio");
+        }
+        assert!(
+            (host_contribution().service_requests)(&project)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(project.audio_cues, before.audio_cues);
+        let mut empty = before;
+        empty.audio_cues.clear();
+        assert!(
+            (host_contribution().service_requests)(&empty)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

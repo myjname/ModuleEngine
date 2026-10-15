@@ -301,7 +301,7 @@ impl Drop for GameWorkbench {
         if self.deferred_preparation {
             for slot in [&mut self.host, &mut self.preview_host] {
                 if let Some(mut host) = slot.take() {
-                    host.audio.stop_endpoint();
+                    host.services.stop();
                     std::thread::spawn(move || drop(host));
                 }
             }
@@ -363,7 +363,13 @@ impl GameWorkbench {
                 kind: host.session.world_kind(),
             });
         }
-        self.worker = Some(GameWorker::spawn(host, self.repaint.clone()));
+        self.worker = Some(GameWorker::spawn(
+            host,
+            self.repaint.clone().map(|ctx| {
+                std::sync::Arc::new(move || ctx.request_repaint())
+                    as std::sync::Arc<dyn Fn() + Send + Sync>
+            }),
+        ));
     }
     fn clear_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
@@ -803,7 +809,7 @@ impl GameWorkbench {
                     std::thread::spawn(move || drop(host));
                     return Err(error);
                 }
-                host.audio.enabled = !preview;
+                host.services.set_enabled(!preview);
                 if !preview {
                     Self::frame_game_start(&mut host);
                 }
@@ -826,7 +832,7 @@ impl GameWorkbench {
                     }
                 };
                 if let Some(mut old) = old {
-                    old.audio.stop_endpoint();
+                    old.services.stop();
                     std::thread::spawn(move || drop(old));
                 }
                 job.progress.succeed(if preview {
@@ -909,7 +915,7 @@ impl GameWorkbench {
         let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
         let (send, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = GameHost::new_at_with_progress(
+            let result = crate::game_host::new_at_with_progress(
                 worker_document,
                 &root,
                 &backend,
@@ -918,7 +924,7 @@ impl GameWorkbench {
                 Some(&worker_progress),
             )
             .map(|mut host| {
-                host.audio.enabled = false;
+                host.services.set_enabled(false);
                 host
             });
             let _ = send.send(result);
@@ -1202,7 +1208,7 @@ impl GameWorkbench {
         }
         if self.deferred_preparation {
             if let Some(mut host) = self.host.take() {
-                host.audio.stop_endpoint();
+                host.services.stop();
                 host.cancel_preparation();
                 std::thread::spawn(move || drop(host));
             }
@@ -1290,7 +1296,8 @@ impl GameWorkbench {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| game_host::backend_root_for(root, compile_root))?;
-        let mut host = GameHost::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
+        let mut host =
+            crate::game_host::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
         Self::frame_game_start(&mut host);
         self.host = Some(host);
         self.game_document = Some(candidate);
@@ -1628,8 +1635,9 @@ impl GameWorkbench {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| game_host::backend_root_for(root, compile_root))?;
-        let mut host = GameHost::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
-        host.audio.enabled = false;
+        let mut host =
+            crate::game_host::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
+        host.services.set_enabled(false);
         self.preview_host = Some(host);
         self.preview_document = Some(candidate);
         Ok(())
@@ -2805,7 +2813,7 @@ if ui.button("+ Resource").clicked(){let name=unique_name("resource",draft.resou
         {
             runtime_document.game.as_mut().unwrap().entry_scene = self.scene.clone();
         }
-        match GameHost::new_at(
+        match crate::game_host::new_at(
             runtime_document.clone(),
             root,
             &backend,
@@ -2815,7 +2823,7 @@ if ui.button("+ Resource").clicked(){let name=unique_name("resource",draft.resou
             Ok(mut host) => {
                 let changed = candidate.game != document.game;
                 document.game = candidate.game;
-                host.audio.enabled = false;
+                host.services.set_enabled(false);
                 self.preview_host = Some(host);
                 self.preview_document = Some(runtime_document);
                 self.host = None;
@@ -4010,7 +4018,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let host = workbench.host.as_mut().unwrap();
-        host.audio.enabled = false;
+        host.services.set_enabled(false);
         let frame = host.render(96, 64).unwrap();
         assert_eq!(frame.rgba.len(), 96 * 64 * 4);
         assert!(
@@ -4315,7 +4323,7 @@ mod tests {
             .ensure(&document, &root, Some(&root), WorldKind::Objects)
             .unwrap();
         let host = workbench.host.as_mut().unwrap();
-        host.audio.enabled = false;
+        host.services.set_enabled(false);
         host.camera.yaw = 0.4;
         host.camera.target = [7., 0., 3.];
         host.session

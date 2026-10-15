@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/engine-core", "crates/custom-rust", "crates/editor", "crates/render-vulkan", "crates/runtime-script", "crates/project-tools", "crates/engine-content", "crates/gameplay-arpg", "crates/example-two-arenas", "crates/project-puzzle"]
+members = ["crates/engine-core", "crates/custom-rust", "crates/editor", "crates/render-vulkan", "crates/runtime-script", "crates/project-tools", "crates/engine-content", "crates/gameplay-arpg", "crates/example-two-arenas", "crates/project-puzzle", "crates/game-host", "crates/host-services"]
 resolver = "3"
 
 [workspace.package]

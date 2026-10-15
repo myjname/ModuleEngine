@@ -2100,6 +2100,7 @@ mod tests {
                 Ok(())
             },
             validate_state: |_| Ok(()),
+            service_requests: |_| Ok(vec![]),
             diagnostics: |_| json!({}),
         }
     }

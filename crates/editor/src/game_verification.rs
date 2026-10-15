@@ -1,7 +1,7 @@
 //! Acceptance through the same GameHost as the editor and standalone Player.
 //! Automated progression changes only authored fixture health, never teleports
 //! or removes runtime actors; benchmark runs the supplied shipping document.
-use crate::game_host::{GameHost, game_registry_at, script_ids};
+use crate::game_host::{game_registry_at, script_ids};
 use module_engine_arpg::{ArpgEvent, ArpgInput, GameStateExt, GameStatus};
 use module_engine_core::{
     ExecutableSystem, GameEntity, GameInput, GameSession, GameState, GraphDocument,
@@ -89,7 +89,7 @@ fn custom_transaction(
     root: &Path,
     compile_root: Option<&Path>,
 ) -> Result<Value, String> {
-    let host = GameHost::new(document.clone(), root, compile_root, WorldKind::Objects)?;
+    let host = crate::game_host::new(document.clone(), root, compile_root, WorldKind::Objects)?;
     if host.slots.is_empty() {
         return Ok(
             json!({"exercised":false,"reason":"Supplied graph contains no Custom system; native rollback is covered by core tests."}),
@@ -203,7 +203,7 @@ fn defeat_fixture(
             }
         }
     }
-    let mut host = GameHost::new(fixture, root, compile_root, WorldKind::Objects)?;
+    let mut host = crate::game_host::new(fixture, root, compile_root, WorldKind::Objects)?;
     let enemies = host.session.state().living_enemies();
     let mut death_event = false;
     for _ in 0..360 {
@@ -248,8 +248,9 @@ fn parity(
     compile_root: Option<&Path>,
     folder: &Path,
 ) -> Result<Value, String> {
-    let mut objects = GameHost::new(document.clone(), root, compile_root, WorldKind::Objects)?;
-    let mut ecs = GameHost::new(document.clone(), root, compile_root, WorldKind::Ecs)?;
+    let mut objects =
+        crate::game_host::new(document.clone(), root, compile_root, WorldKind::Objects)?;
+    let mut ecs = crate::game_host::new(document.clone(), root, compile_root, WorldKind::Ecs)?;
     let graph = &document.game.as_ref().ok_or("No game")?.execution;
     let mut event_count = 0;
     let mut raw_state_equal = true;
@@ -300,7 +301,7 @@ fn parity(
         "raw_state_equal":raw_state_equal,"raw_system_states_equal":raw_system_states_equal,
         "semantic_state_equal":true,"semantic_system_states_equal":true,
         "comparison_scope":"All 180 input frames compare complete world, session control, other module data, typed ARPG frame, events, snapshots and system-owned state. Only documented ARPG incarnation tokens are excluded from semantic equality.",
-        "custom_sources":script_ids(document.game.as_ref().ok_or("No game")?),"audio_cues_consumed":objects.audio.played,
+        "custom_sources":script_ids(document.game.as_ref().ok_or("No game")?),"audio_cues_consumed":objects.services.diagnostics()["audio.wav"]["played"].as_u64().unwrap_or(0),
         "render_size":[960,540],"device":objects.device}),
     )
 }
@@ -327,7 +328,7 @@ fn progression(
         serde_json::to_vec_pretty(&fixture).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let mut host = GameHost::new(fixture, root, compile_root, WorldKind::Objects)?;
+    let mut host = crate::game_host::new(fixture, root, compile_root, WorldKind::Objects)?;
     crate::write_png(&folder.join("game-start.png"), &host.render(960, 540)?)?;
     let initial_enemies = host.session.state().living_enemies();
     let initial_scene = host.session.state().scene.clone();
@@ -424,7 +425,9 @@ fn progression(
         &host.render(960, 540)?,
     )?;
     let play_time = host.session.state().time;
-    let played = host.audio.played;
+    let played = host.services.diagnostics()["audio.wav"]["played"]
+        .as_u64()
+        .unwrap_or(0);
     host.session.restart()?;
     if host.session.state().living_enemies() != initial_enemies
         || host.session.state().arpg().status != GameStatus::Playing
@@ -447,7 +450,7 @@ fn performance(
     compile_root: Option<&Path>,
     folder: &Path,
 ) -> Result<Value, String> {
-    let mut host = GameHost::new(document.clone(), root, compile_root, WorldKind::Objects)?;
+    let mut host = crate::game_host::new(document.clone(), root, compile_root, WorldKind::Objects)?;
     let initial_enemies = host.session.state().living_enemies();
     let input = ArpgInput {
         aim_world: [0., 0., -4.],
@@ -491,7 +494,7 @@ fn performance(
         "render_ms":{"median":percentile(&render_ms,0.5),"p95":percentile(&render_ms,0.95)},
         "mean_processing_fps":1000./mean_ms,"budget_ms":budget,"frames_over_budget":total_ms.iter().filter(|v|**v>budget).count(),
         "target_met":actual_workload&&mean_ms<=budget&&p95<=budget,"custom_sources":script_ids(document.game.as_ref().ok_or("No game")?),
-        "audio_cues_consumed":host.audio.played,"frame_samples_ms":total_ms,
+        "audio_cues_consumed":host.services.diagnostics()["audio.wav"]["played"].as_u64().unwrap_or(0),"frame_samples_ms":total_ms,
         "measurement_scope":"GameHost step + audio consume + imported snapshot enrichment + actual Vulkan render/readback; no vsync, window presentation or editor HUD."}),
     )
 }

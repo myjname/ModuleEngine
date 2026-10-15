@@ -1,0 +1,15 @@
+[package]
+name = "module-engine-host-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+audio = ["dep:module-engine-project", "dep:serde"]
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+module-engine-project = { path = "../project-tools", optional = true }
+serde = { workspace = true, optional = true }
+serde_json.workspace = true

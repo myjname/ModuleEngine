@@ -1,0 +1,20 @@
+[package]
+name = "module-engine-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+module-engine-content = { path = "../engine-content" }
+module-engine-project = { path = "../project-tools" }
+module-engine-script = { path = "../runtime-script" }
+module-engine-host-services = { path = "../host-services", default-features = false }
+serde_json.workspace = true
+
+[dev-dependencies]
+module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }
+module-engine-two-arenas = { path = "../example-two-arenas" }
+module-engine-project-puzzle = { path = "../project-puzzle" }
+module-engine-vulkan = { path = "../render-vulkan" }
+module-engine-host-services = { path = "../host-services", features = ["audio"] }

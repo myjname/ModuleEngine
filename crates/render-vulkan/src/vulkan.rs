@@ -7,7 +7,8 @@ use crate::{
 };
 use ash::{Entry, vk};
 use module_engine_core::{
-    Camera, Frame, Graph, RenderOverrides, RenderResourceCommand, RenderStats, SceneSnapshot,
+    Camera, Frame, Graph, RenderOverrides, RenderResourceCommand, RenderStats, RendererPerformance,
+    SceneSnapshot,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,19 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Cumulative work performed by one renderer. A warmed unchanged frame should
-/// increment render_calls/plan_cache_hits, rather than rebuild or compile.
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
-pub struct RendererPerformance {
-    pub render_calls: u64,
-    pub prepare_calls: u64,
-    pub plan_builds: u64,
-    pub plan_cache_hits: u64,
-    pub rejected_cache_hits: u64,
-    pub pipeline_creations: u64,
-    pub pipeline_build_attempts: u64,
-    pub prepare_ns: u64,
-}
 const INCLUDE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Debug)]

@@ -23,7 +23,7 @@ pub fn run(
     compile_root: Option<&Path>,
     kind: WorldKind,
 ) -> Result<(), String> {
-    let mut host = GameHost::new(document, root, compile_root, kind)?;
+    let mut host = crate::game_host::new(document, root, compile_root, kind)?;
     // eframe's diagnostic capture exits after two UI frames, which can both
     // precede the first fixed tick. Advance the real simulation once so a
     // capture can verify the HUD for an authored combat fixture.
@@ -77,7 +77,7 @@ pub fn run_benchmark(
 ) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     let folder = folder.canonicalize().map_err(|e| e.to_string())?;
-    let host = GameHost::new(document, root, compile_root, kind)?;
+    let host = crate::game_host::new(document, root, compile_root, kind)?;
     let model_paths: BTreeSet<_> = host.session.asset_bindings().into_values().collect();
     let outcome = Arc::new(Mutex::new(None));
     let returned = Arc::clone(&outcome);
@@ -189,7 +189,13 @@ impl Player {
 
     fn new(host: GameHost, ctx: &egui::Context, benchmark: Option<NativeBenchmark>) -> Self {
         Self {
-            worker: GameWorker::spawn(host, Some(ctx.clone())),
+            worker: GameWorker::spawn(
+                host,
+                Some({
+                    let ctx = ctx.clone();
+                    std::sync::Arc::new(move || ctx.request_repaint())
+                }),
+            ),
             snapshot: None,
             texture: None,
             uploaded: None,
@@ -713,7 +719,7 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap();
-        let host = GameHost::new(
+        let host = crate::game_host::new(
             crate::game_host::demo_document(),
             &root,
             Some(&root),

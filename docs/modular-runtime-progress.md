@@ -14,7 +14,7 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Complete |
 | 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Complete |
 | 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Complete |
-| 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Pending |
+| 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Complete |
 | 7 | Profiles, exact versions, separate Player | Safe checked migration and relocated exports for both games | Pending |
 | 8 | Acceptance, performance and author documentation | Serial tests, isolated UI/worker/export checks and scoped performance reports | Pending |
 
@@ -222,3 +222,37 @@ The current common host has not yet been extracted, and the editor executable
 still contains its installed packages. An independently compiled Puzzle Player
 and omitted host services remain stages 6–7; package dependency isolation is not
 claimed as proof of that native Player boundary.
+
+## Stage 6 result
+
+`module-engine-host` now owns session/Custom binding, content, renderer candidates,
+activity data and GameWorker. Applications supply composition, checked roots and
+a wake callback. Its normal dependency tree contains no editor, egui, Vulkan,
+ARPG, Puzzle or concrete example. Registered metadata validates controls and
+external dependencies before renderer construction; actual rendering uses
+`FrameRenderer`. Vulkan owns its adapter, isolated async devices and shared-cache
+synchronous candidate wrappers. Legacy Runtime uses the same registered routes.
+
+Headless explicitly selects a world, skips GPU/tools/eager content/native services
+and publishes no frame. Default ECS still creates no second provider; authored
+Object/custom projections replace factory demo data and validate exact contents.
+Optional service requests come from active packages. Omitted audio has no native
+service; muted constructed audio retains logical diagnostics. Service failure
+after a committed tick/restart is shown as failed activity without lying about
+input acknowledgment or restart epoch. See `shared-game-host.md`.
+
+Checks: core 90, Vulkan 26, host compatibility/cleanup 12 and WAV/service 5 tests
+passed. Eight independent CPU/headless/source-world/worker regressions passed.
+The editor full run passed 172 cases and exposed three failures; the AA case
+found a noncanonical backend path causing a needless full rebuild, now fixed and
+passed on recheck. Both export fixtures reused a recycled process ID; their
+unique paths now include a nonce and all six package checks passed. The original
+failure logs are retained. An earlier run had an unsealed source inventory;
+it is not counted as successful acceptance. The final worker CLI passed with
+real 80 ms Custom, Vulkan, input/restart/epoch/state/candidate/shutdown checks;
+its client dispatch timings do not measure FPS. Workspace/all-targets Clippy
+passed with warnings denied. Final whole-workspace acceptance remains stage 8.
+
+The standalone native feature-selected Player and exact profile/migration
+metadata are still stage 7. The authored game bytes remain unchanged and the
+canonical installed editor executable has not been republished yet.

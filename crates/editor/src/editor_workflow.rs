@@ -1304,13 +1304,13 @@ pub(crate) fn verify_workflow(source: &Path, output: &Path) -> Result<serde_json
     let mut content = module_engine_content::ContentLibrary::new(copy_root)?;
     let model = content.load_model(&imported)?;
     let copy_context = crate::distribution::detect(&copy.path, &copy.document, None)?;
-    let mut host = crate::game_host::GameHost::new(
+    let mut host = crate::game_host::new(
         copy.document.clone(),
         copy_root,
         Some(&copy_context.compile_root()?),
         WorldKind::Objects,
     )?;
-    host.audio.enabled = false;
+    host.services.set_enabled(false);
     host.step(1. / 60., &module_engine_core::GameInput::default())?;
     let frame = host.render(640, 480)?;
     // Player rendering omits diagnostic depth readbacks. Compare actual output
@@ -1412,9 +1412,8 @@ pub(crate) fn verify_workflow(source: &Path, output: &Path) -> Result<serde_json
         &case.join("player"),
     )?;
     let player_doc = crate::game_package::validate_package(&player)?;
-    let mut player_host =
-        crate::game_host::GameHost::new(player_doc, &player, None, WorldKind::Objects)?;
-    player_host.audio.enabled = false;
+    let mut player_host = crate::game_host::new(player_doc, &player, None, WorldKind::Objects)?;
+    player_host.services.set_enabled(false);
     player_host.step(1. / 60., &module_engine_core::GameInput::default())?;
     let player_frame = player_host.render(640, 480)?;
     if player_frame.rgba != frame.rgba {

@@ -738,6 +738,18 @@ pub fn package_compile_root() -> Result<PathBuf, String> {
 }
 
 const NATIVE_FILES: &[&str] = &[
+    "crates/game-host/Cargo.toml",
+    "crates/game-host/src/lib.rs",
+    "crates/game-host/src/game_host.rs",
+    "crates/game-host/src/game_worker.rs",
+    "crates/game-host/src/activity.rs",
+    "crates/game-host/src/compat_tests.rs",
+    "crates/game-host/src/test_support.rs",
+    "crates/game-host/src/neutral_tests.rs",
+    "crates/host-services/Cargo.toml",
+    "crates/host-services/src/lib.rs",
+    "crates/host-services/src/audio.rs",
+    "crates/render-vulkan/src/adapter.rs",
     "crates/editor/src/source_modules.rs",
     "crates/engine-core/src/component_schema.rs",
     "crates/engine-core/src/composition.rs",
