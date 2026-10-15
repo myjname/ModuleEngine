@@ -1,0 +1,283 @@
+{
+  "schema": 1,
+  "date": "2026-10-15",
+  "language": "ru",
+  "status": "исправление подтверждено на этой машине: парный desktop A/B, native Play/Stop и обычный конечный EXE",
+  "branch": "codex/fix-dwm-desktop-stalls",
+  "baseCommit": "4cee54d40469afd9d59bb101d67af0a2176e5ece",
+  "fixCommit": "c714e9e7521d3203c86dd2b9c7e0574099cfa2bf",
+  "fixCommitStatus": "commit реализации; отчёт и source inventory сохранены отдельным последующим commit",
+  "report": "docs/desktop-stalls-20261015.md",
+  "localEvidenceRoot": "E:\\ModuleEngine\\outputs\\independent-audit\\lag-diagnostics\\fix-investigation",
+  "cause": {
+    "confirmed": "DWM composition thread busy в OpenDxBltEvent: fallback-перебор object directory после неудачного OpenEventW события DX BLT при презентации Glow/OpenGL.",
+    "stack": [
+      "ntoskrnl!NtQueryDirectoryObject",
+      "ntdll!NtQueryDirectoryObject",
+      "dwmcore!OpenDxBltEvent",
+      "dwmcore!CGlobalSurfaceManager::AdvanceFrame",
+      "dwmcore!CComposition::PostRender",
+      "dwmcore!CComposition::ProcessComposition"
+    ],
+    "namespace": "\\Sessions\\<session>\\AppContainerNamedObjects",
+    "lowLevelReasonForFailedOpenEvent": "не установлен; отсутствие события, отказ доступа или конкретная ошибка Windows/драйвера не различены",
+    "currentNamespaceReadOnlyEntries": 2506,
+    "namespaceCountProvesCause": false,
+    "source": "offline-etw-localization.json"
+  },
+  "originalTrace": {
+    "path": "E:\\ModuleEngine\\outputs\\independent-audit\\lag-diagnostics\\trace-admin-20261015-102351\\engine-lag.etl",
+    "bytes": 543162368,
+    "sha256": "E407947D4705EDBD72E491DB84CB6AD27A67C2FAA67EE2666B02419CD41A9D01",
+    "preserved": true,
+    "durationSeconds": 23.387182,
+    "lostEvents": 0,
+    "lostBuffers": 0,
+    "invalidEvent": {
+      "count": 1,
+      "seconds": 22.607578,
+      "pid": 51464,
+      "tid": 51920,
+      "context": "rundown другого процесса; предупреждение xperf сохранено"
+    },
+    "dwmPid": 2208,
+    "dwmCompositionTid": 3004,
+    "beforeMaxSchedulePresentMilliseconds": 2.823,
+    "completedSchedulePresentMilliseconds": [
+      341.434,
+      2018.662,
+      8123.493
+    ],
+    "finalSchedulePresent": {
+      "startSeconds": 15.417166,
+      "completed": false
+    },
+    "hardwareVsyncMeanMilliseconds": 6.944189,
+    "enginePresentModel": "REDIRECTED_BLT",
+    "symbols": {
+      "verification": "точные GUID/age из ETL, совпали с Microsoft public PDB",
+      "ntkrnlmp": "0B3439338F40DDCD568A30E465A9576B1",
+      "ntdll": "CDE33ED1E32C78E3ECA6171C84A5493B1",
+      "dwmcore": "08491F8213CA601DE6DA72D506F0E0701",
+      "kernel32": "EB96AE1E1A7EFE44176774C15ED1FEB01"
+    },
+    "steadyOpen": {
+      "rangeSeconds": [
+        7,
+        18
+      ],
+      "threadCPUSeconds": 10.999122,
+      "cpuSampleCount": 10995,
+      "openDxBltEventSamples": 10727,
+      "ntQueryDirectoryObjectExclusiveCPUSeconds": 8.706316,
+      "obpLookupObjectNameExclusiveCPUSeconds": 1.120401
+    },
+    "immediateRecoveryAfterCloseProven": false
+  },
+  "fix": {
+    "windowsDefaultGUI": "WGPU/DX12",
+    "sharedEditorPlayerPolicy": "crates/player/src/ui.rs::native_options",
+    "diagnosticOverride": "MODULE_ENGINE_GUI_BACKEND=glow|wgpu",
+    "gameVulkanECSHostChanged": false,
+    "globalWindowsDriverSecuritySettingsChanged": false,
+    "screenshots": {
+      "nativeEditor": "MODULE_ENGINE_UI_SCREENSHOT_TO; сохраняет WGPU",
+      "legacy": "EFRAME_SCREENSHOT_TO выбирает Glow только без явного backend; вместе с явным wgpu возвращает ошибку"
+    },
+    "changedProductFiles": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "crates/player/src/ui.rs",
+      "crates/editor/src/main.rs",
+      "crates/editor/src/editor_benchmark.rs",
+      "crates/editor/examples/desktop_presentation_probe.rs",
+      ".module-engine-package.json"
+    ],
+    "existingNativeScreenshotSupport": [
+      "crates/editor/src/ui_capture.rs",
+      "crates/editor/src/editor_workflow.rs"
+    ]
+  },
+  "observedAB": {
+    "source": "desktop-case-analysis.json",
+    "sameProjectBuildLayoutExecutableCommitObserverOutput": true,
+    "executableSha256": "CCE3F349210BA08188BCD34CB6FA8A977ACE78E92C21011DD0697081F409CCFB",
+    "buildType": "release opt-level=2",
+    "adapter": "NVIDIA GeForce RTX 4080 SUPER",
+    "output": "\\\\.\\DISPLAY1, 3440x1440, primary",
+    "principalIsAdministrator": false,
+    "boundaries": "точные QPC от resume своего процесса до запроса WM_CLOSE; включают инициализацию окна",
+    "glow": {
+      "case": "engine-glow-observed",
+      "openSeconds": 10.0011078,
+      "completedGapMaxMilliseconds": 2437.9644,
+      "rightCensoredFinalAgeMilliseconds": 6406.4062,
+      "maxObservedImageAgeMilliseconds": 6406.4062,
+      "observedNewImages": 49,
+      "maxObserverSpacingMilliseconds": 108.034,
+      "samplesAccumulatingMultipleFrames": 0,
+      "dwmWeightedOneCorePercent": 94.3131681791553,
+      "cpuMeasuredSeconds": 9.2776016
+    },
+    "wgpu": {
+      "case": "engine-dx12-observed",
+      "openSeconds": 10.0144104,
+      "completedGapMaxMilliseconds": 30.2319,
+      "rightCensoredFinalAgeMilliseconds": 0.0626,
+      "maxObservedImageAgeMilliseconds": 28.367,
+      "observedNewImages": 1135,
+      "maxObserverSpacingMilliseconds": 30.2413,
+      "samplesAccumulatingMultipleFrames": 1,
+      "dwmWeightedOneCorePercent": 16.0898271408378,
+      "cpuMeasuredSeconds": 9.808216
+    },
+    "crossCloseGap": {
+      "milliseconds": 8283.5595,
+      "startSecondsFromResume": 3.5178183,
+      "endSecondsFromResume": 11.8013778,
+      "excludedFromCompletedOpenStatistics": true
+    },
+    "metricsAreEtwSchedulePresentDurations": false,
+    "pointerOnlyEventsResetImageAge": false,
+    "pixelsReadCopiedSavedByObserver": false
+  },
+  "noDesktopDuplicationChecks": {
+    "emptyEframeNoGameHostNoVulkan": {
+      "glowMeanDwmOneCorePercent": 94.665247693233,
+      "dx12MeanDwmOneCorePercent": 8.053309988075,
+      "sources": [
+        "probe-glow-vsync/summary.json",
+        "probe-dx12/summary.json"
+      ]
+    },
+    "regularGameView45Seconds": {
+      "meanDwmOneCorePercent": 12.911782380066,
+      "exitCode": 0,
+      "forcedCleanup": false,
+      "source": "ui-play-stop/measurement/summary.json",
+      "buttonInputsPerformed": false,
+      "computerUse": "подтверждение доступа не получено до таймаута; снимков и нажатий не было"
+    }
+  },
+  "checks": {
+    "releaseABBuild": {
+      "status": "passed",
+      "command": "cargo build --release --offline --locked -p module-engine-editor --bin module-engine-editor --example desktop_presentation_probe"
+    },
+    "nativeOptionsTests": {
+      "status": "passed",
+      "passed": 3,
+      "command": "cargo test --release --offline --locked -p module-engine-player --features ui native_options_tests -- --test-threads=1"
+    },
+    "clippy": {
+      "status": "passed",
+      "command": "cargo clippy --release --offline --locked -p module-engine-editor -p module-engine-player --all-targets -- -D warnings"
+    },
+    "cargoHome": "E:\\ModuleEngine\\.work\\cargo-home",
+    "playStopNativeDispatcher": {
+      "report": "native-editor/report.json",
+      "dwmWeightedOneCorePercent": 21.394613415176405,
+      "status": "passed",
+      "projectFileUnchanged": true,
+      "maxDesktopUpdateGapMilliseconds": 35.5859,
+      "maxObservedImageAgeMilliseconds": 30.147,
+      "observerAnalysis": "native-desktop-analysis.json",
+      "gameSimulationAdvanced": true,
+      "frames": [
+        90,
+        90
+      ],
+      "playStop": {
+        "play_actor_id": 1,
+        "play_command_started": true,
+        "scope": "Native Editor invokes the same PlayPause and Stop command dispatcher as the toolbar; this does not verify external pointer clicks. Stop must release the old Game owner and prepare a new stopped worker at time zero.",
+        "stop_command_dispatched": true,
+        "stop_immediate_owner_released": true,
+        "stop_immediate_paused": true,
+        "stopped_actor_id": 2,
+        "stopped_host_ready": true,
+        "stopped_paused": true,
+        "stopped_time": 0.0,
+        "verified": true
+      },
+      "externalPointerClickVerified": false,
+      "guiGraphics": {
+        "adapter_name": "NVIDIA GeForce RTX 4080 SUPER",
+        "backend": "Dx12",
+        "gl_renderer": null,
+        "gl_vendor": null,
+        "renderer": "Wgpu"
+      },
+      "measurementsValid": true,
+      "elapsedSeconds": 17.143011,
+      "complete": true
+    },
+    "finalEditorPlayerBuild": {
+      "command": "cargo build --release --offline --locked -p module-engine-editor -p module-engine-player --features module-engine-player/ui,module-engine-player/arpg,module-engine-player/puzzle,module-engine-player/vulkan,module-engine-player/audio",
+      "note": "финальная сборка из commit реализации c714e9e7521d3203c86dd2b9c7e0574099cfa2bf после нормализации исходников LF; exit 0",
+      "status": "passed"
+    },
+    "finalOutputExeNoObserver": {
+      "meanDwmOneCorePercent": 12.91454119840349,
+      "sha256": "A40ED305456F9AFF3EE868CC91BCF86B34BDDB0111E35C3821C5DF1FD1F0069F",
+      "principalIsAdministrator": false,
+      "maxDwmOneCorePercent": 52.78176807944458,
+      "source": "final-exe-no-observer/summary.json",
+      "engine": {
+        "RootPid": 28568,
+        "ExitCode": 0,
+        "ForcedCleanup": false,
+        "CleanupError": null,
+        "ActiveProcessesAtCleanup": 0,
+        "StartQpc": 1523387517441,
+        "CloseRequestedQpc": 1523507783463,
+        "ExitObservedQpc": 1523510280281,
+        "Events": [
+          "2026-10-15T09:10:09.7633977Z started rootPid=28568 suspended-assigned-resumed; watchdogMs=12000",
+          "2026-10-15T09:10:21.7902063Z open phase ended; rootAlive=True; close requested; activeProcesses=1",
+          "2026-10-15T09:10:22.0392103Z cleanup activeProcesses=0"
+        ]
+      },
+      "status": "passed",
+      "path": "E:\\ModuleEngine\\outputs\\ModuleEngine.exe",
+      "scope": "CPU DWM и жизненный цикл без Desktop Duplication; это не измерение интервалов обновления изображения",
+      "openSeconds": 12,
+      "projectUnchanged": true,
+      "backend": "фактический Wgpu/Dx12 на RTX 4080 SUPER в startup log; override/capture env сняты только в процессе проверки"
+    },
+    "releaseCopy": {
+      "sha256": "A40ED305456F9AFF3EE868CC91BCF86B34BDDB0111E35C3821C5DF1FD1F0069F",
+      "matchesReleaseTarget": true,
+      "status": "passed",
+      "playerSha256": "047B961122E9433B3D3013EDD32B82FC7B58735148F52FD568B3600273FF03AC",
+      "originalExeBackup": "ModuleEngine.before.exe",
+      "editorPath": "E:\\ModuleEngine\\outputs\\ModuleEngine.exe",
+      "originalExeSha256": "28CD0AA3196EBCF5B56833E40ADF9A64421A276C003F30D2C43E7E685DB9D6B2"
+    },
+    "nativeScreenshot": {
+      "scope": "встроенный WGPU screenshot UI во время подготовки Game/Scene; готовые игровые пиксели отдельно подтверждены native benchmark",
+      "path": "dx12-game.png",
+      "computerUseUsed": false,
+      "status": "passed"
+    }
+  },
+  "preservedInputs": {
+    "hashesMatchInitialAndRestored": true,
+    "sha256": {
+      "game-project-v4.json": "9FB51752F148AD46985E9C759E5D50E9A46A52A20C080C0C510D1DABE9C937A9",
+      "game-project.json": "BF2D5D86FFB51241CFF34E9247C51890145FC0EFD6418A6EB5DED2BDE2B2DC6B",
+      ".user/full/project.json": "1BE106884F5B21E0BBF09F436CE595EB1434D44B2B201EDED7691C775F4C0DFA",
+      ".user/full/engine.json": "935603D5F4B271D16F3293EF0C470154E2EF48251719074276EE0BA1F5B11CD4"
+    }
+  },
+  "limits": [
+    "Desktop Duplication наблюдает обновления изображения одного монитора; физическое сканирование и задержка ввода не измерены.",
+    "Observer может менять режим презентации; пустое окно, 45с Game view и 12с конечный EXE дополнительно проверены без Desktop Duplication по DWM CPU. По этим no-observer счётчикам нельзя восстановить точные интервалы Present.",
+    "Новая ETW после изменения не записывалась: дополнительные права/UAC не получались.",
+    "Почему не открывается событие BLT и какой низкоуровневый компонент ошибается, не установлено; MPO/overlay/driver не объявляются доказанной причиной.",
+    "DwmGetCompositionTimingInfo и UI-handler/FPS не заменяют проверку рабочего стола.",
+    "Взвешенный CPU исключает интервалы пересечения границ фаз; 100% означает одно логическое ядро, а не весь компьютер.",
+    "Внешний pointer-click не проверен: доступ Computer Use завершился таймаутом. Native harness проверил общий dispatcher toolbar и реальные GPU Game/Scene snapshots.",
+    "Обычный Windows GUI теперь требует DX12 adapter; старые экспортированные EXE/prebuilt Player сами не обновляются. Существующие экспорты не изменялись."
+  ]
+}
