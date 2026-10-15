@@ -14,7 +14,7 @@ thiserror = "2"
 syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "__screenshot"] }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "wgpu", "default_fonts", "__screenshot"] }
 png = "0.18"
 egui = "0.36.2"
 

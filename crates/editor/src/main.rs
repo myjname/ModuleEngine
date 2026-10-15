@@ -515,18 +515,17 @@ fn run() -> Result<(), String> {
     if distribution.profile == distribution::DistributionProfile::Full {
         host::ensure_authoring_configuration(&mut document);
     }
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+    let options = module_engine_player::ui::native_options(
+        eframe::egui::ViewportBuilder::default()
             .with_inner_size([1580.0, 940.0])
             .with_min_inner_size([1100.0, 720.0]),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
+    )?;
     let open_custom = std::env::var_os("MODULE_ENGINE_SHOW_CUSTOM").is_some();
     eframe::run_native(
         "ModuleEngine / Engine Constructor",
         options,
         Box::new(move |cc| {
+            module_engine_player::ui::report_graphics(cc);
             app::configure_style(&cc.egui_ctx);
             let mut editor = app::Editor::new_with_distribution(document, path, distribution);
             if open_custom {

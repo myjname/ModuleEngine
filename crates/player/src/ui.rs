@@ -17,7 +17,111 @@ const BENCHMARK_WARMUP: usize = 30;
 const BENCHMARK_FRAMES: usize = 120;
 const FRAME_BUDGET_MS: f64 = 1000. / 60.;
 
+/// Shared window presentation policy for Editor, Player, and native diagnostics.
+/// Windows uses DX12 for GUI presentation; the selected game renderer is separate.
+/// `MODULE_ENGINE_GUI_BACKEND=glow|wgpu` permits a controlled comparison.
+/// Legacy `EFRAME_SCREENSHOT_TO` implicitly selects Glow only when no backend is
+/// explicitly requested, because eframe's two-frame capture does not support wgpu.
+pub fn native_options(viewport: egui::ViewportBuilder) -> Result<eframe::NativeOptions, String> {
+    let requested = match std::env::var("MODULE_ENGINE_GUI_BACKEND") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(format!("MODULE_ENGINE_GUI_BACKEND: {error}")),
+    };
+    let legacy_capture = std::env::var_os("EFRAME_SCREENSHOT_TO").is_some();
+    let options = native_options_for(
+        viewport,
+        requested.as_deref(),
+        legacy_capture,
+        cfg!(target_os = "windows"),
+    )?;
+    eprintln!(
+        "ModuleEngine GUI: requested renderer={:?}, legacy screenshot fallback={}",
+        options.renderer,
+        legacy_capture && requested.is_none()
+    );
+    Ok(options)
+}
+
+fn native_options_for(
+    viewport: egui::ViewportBuilder,
+    requested: Option<&str>,
+    legacy_capture: bool,
+    windows: bool,
+) -> Result<eframe::NativeOptions, String> {
+    let renderer = match requested {
+        Some("glow") => eframe::Renderer::Glow,
+        Some("wgpu") if legacy_capture => {
+            return Err(
+                "EFRAME_SCREENSHOT_TO requires Glow; unset it for the wgpu GUI backend. The Editor supports MODULE_ENGINE_UI_SCREENSHOT_TO for native screenshots."
+                    .into(),
+            );
+        }
+        Some("wgpu") => eframe::Renderer::Wgpu,
+        Some(_) => return Err("MODULE_ENGINE_GUI_BACKEND must be glow or wgpu".into()),
+        None if legacy_capture || !windows => eframe::Renderer::Glow,
+        None => eframe::Renderer::Wgpu,
+    };
+    let mut options = eframe::NativeOptions {
+        viewport,
+        renderer,
+        ..Default::default()
+    };
+    if windows
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+    {
+        // Keep the GUI's presentation path independent from offscreen Vulkan.
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+    }
+    Ok(options)
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct GuiGraphicsInfo {
+    pub renderer: &'static str,
+    pub backend: Option<String>,
+    pub adapter_name: Option<String>,
+    pub gl_vendor: Option<String>,
+    pub gl_renderer: Option<String>,
+}
+
+/// Record the initialized adapter, rather than inferring it from requested options.
+pub fn report_graphics(cc: &eframe::CreationContext<'_>) -> GuiGraphicsInfo {
+    let graphics = if let Some(state) = &cc.wgpu_render_state {
+        let adapter = state.adapter.get_info();
+        GuiGraphicsInfo {
+            renderer: "Wgpu",
+            backend: Some(format!("{:?}", adapter.backend)),
+            adapter_name: Some(adapter.name),
+            ..Default::default()
+        }
+    } else if let Some(gl) = &cc.gl {
+        use eframe::glow::HasContext;
+        let vendor = unsafe { gl.get_parameter_string(eframe::glow::VENDOR) };
+        let renderer = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+        GuiGraphicsInfo {
+            renderer: "Glow",
+            backend: Some("OpenGL".into()),
+            adapter_name: Some(renderer.clone()),
+            gl_vendor: Some(vendor),
+            gl_renderer: Some(renderer),
+        }
+    } else {
+        GuiGraphicsInfo {
+            renderer: "Unknown",
+            ..Default::default()
+        }
+    };
+    eprintln!("ModuleEngine GUI initialized: {graphics:?}");
+    graphics
+}
+
 pub fn run_host(mut host: GameHost) -> Result<(), String> {
+    let options = native_options(
+        egui::ViewportBuilder::default()
+            .with_inner_size([1280., 720.])
+            .with_min_inner_size([800., 450.]),
+    )?;
     // eframe's diagnostic capture exits after two UI frames, which can both
     // precede the first fixed tick. Advance the real simulation once so a
     // capture can verify the HUD for an authored combat fixture.
@@ -35,17 +139,11 @@ pub fn run_host(mut host: GameHost) -> Result<(), String> {
             }
         }
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280., 720.])
-            .with_min_inner_size([800., 450.]),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
     eframe::run_native(
         "ModuleEngine / Player",
         options,
         Box::new(move |cc| {
+            report_graphics(cc);
             configure_style(&cc.egui_ctx);
             let mut player = Player::new(host, &cc.egui_ctx, None);
             if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
@@ -68,19 +166,18 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
     let model_paths: BTreeSet<_> = host.session.asset_bindings().into_values().collect();
     let outcome = Arc::new(Mutex::new(None));
     let returned = Arc::clone(&outcome);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    let options = native_options(
+        egui::ViewportBuilder::default()
             .with_inner_size([1920., 1080.])
             .with_min_inner_size([640., 360.])
             .with_decorations(false)
             .with_position([0., 0.]),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
+    )?;
     eframe::run_native(
         "ModuleEngine / Native Player benchmark",
         options,
         Box::new(move |cc| {
+            let gui_graphics = report_graphics(cc);
             configure_style(&cc.egui_ctx);
             let window = cc.winit_window().cloned();
             let physical_size: Box<dyn Fn() -> Option<[u32; 2]>> = match window {
@@ -125,14 +222,7 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
                     frame_ages_ms: vec![],
                     missing_completion_timestamps: 0,
                     finished: false,
-                    gl_vendor: cc.gl.as_ref().map(|gl| {
-                        use eframe::glow::HasContext;
-                        unsafe { gl.get_parameter_string(eframe::glow::VENDOR) }
-                    }),
-                    gl_renderer: cc.gl.as_ref().map(|gl| {
-                        use eframe::glow::HasContext;
-                        unsafe { gl.get_parameter_string(eframe::glow::RENDERER) }
-                    }),
+                    gui_graphics,
                 }),
             )))
         }),
@@ -534,8 +624,7 @@ struct NativeBenchmark {
     frame_ages_ms: Vec<f64>,
     missing_completion_timestamps: usize,
     finished: bool,
-    gl_vendor: Option<String>,
-    gl_renderer: Option<String>,
+    gui_graphics: GuiGraphicsInfo,
 }
 
 #[derive(Serialize)]
@@ -711,7 +800,8 @@ impl NativeBenchmark {
             "canvas_pixels_last":self.samples.last().map(|s|s.canvas_pixels),
             "offscreen_render_pixels":[1920,1080],"monitor_pixels":self.monitor_size,"monitor_refresh_millihertz":self.refresh_millihertz,
             "pixels_per_point":self.samples.last().map(|s|s.pixels_per_point),
-            "gl_vendor":self.gl_vendor,"gl_renderer":self.gl_renderer,"renderer_device":snapshot.map(|s|s.device.as_str()),"vulkan_device":snapshot.map(|s|s.device.as_str())
+            "gui_graphics":self.gui_graphics,
+            "gl_vendor":self.gui_graphics.gl_vendor,"gl_renderer":self.gui_graphics.gl_renderer,"renderer_device":snapshot.map(|s|s.device.as_str()),"vulkan_device":snapshot.map(|s|s.device.as_str())
         }).as_object().unwrap().clone());
         report.as_object_mut().unwrap().extend(serde_json::json!({
             "cpu_identifier":std::env::var("PROCESSOR_IDENTIFIER").ok(),
@@ -772,6 +862,70 @@ pub fn configure_style(ctx: &egui::Context) {
 }
 
 #[cfg(test)]
+mod native_options_tests {
+    use super::*;
+
+    fn options(
+        requested: Option<&str>,
+        legacy_capture: bool,
+        windows: bool,
+    ) -> Result<eframe::NativeOptions, String> {
+        native_options_for(
+            egui::ViewportBuilder::default(),
+            requested,
+            legacy_capture,
+            windows,
+        )
+    }
+
+    #[test]
+    fn windows_gui_uses_dx12_and_other_platforms_retain_glow() {
+        let windows = options(None, false, true).unwrap();
+        assert_eq!(windows.renderer, eframe::Renderer::Wgpu);
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = windows.wgpu_options.wgpu_setup else {
+            panic!("Native GUI must create its own independent wgpu setup");
+        };
+        assert_eq!(
+            setup.instance_descriptor.backends,
+            eframe::wgpu::Backends::DX12
+        );
+        assert_eq!(
+            options(None, false, false).unwrap().renderer,
+            eframe::Renderer::Glow
+        );
+    }
+
+    #[test]
+    fn legacy_capture_falls_back_only_when_backend_is_unspecified() {
+        assert_eq!(
+            options(None, true, true).unwrap().renderer,
+            eframe::Renderer::Glow
+        );
+        assert_eq!(
+            options(Some("glow"), true, true).unwrap().renderer,
+            eframe::Renderer::Glow
+        );
+        let error = options(Some("wgpu"), true, true).err().unwrap();
+        assert!(error.contains("EFRAME_SCREENSHOT_TO"));
+        assert!(error.contains("MODULE_ENGINE_UI_SCREENSHOT_TO"));
+    }
+
+    #[test]
+    fn explicit_backend_selection_is_validated() {
+        assert_eq!(
+            options(Some("glow"), false, true).unwrap().renderer,
+            eframe::Renderer::Glow
+        );
+        assert_eq!(
+            options(Some("wgpu"), false, false).unwrap().renderer,
+            eframe::Renderer::Wgpu
+        );
+        assert!(options(Some("invalid"), false, true).is_err());
+        assert!(options(Some(""), false, true).is_err());
+    }
+}
+
+#[cfg(test)]
 mod timing_tests {
     use super::*;
     use std::time::Duration;
@@ -793,8 +947,7 @@ mod timing_tests {
             frame_ages_ms: vec![],
             missing_completion_timestamps: 0,
             finished: false,
-            gl_vendor: None,
-            gl_renderer: None,
+            gui_graphics: GuiGraphicsInfo::default(),
         }
     }
 

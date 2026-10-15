@@ -1,5 +1,6 @@
 //! Opt-in native Editor diagnostic. Kept as an app child so the same harness can
 //! be compiled against older source packages without product instrumentation.
+use super::editor_workflow::Command;
 use super::{Editor, EditorType, WorkspaceKind, dock, panes};
 use crate::distribution::Distribution;
 use eframe::{App, egui};
@@ -43,18 +44,17 @@ pub fn run(
     let folder = folder.canonicalize().map_err(|error| error.to_string())?;
     let outcome = Arc::new(Mutex::new(None));
     let returned = Arc::clone(&outcome);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    let options = module_engine_player::ui::native_options(
+        egui::ViewportBuilder::default()
             .with_inner_size([1920., 1080.])
             .with_min_inner_size([1200., 720.])
             .with_position([0., 0.]),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
+    )?;
     eframe::run_native(
         "ModuleEngine / Native Editor benchmark",
         options,
         Box::new(move |cc| {
+            let gui_graphics = module_engine_player::ui::report_graphics(cc);
             super::configure_style(&cc.egui_ctx);
             let mut editor =
                 Editor::new_with_distribution(document.clone(), path.clone(), distribution);
@@ -121,11 +121,17 @@ pub fn run(
                 graph_pan_changes: [0; 2],
                 identities: None,
                 identities_preserved: true,
+                play_command_started: false,
+                play_actor_id: None,
+                stop_command_dispatched: false,
+                stop_immediate_paused: false,
+                stop_immediate_owner_released: false,
                 errors: BTreeSet::new(),
                 finished: false,
                 physical_size,
                 monitor_pixels,
                 refresh_millihertz,
+                gui_graphics,
             }))
         }),
     )
@@ -172,6 +178,7 @@ enum Phase {
     StoppedPan,
     WarmupPlay,
     PlayPan,
+    StoppedAfterPlay,
 }
 impl Phase {
     fn measured_index(self) -> Option<usize> {
@@ -187,6 +194,7 @@ impl Phase {
             Self::StoppedPan => "stopped-pan",
             Self::WarmupPlay => "play-warmup",
             Self::PlayPan => "play-pan",
+            Self::StoppedAfterPlay => "stopped-after-play",
         }
     }
 }
@@ -265,11 +273,17 @@ struct NativeEditorBenchmark {
     graph_pan_changes: [usize; 2],
     identities: Option<HostIdentities>,
     identities_preserved: bool,
+    play_command_started: bool,
+    play_actor_id: Option<u64>,
+    stop_command_dispatched: bool,
+    stop_immediate_paused: bool,
+    stop_immediate_owner_released: bool,
     errors: BTreeSet<String>,
     finished: bool,
     physical_size: Box<dyn Fn() -> Option<[u32; 2]>>,
     monitor_pixels: Option<[u32; 2]>,
     refresh_millihertz: Option<u32>,
+    gui_graphics: module_engine_player::ui::GuiGraphicsInfo,
 }
 
 impl NativeEditorBenchmark {
@@ -338,6 +352,18 @@ impl NativeEditorBenchmark {
         self.readiness().ready()
     }
 
+    fn stopped_after_play_ready(&self) -> bool {
+        self.phase == Phase::StoppedAfterPlay
+            && self.ready()
+            && !self.editor.playing
+            && self
+                .play_actor_id
+                .zip(self.editor.game_workbench.game_snapshot())
+                .is_some_and(|(play_actor, snapshot)| {
+                    snapshot.state.time == 0. && snapshot.actor_id != play_actor
+                })
+    }
+
     fn collect_errors(&mut self) {
         if let Some(error) = &self.editor.runtime_error {
             self.errors.insert(error.clone());
@@ -390,6 +416,11 @@ impl NativeEditorBenchmark {
             .first()
             .zip(play_times.last())
             .is_some_and(|(first, last)| last > first);
+        let stop_verified = self.play_command_started
+            && self.stop_command_dispatched
+            && self.stop_immediate_paused
+            && self.stop_immediate_owner_released
+            && self.stopped_after_play_ready();
         let measurements_valid = complete
             && self.errors.is_empty()
             && document_unchanged
@@ -397,6 +428,7 @@ impl NativeEditorBenchmark {
             && project_file_unchanged
             && self.identities_preserved
             && simulation_advanced
+            && stop_verified
             && self.samples.iter().all(|sample| {
                 sample.visible != Some(false)
                     && sample.game_frame_ready
@@ -433,15 +465,29 @@ impl NativeEditorBenchmark {
             "pan_input_attempts":self.drag_attempts,"actual_pan_changes":self.graph_pan_changes,
             "host_custom_slot_arc_identities_preserved":self.identities_preserved,
             "game_simulation_advanced_during_play_samples":simulation_advanced,
+            "play_stop":{
+                "verified":stop_verified,
+                "play_command_started":self.play_command_started,
+                "play_actor_id":self.play_actor_id,
+                "stop_command_dispatched":self.stop_command_dispatched,
+                "stop_immediate_paused":self.stop_immediate_paused,
+                "stop_immediate_owner_released":self.stop_immediate_owner_released,
+                "stopped_host_ready":self.phase == Phase::StoppedAfterPlay && self.ready(),
+                "stopped_paused":self.phase == Phase::StoppedAfterPlay && !self.editor.playing,
+                "stopped_actor_id":self.editor.game_workbench.game_snapshot().map(|snapshot|snapshot.actor_id),
+                "stopped_time":self.editor.game_workbench.game_snapshot().map(|snapshot|snapshot.state.time),
+                "scope":"Native Editor invokes the same PlayPause and Stop command dispatcher as the toolbar; this does not verify external pointer clicks. Stop must release the old Game owner and prepare a new stopped worker at time zero."
+            },
             "host_identity_slots":self.identities.as_ref().map(BTreeMap::len),
-            "host_identity_scope":"Game worker actor_id and opaque Custom slot Arc identities published by the worker, plus Scene Custom slot Arc identities; UI never locks a live Game Custom slot",
+            "host_identity_scope":"During stopped/play measurements, Game worker actor_id and opaque Custom slot Arc identities published by the worker, plus Scene Custom slot Arc identities; UI never locks a live Game Custom slot. The intentional final Stop releases the Game owner, so the new stopped worker must have a different actor_id.",
             "layout":{"graph":GRAPH_PANE,"game":GAME_PANE,"scene":SCENE_PANE,"graph_width_ratio":0.56,"game_scene_split":0.5},
             "framebuffer_pixels_final":(self.physical_size)(),"monitor_pixels":self.monitor_pixels,
             "monitor_refresh_millihertz":self.refresh_millihertz,"vsync_requested":true,
+            "gui_graphics":self.gui_graphics,
             "vulkan_device":self.editor.game_workbench.game_snapshot().map(|snapshot|snapshot.device.clone()),
             "errors":self.errors,"interrupted":interrupted,"elapsed_seconds":self.started.elapsed().as_secs_f64(),
             "phase_summaries":summaries,"frames":self.samples,
-            "measurement_scope":"editor_handler_ms times the real Editor::ui call, all open native editor panes and completed-frame texture enqueue. Game simulation and Game Vulkan rendering run on their persistent worker; the independent authored Scene viewport still renders on demand. Frame interval is Editor callback start-to-start, including previous egui/OpenGL upload/draw, swap/vsync and scheduling. framework_cpu_ms is eframe previous-frame CPU, including GL rendering but excluding vsync waiting. No headless/FPS substitute or display scanout timing. Only actual middle-button pointer moves that changed graph pan are sampled; preparation, warmup and drag acquisition are excluded. Last render durations/texture presence are diagnostics, not proof of one fresh GPU render per sample."
+            "measurement_scope":"editor_handler_ms times the real Editor::ui call, all open native editor panes and completed-frame texture enqueue. Game simulation and Game Vulkan rendering run on their persistent worker; the independent authored Scene viewport still renders on demand. Frame interval is Editor callback start-to-start, including previous egui texture upload/draw, present/vsync and scheduling. framework_cpu_ms is eframe previous-frame CPU, including GUI rendering but excluding vsync waiting. No headless/FPS substitute or display scanout timing. Only actual middle-button pointer moves that changed graph pan are sampled; preparation, warmup and drag acquisition are excluded. Last render durations/texture presence are diagnostics, not proof of one fresh GPU render per sample."
         });
         let result = serde_json::to_vec_pretty(&report).map_err(|error|error.to_string())
             .and_then(|bytes|std::fs::write(self.folder.join("report.json"),bytes).map_err(|error|error.to_string()))
@@ -527,12 +573,36 @@ impl App for NativeEditorBenchmark {
             self.complete_previous(start, frame.info().cpu_usage);
             if self.phase == Phase::StoppedPan && self.measured[0] == MEASURED_FRAMES {
                 self.phase = Phase::WarmupPlay;
-                self.editor.playing = true;
+                self.editor.dispatch_command(Command::PlayPause, ui.ctx());
+                self.play_command_started = self.editor.playing;
+                if !self.play_command_started {
+                    self.errors
+                        .insert("Play command did not start the native game session".into());
+                }
                 self.warmup = 0;
             } else if self.phase == Phase::PlayPan && self.measured[1] == MEASURED_FRAMES {
-                self.finish(None);
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
+                self.play_actor_id = self
+                    .editor
+                    .game_workbench
+                    .game_snapshot()
+                    .map(|snapshot| snapshot.actor_id);
+                if self.play_actor_id.is_none() {
+                    self.errors
+                        .insert("Play completed without a game worker snapshot".into());
+                }
+                self.editor.dispatch_command(Command::Stop, ui.ctx());
+                self.stop_command_dispatched = true;
+                self.stop_immediate_paused = !self.editor.playing;
+                self.stop_immediate_owner_released = !self.editor.game_workbench.has_game_host();
+                if !self.stop_immediate_paused {
+                    self.errors
+                        .insert("Stop command did not pause Editor immediately".into());
+                }
+                if !self.stop_immediate_owner_released {
+                    self.errors
+                        .insert("Stop command retained the Game host owner".into());
+                }
+                self.phase = Phase::StoppedAfterPlay;
             }
         }
         // No personal state is written even though actual canvas panning marks
@@ -559,6 +629,18 @@ impl App for NativeEditorBenchmark {
         if self.original != self.editor.document {
             self.errors
                 .insert("Benchmark unexpectedly changed the authored document".into());
+        }
+        if self.phase == Phase::StoppedAfterPlay {
+            if self.stopped_after_play_ready() {
+                self.finish(None);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if self.ready() {
+                self.errors.insert(
+                    "Stopped Game must remain paused and publish a new worker at time zero".into(),
+                );
+            }
+            ui.ctx().request_repaint();
+            return;
         }
         if let Some(identities) = &self.identities {
             self.identities_preserved &= *identities == self.host_identities();
