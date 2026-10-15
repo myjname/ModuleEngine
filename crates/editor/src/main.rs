@@ -9,6 +9,7 @@ mod distribution;
 mod game_host;
 mod game_package;
 mod game_presentations;
+mod game_templates;
 mod game_ui;
 mod game_verification;
 mod game_worker;
@@ -18,6 +19,7 @@ mod layout;
 mod native_dialogs;
 mod player;
 mod project;
+mod puzzle_verification;
 mod scalar;
 mod scene_assets_verification;
 mod scene_tools;
@@ -77,9 +79,30 @@ fn run() -> Result<(), String> {
         );
         println!("  module-engine-editor --editor-benchmark game-project.json output-folder");
         println!("  module-engine-editor --game-worker-check game-project.json output-folder");
+        println!("  module-engine-editor --new-puzzle puzzle-project.json");
+        println!("  module-engine-editor --puzzle-check puzzle-project.json output-folder");
         return Ok(());
     }
     match args.first().map(String::as_str) {
+        Some("--puzzle-check") => {
+            let source = Path::new(args.get(1).ok_or("Provide puzzle project JSON")?);
+            let folder = Path::new(args.get(2).ok_or("Provide separate verification folder")?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&puzzle_verification::run(source, folder)?)
+                    .map_err(|error| error.to_string())?
+            );
+            return Ok(());
+        }
+        Some("--new-puzzle") => {
+            let path = args
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("puzzle-project.json"));
+            project::save(&path, &game_templates::puzzle_document())?;
+            println!("Authored puzzle project: {}", path.display());
+            return Ok(());
+        }
         Some("--game-worker-check") => {
             let source = Path::new(args.get(1).ok_or("Provide source project JSON")?);
             let output = Path::new(args.get(2).ok_or("Provide separate verification folder")?);

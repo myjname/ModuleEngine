@@ -13,7 +13,7 @@ Run evidence: `outputs/modular-ecs-20261015-41613750/`.
 | 2 | Shared composition and component schemas | Source module defaults/Inspector/validation/save/runtime/export share contracts | Complete |
 | 3 | Canonical ECS gameplay ownership | Dynamic component queries, stable IDs, hierarchy and complete rollback; DTOs are snapshots | Complete |
 | 4 | Optional ARPG module | No combat contracts or presentation required by core execution | Complete |
-| 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Pending |
+| 5 | Independent turn-based 3D puzzle | Empty authoring, edit/save/reopen/run/export without ARPG | Complete |
 | 6 | Common host outside editor | Editor/Player use composition, headless has no GPU, omitted audio has no service | Pending |
 | 7 | Profiles, exact versions, separate Player | Safe checked migration and relocated exports for both games | Pending |
 | 8 | Acceptance, performance and author documentation | Serial tests, isolated UI/worker/export checks and scoped performance reports | Pending |
@@ -186,3 +186,39 @@ Workspace/all-targets Clippy passed with warnings denied. Logs are under
 The editor still installs ARPG, `GameHost` remains editor-owned and
 constructs Vulkan, and Player is not yet an independently built profile that can
 omit ARPG. Those are later-stage requirements, not results of this extraction.
+
+## Stage 5 result
+
+`crates/project-puzzle` is a separate project module built from
+`GameProject::empty()`. Its board/cell schemas, pressed direction actions,
+turn/result resources, outcome and UI use the public source contracts. Its
+default build has no ARPG, Vulkan, egui or audio dependency; optional UI adds
+egui. Fifteen package/UI regressions passed. The editor installs this package
+through the same composition and presentation registries.
+
+The real Inspector numeric drag and Apply, Save As, save/reopen, Object/ECS
+simulation, failure/restart and relocated Full-export/Vulkan workflow passed.
+Both world adapters and the exported package produced identical solved state
+and RGBA. The check leaves source and saved author bytes unchanged and writes
+its PNGs/state/report to `stage5-workflow-final/` in the run directory.
+
+Independent review found a late source node could publish grid overlap and a
+restored counter could overflow. Package state guards now run before all public
+session publication paths, including direct commands and carry-merged scene
+transitions; failed candidates preserve world, lifetimes, events, resources,
+private state and input retry. Counter increments are checked. Initial camera
+resolves prefab data and frames the grid's configured span. No grid-specific
+branch was added to core or Inspector. Grid coordinates determine starting
+Play positions; the project has no dedicated grid editor.
+
+Checks: core 85, ARPG with UI 46, Puzzle with UI 15 and the focused real
+Inspector/persistence test passed. The final CLI workflow and workspace/all-targets
+Clippy with warnings denied passed; a standalone default-feature Puzzle build
+and dependency tree confirm its source dependency boundary. Logs are `stage5-*`.
+This stage used scoped tests after the stage 4 full run; full acceptance remains
+stage 8.
+
+The current common host has not yet been extracted, and the editor executable
+still contains its installed packages. An independently compiled Puzzle Player
+and omitted host services remain stages 6–7; package dependency isolation is not
+claimed as proof of that native Player boundary.

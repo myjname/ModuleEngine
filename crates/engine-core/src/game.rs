@@ -271,6 +271,7 @@ impl GameSession {
             &active_components,
             &context,
         )?;
+        validate_game_state(&project, &registry, &state)?;
         let provider = world_factory
             .as_ref()
             .map(|factory| Self::load_provider(factory, &state))
@@ -395,6 +396,7 @@ impl GameSession {
             context,
             &self.project,
             self.world_factory.as_ref(),
+            true,
         )?;
         transaction.validate(&candidate)?;
         if let Err(error) = transaction.commit(&candidate) {
@@ -461,6 +463,7 @@ impl GameSession {
                 context,
                 &self.project,
                 self.world_factory.as_ref(),
+                false,
             ) {
                 Ok(transaction) => transaction,
                 Err(error) => {
@@ -581,6 +584,7 @@ impl GameSession {
             context,
         )?;
         next.world.validate_references()?;
+        validate_game_state(project, registry, &next)?;
         let provider = world_factory
             .map(|factory| Self::load_provider(factory, &next))
             .transpose()?;
@@ -644,6 +648,22 @@ impl GameSession {
     ) -> Result<(), String> {
         self.executor.replace(id, registry, migration, reset)
     }
+}
+
+fn validate_game_state(
+    project: &GameProject,
+    registry: &SystemRegistry,
+    state: &GameState,
+) -> Result<(), String> {
+    for contribution in registry.active_game_contributions(&project.execution) {
+        (contribution.validate_state)(state).map_err(|error| {
+            format!(
+                "Game contribution '{}' state validation: {error}",
+                contribution.id
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn object_map(objects: &[WorldObject]) -> BTreeMap<u64, WorldObject> {
@@ -761,6 +781,7 @@ struct WorldTickTransaction<'a> {
     project: &'a GameProject,
     world_factory: Option<&'a GameWorldFactory>,
     prepared_transition: Option<PreparedSceneTransition>,
+    validate_state: bool,
     before: Vec<WorldObject>,
     commands: Vec<WorldCommand>,
     applied: bool,
@@ -773,6 +794,7 @@ impl<'a> WorldTickTransaction<'a> {
         context: ComponentValidationContext<'a>,
         project: &'a GameProject,
         world_factory: Option<&'a GameWorldFactory>,
+        validate_state: bool,
     ) -> Result<Self, String> {
         let before = provider
             .as_ref()
@@ -787,6 +809,7 @@ impl<'a> WorldTickTransaction<'a> {
             project,
             world_factory,
             prepared_transition: None,
+            validate_state,
             before,
             commands: vec![],
             applied: false,
@@ -806,6 +829,11 @@ impl TickTransaction for WorldTickTransaction<'_> {
             self.active,
             &self.context,
         )?;
+        // SystemExecutor already guards the same staged state on ordinary
+        // ticks. Direct session commands have no executor, so guard them here.
+        if self.validate_state {
+            validate_game_state(self.project, self.registry, candidate)?;
+        }
         if let Some(provider) = self.provider.as_ref() {
             self.commands = world_command_diff(&self.before, &objects)?;
             provider.validate_commands(&self.commands)?;
@@ -1055,6 +1083,30 @@ mod tests {
                     }))
                 },
             )
+            .unwrap();
+        registry
+    }
+    fn guarded_registry(control: FixtureControl) -> SystemRegistry {
+        let mut registry = registry(control);
+        registry
+            .register_game_contribution(crate::GameContribution {
+                id: "fixture.layout".into(),
+                activation_modules: BTreeSet::from(["fixture.step".into()]),
+                begin_tick: |_| Ok(()),
+                initial_camera: |_| crate::Camera::default(),
+                follow_target: |_| None,
+                decorate_snapshot: |_, _| {},
+                script_input: |input| serde_json::to_value(input).unwrap(),
+                validate_event: |_| Ok(()),
+                validate_state: |state| {
+                    if state.world.entities_snapshot().len() == 2 {
+                        Ok(())
+                    } else {
+                        Err("Fixture layout requires exactly two entities".into())
+                    }
+                },
+                diagnostics: |_| json!({}),
+            })
             .unwrap();
         registry
     }
@@ -1544,6 +1596,165 @@ mod tests {
             );
             assert_eq!(session.state(), &before);
             assert_eq!(session.snapshot(), snapshot);
+        }
+    }
+    #[test]
+    fn contribution_state_guard_rejects_initial_and_direct_command_publication() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let control = FixtureControl::default();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let mut invalid = project();
+            // This scene is structurally/schema valid; only the source-owned
+            // whole-state cardinality contract rejects its publication.
+            invalid.scenes.get_mut("source").unwrap().objects.remove(0);
+            let error = match GameSession::new_with_world_factory(
+                invalid,
+                kind,
+                guarded_registry(control.clone()),
+                move |objects| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    make_provider(kind, objects)
+                },
+            ) {
+                Ok(_) => panic!("Invalid initial source state was published"),
+                Err(error) => error,
+            };
+            assert!(error.contains("Fixture layout requires exactly two entities"));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(control.constructed.load(Ordering::SeqCst), 0);
+
+            let seen = calls.clone();
+            let mut session = GameSession::new_with_world_factory(
+                project(),
+                kind,
+                guarded_registry(control.clone()),
+                move |objects| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    make_provider(kind, objects)
+                },
+            )
+            .unwrap();
+            session.step(1. / 60., &input(&["pulse"], 1.)).unwrap();
+            let before = session.state().clone();
+            let snapshot = session.snapshot();
+            let events = session.events().to_vec();
+            let states = session.system_states();
+            let resources = session.executor.resources().clone();
+            let lifetime = session.state().world.lifetime(1);
+            let transform = Transform {
+                translation: [7., 0., 4.],
+                ..Default::default()
+            };
+            let error = session
+                .apply_commands(&[
+                    WorldCommand::SetTransform { id: 2, transform },
+                    WorldCommand::Remove { id: 1 },
+                ])
+                .unwrap_err();
+            assert!(error.contains("Fixture layout requires exactly two entities"));
+            assert_eq!(session.state(), &before);
+            assert_eq!(session.state().world.lifetime(1), lifetime);
+            assert_eq!(session.snapshot(), snapshot);
+            assert_eq!(session.events(), events);
+            assert_eq!(session.system_states(), states);
+            assert_eq!(session.executor.resources(), &resources);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(control.constructed.load(Ordering::SeqCst), 1);
+            assert_eq!(control.published.load(Ordering::SeqCst), 1);
+            assert_eq!(control.stopped.load(Ordering::SeqCst), 0);
+            session
+                .apply_commands(&[WorldCommand::SetTransform { id: 2, transform }])
+                .unwrap();
+            assert_eq!(
+                session.state().world.object(2).unwrap().transform,
+                transform
+            );
+        }
+    }
+    #[test]
+    fn contribution_state_guard_rejects_merged_carry_before_destination_construction() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            for tick_transition in [false, true] {
+                let control = FixtureControl::default();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let seen = calls.clone();
+                let mut session = GameSession::new_with_world_factory(
+                    project(),
+                    kind,
+                    guarded_registry(control.clone()),
+                    move |objects| {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        make_provider(kind, objects)
+                    },
+                )
+                .unwrap();
+                session.step(1. / 60., &GameInput::default()).unwrap();
+                let before = session.state().clone();
+                let snapshot = session.snapshot();
+                let states = session.system_states();
+                let resources = session.executor.resources().clone();
+                let lifetime = session.state().world.lifetime(2);
+                let request = SceneTransition {
+                    destination: "destination".into(),
+                    carry: BTreeSet::from([1, 2]),
+                    spawn: None,
+                };
+                // Each authored scene has two entities and passes the guard.
+                // Carrying ID 2 adds a third entity only after destination merge.
+                let error = if tick_transition {
+                    session
+                        .step(1. / 60., &input(&["pulse", "transition"], 1.))
+                        .unwrap_err()
+                } else {
+                    session.transition_with(request.clone()).unwrap_err()
+                };
+                assert!(error.contains("Fixture layout requires exactly two entities"));
+                assert_eq!(session.state(), &before);
+                assert_eq!(session.state().world.lifetime(2), lifetime);
+                assert_eq!(session.snapshot(), snapshot);
+                assert_eq!(session.system_states(), states);
+                assert_eq!(session.executor.resources(), &resources);
+                assert!(session.events().is_empty());
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(control.constructed.load(Ordering::SeqCst), 1);
+                assert_eq!(control.published.load(Ordering::SeqCst), 1);
+                assert_eq!(control.stopped.load(Ordering::SeqCst), 0);
+                if tick_transition {
+                    assert_eq!(
+                        session.pending_actions,
+                        input(&["pulse", "transition"], 1.).actions
+                    );
+                    assert_eq!(session.pending_time(), 1. / 60.);
+                }
+                // An empty authored destination is valid only after the two
+                // carried entities are merged; do not guard an intermediate DTO.
+                session
+                    .project
+                    .scenes
+                    .get_mut("destination")
+                    .unwrap()
+                    .objects
+                    .clear();
+                if tick_transition {
+                    assert_eq!(
+                        session.step_budget(0., &GameInput::default(), 1).unwrap(),
+                        1
+                    );
+                    assert!(session.pending_actions.is_empty());
+                    assert_eq!(session.state().tick, before.tick + 1);
+                    assert_eq!(control.published.load(Ordering::SeqCst), 2);
+                } else {
+                    session.transition_with(request).unwrap();
+                    assert_eq!(session.state().tick, before.tick);
+                    assert_eq!(control.published.load(Ordering::SeqCst), 1);
+                }
+                assert_eq!(session.state().scene, "destination");
+                assert_eq!(session.state().world.entities_snapshot().len(), 2);
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                assert_eq!(control.constructed.load(Ordering::SeqCst), 2);
+                assert_eq!(control.stopped.load(Ordering::SeqCst), 1);
+            }
         }
     }
     #[test]

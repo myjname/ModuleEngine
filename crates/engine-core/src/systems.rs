@@ -613,6 +613,7 @@ pub struct SystemExecutor {
     resources: ResourceStore,
     event_validators: Vec<crate::GameEventValidator>,
     begin_tick_hooks: Vec<crate::GameTickHook>,
+    state_validators: Vec<crate::GameStateValidator>,
 }
 
 impl SystemExecutor {
@@ -654,11 +655,17 @@ impl SystemExecutor {
             .iter()
             .map(|contribution| contribution.begin_tick)
             .collect();
+        let state_validators = registry
+            .active_game_contributions(graph)
+            .iter()
+            .map(|contribution| contribution.validate_state)
+            .collect();
         Ok(Self {
             systems,
             resources,
             event_validators,
             begin_tick_hooks,
+            state_validators,
         })
     }
     pub fn step(
@@ -875,6 +882,10 @@ impl SystemExecutor {
                 .implementation
                 .validate_tick()
                 .map_err(|e| format!("System '{}' staged output: {e}", system.node.id))?;
+        }
+        for validate in &self.state_validators {
+            validate(game)
+                .map_err(|error| format!("Game contribution state validation: {error}"))?;
         }
         for event in events.iter() {
             event.validate()?;
@@ -2047,6 +2058,10 @@ mod tests {
             ctx.game
                 .module_data
                 .insert("fixture.counter".into(), json!(self.private_counter));
+            ctx.game.module_data.insert(
+                "fixture.accepted".into(),
+                json!(ctx.input.pressed("accept")),
+            );
             ctx.set_resource("value", json!(self.private_counter))?;
             ctx.events.push(GameEvent::new(
                 "fixture.changed",
@@ -2084,12 +2099,20 @@ mod tests {
                 }
                 Ok(())
             },
+            validate_state: |_| Ok(()),
             diagnostics: |_| json!({}),
         }
     }
 
     #[test]
     fn scheduled_contribution_event_rejection_rolls_back_all_staged_outputs() {
+        contribution_rejection_rolls_back_all_staged_outputs(false);
+    }
+    #[test]
+    fn scheduled_contribution_state_rejection_rolls_back_before_event_or_host_publication() {
+        contribution_rejection_rolls_back_all_staged_outputs(true);
+    }
+    fn contribution_rejection_rolls_back_all_staged_outputs(validate_state: bool) {
         let publication = Arc::new(std::sync::Mutex::new(ContributionPublication::default()));
         let mut registry = SystemRegistry::default();
         let shared = publication.clone();
@@ -2115,7 +2138,15 @@ mod tests {
                 },
             )
             .unwrap();
-        let contribution = neutral_contribution();
+        let mut contribution = neutral_contribution();
+        if validate_state {
+            contribution.validate_state = |game| {
+                if game.module_data.get("fixture.accepted") != Some(&json!(true)) {
+                    return Err("Source state contract rejected".into());
+                }
+                Ok(())
+            };
+        }
         assert!(
             registry
                 .register_game_contribution(contribution.clone())
@@ -2227,7 +2258,11 @@ mod tests {
                 &mut transaction,
             )
             .unwrap_err();
-        assert!(error.contains("Source event contract rejected"));
+        assert!(error.contains(if validate_state {
+            "Source state contract rejected"
+        } else {
+            "Source event contract rejected"
+        }));
         assert_eq!(game, before_game);
         assert_eq!(executor.states(), before_states);
         assert_eq!(executor.resources(), &before_resources);

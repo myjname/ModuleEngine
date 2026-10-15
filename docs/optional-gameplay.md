@@ -105,7 +105,7 @@ audio hook validates WAV references when `game.audio` is scheduled and removes
 inactive cue data from the prepared runtime copy, leaving the authored project
 unchanged.
 
-`GameContribution` supplies a `begin_tick` hook and pure callbacks for
+`GameContribution` supplies `begin_tick`/`validate_state` hooks and pure callbacks for
 initial/follow camera targets, snapshot decoration, script-input adaptation,
 event validation and diagnostics.
 One or more scheduled activation modules select the contribution. Installation
@@ -118,6 +118,15 @@ scheduled systems, including independently installed controllers. ARPG prepares
 its transient frame there, so an earlier source controller's current-tick
 intentions survive until the consuming ARPG system. This preparation does not
 change the authored system order and rolls back with a failed tick.
+
+`validate_state` checks the complete candidate world and module data after all
+authored systems and their staged checks, before publication. Initial sessions,
+direct session command packets and merged scene transitions use the same active
+package guards. They are read-only validation, must accept the package's valid
+initial state before system initialization, and must not publish external
+effects. This lets a package reject cross-object invariants, such as overlapping
+puzzle cells, even when a later source system produced individually valid
+components. A rejected candidate retains the previous world and pending action.
 
 ## ARPG ownership
 

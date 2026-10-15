@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 pub type GameTickHook = fn(&mut GameState) -> Result<(), String>;
 pub type GameEventValidator = fn(&GameEvent) -> Result<(), String>;
+pub type GameStateValidator = fn(&GameState) -> Result<(), String>;
 
 /// Pure host hooks; no graphics API, windowing, or editor types cross this API.
 #[derive(Clone)]
@@ -20,6 +21,9 @@ pub struct GameContribution {
     pub decorate_snapshot: fn(&mut SceneSnapshot, &GameState),
     pub script_input: fn(&GameInput) -> Value,
     pub validate_event: GameEventValidator,
+    /// Check the complete staged world/module state after all authored systems
+    /// and before events or external transaction publication.
+    pub validate_state: GameStateValidator,
     pub diagnostics: fn(&GameState) -> Value,
 }
 

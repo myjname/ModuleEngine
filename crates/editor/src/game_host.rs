@@ -3,7 +3,9 @@ use crate::activity::{ActivitySnapshot, BuildProgress};
 use module_engine_content::ContentLibrary;
 use module_engine_core::*;
 use module_engine_script::{CompiledScript, ScriptCompiler, ScriptKind, ScriptTick};
-use module_engine_vulkan::{RenderGraphValidator, RenderPath, RendererPerformance, VulkanRenderer};
+#[cfg(test)]
+use module_engine_vulkan::RenderPath;
+use module_engine_vulkan::{RenderGraphValidator, RendererPerformance, VulkanRenderer};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -1600,11 +1602,7 @@ pub fn aim_at(camera: Camera, normalized: [f32; 2], aspect: f32) -> [f32; 3] {
     [eye[0] + ray[0] * t, 0., eye[2] + ray[2] * t]
 }
 
-pub fn demo_document() -> GraphDocument {
-    let mut document = crate::host::gpu_document(WorldKind::Ecs, RenderPath::Forward);
-    crate::host::ensure_authoring_configuration(&mut document);
-    module_engine_two_arenas::document(document)
-}
+pub use crate::game_templates::{demo_document, puzzle_document};
 
 #[cfg(test)]
 mod tests {

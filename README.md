@@ -131,6 +131,7 @@ GPU использует synchronous offscreen readback для egui с повт�
 | Цель игрового этапа и принятый объём | [next-stage](docs/next-stage.md), [решения](docs/decisions.md), [дальнейшие вопросы](docs/questions.md) |
 | Общая архитектура и JSON | [architecture](docs/architecture.md), [graph-format](docs/graph-format.md) |
 | Исполняемые модули и игровые правила | [module-execution](docs/module-execution.md), [gameplay](docs/gameplay.md), [пакеты игровых правил](docs/optional-gameplay.md) |
+| Независимый проект головоломки | [puzzle-project](docs/puzzle-project.md) |
 | Меню, файлы, окна и рабочий процесс | [editor-workflow](docs/editor-workflow.md) |
 | Сцены, шаблоны и работа в редакторе | [scenes](docs/scenes.md), [editor-game](docs/editor-game.md) |
 | Контент и GPU | [content](docs/content.md), [gpu-hlsl](docs/gpu-hlsl.md) |

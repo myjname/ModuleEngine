@@ -73,6 +73,7 @@ pub fn composition_at(resource_root: &std::path::Path) -> Result<CompositionCont
     let modules = module_registry_at(resource_root)?;
     let mut systems = SystemRegistry::builtin();
     module_engine_arpg::install(&mut systems)?;
+    module_engine_project_puzzle::install(&mut systems)?;
     crate::source_modules::install(&mut systems)?;
     systems.register(custom_system_descriptor(), |_| {
         Err("Rust Custom requires a host-bound compiled instance".into())

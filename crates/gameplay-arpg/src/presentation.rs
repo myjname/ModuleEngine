@@ -24,6 +24,7 @@ pub fn host_contribution() -> GameContribution {
         decorate_snapshot: apply_hit_flashes,
         script_input: legacy_input,
         validate_event: crate::validate_event,
+        validate_state: |game| crate::state::read_frame(game).map(|_| ()),
         diagnostics,
     }
 }

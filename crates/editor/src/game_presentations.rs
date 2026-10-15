@@ -54,6 +54,16 @@ fn installed() -> &'static UiRegistry {
             })
             .expect("Unique installed UI contribution");
         registry
+            .register(UiContribution {
+                id: "puzzle.presentation",
+                input: module_engine_project_puzzle::ui::read_input_mode,
+                hud: module_engine_project_puzzle::ui::draw_hud,
+                preview_aim: None,
+                has_input: Some(module_engine_project_puzzle::ui::has_input),
+                capture_input: None,
+            })
+            .expect("Unique installed puzzle UI contribution");
+        registry
     })
 }
 

@@ -1227,6 +1227,7 @@ dependencies = [
  "module-engine-core",
  "module-engine-custom",
  "module-engine-project",
+ "module-engine-project-puzzle",
  "module-engine-script",
  "module-engine-two-arenas",
  "module-engine-vulkan",
@@ -1243,6 +1244,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "module-engine-project-puzzle"
+version = "0.4.0"
+dependencies = [
+ "egui",
+ "module-engine-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
