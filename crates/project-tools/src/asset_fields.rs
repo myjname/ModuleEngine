@@ -1,15 +1,19 @@
 //! Asset semantics come from installed contracts, never from a JSON key name.
 use module_engine_core::{
     ComponentRegistry, ComponentSchema, CompositionActivity, CompositionContext, GraphDocument,
-    PropertyData, PropertyScope, PropertyType, SchemaPin, component_override_owner,
-    register_builtin_component_schemas,
+    PropertyData, PropertyScope, PropertyType, SchemaPin, component_field,
+    component_override_owner, merge_component_defaults, register_builtin_component_schemas,
 };
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 pub(crate) struct AssetFields {
     pub references: BTreeSet<String>,
+    /// Effective references supplied by installed schemas have no writable
+    /// authored pointer. Keep their value and provenance separate: inventing a
+    /// pointer to an absent field silently loses this dependency during edits.
+    pub default_references: BTreeMap<String, String>,
     known: BTreeSet<String>,
     activity: Option<CompositionActivity>,
 }
@@ -72,32 +76,38 @@ impl AssetFields {
                     &format!("/game/prefabs/{}/components", token(id)),
                     &schema,
                 );
+                fields.defaults(
+                    &prefab.components,
+                    &format!("/game/prefabs/{}/components", token(id)),
+                    None,
+                    &schema,
+                );
             }
             for (id, scene) in &game.scenes {
                 for (index, object) in scene.objects.iter().enumerate() {
                     let base = format!("/game/scenes/{}/objects/{index}", token(id));
                     fields.components(&object.components, &format!("{base}/components"), &schema);
                     let inherited = object.prefab.as_ref().and_then(|id| game.prefabs.get(id));
-                    for field in object.overrides.keys() {
-                        // Include every attachment, even opaque ones: a shorter
-                        // known ID must not claim a longer unknown owner's data.
-                        let owner = component_override_owner(
-                            field,
-                            object
-                                .components
-                                .keys()
-                                .chain(inherited.into_iter().flat_map(|p| p.components.keys()))
-                                .map(String::as_str),
-                        );
-                        if let Some(registered) = owner.and_then(schema).and_then(|schema| {
-                            schema
-                                .fields
-                                .iter()
-                                .find(|registered| registered.id == *field)
-                        }) {
-                            fields.add(child(&format!("{base}/overrides"), field), registered);
+                    let mut effective = inherited
+                        .map(|prefab| prefab.components.clone())
+                        .unwrap_or_default();
+                    // Match scene resolution's shallow prefab/local merge;
+                    // defaults are filled only after this authored merge.
+                    for (id, value) in &object.components {
+                        if let (Some(Value::Object(base)), Value::Object(local)) =
+                            (effective.get_mut(id), value)
+                        {
+                            base.extend(local.clone());
+                        } else {
+                            effective.insert(id.clone(), value.clone());
                         }
                     }
+                    fields.defaults(
+                        &effective,
+                        &format!("{base}/components"),
+                        Some((&object.overrides, &format!("{base}/overrides"))),
+                        &schema,
+                    );
                 }
             }
             for cue in game.audio_cues.keys() {
@@ -107,7 +117,16 @@ impl AssetFields {
         Ok(fields)
     }
     fn add(&mut self, path: String, field: &module_engine_core::PropertySchema) {
-        if self.activity.as_ref().is_some_and(|activity| {
+        if !self.field_active(field) {
+            return;
+        }
+        self.known.insert(path.clone());
+        if matches!(field.value_type, PropertyType::AssetReference { .. }) {
+            self.references.insert(path);
+        }
+    }
+    fn field_active(&self, field: &module_engine_core::PropertySchema) -> bool {
+        !self.activity.as_ref().is_some_and(|activity| {
             field
                 .requires_modules
                 .iter()
@@ -116,12 +135,70 @@ impl AssetFields {
                     .requires_components
                     .iter()
                     .any(|id| !activity.components.contains(id))
-        }) {
-            return;
-        }
-        self.known.insert(path.clone());
-        if matches!(field.value_type, PropertyType::AssetReference { .. }) {
-            self.references.insert(path);
+        })
+    }
+    fn defaults<'a>(
+        &mut self,
+        components: &BTreeMap<String, Value>,
+        base: &str,
+        overrides: Option<(&BTreeMap<String, Value>, &str)>,
+        schema: &impl Fn(&str) -> Option<&'a ComponentSchema>,
+    ) {
+        for (id, authored) in components {
+            let Some(schema) = schema(id) else {
+                continue;
+            };
+            let mut effective = authored.clone();
+            merge_component_defaults(&mut effective, &schema.defaults);
+            for field in &schema.fields {
+                if !self.field_active(field) {
+                    continue;
+                }
+                let Some(path) = schema.field_path(field) else {
+                    continue;
+                };
+                let mut overridden = false;
+                if let Some((overrides, override_base)) = overrides {
+                    for key in overrides.keys() {
+                        // Opaque longer attachment IDs still own their whole
+                        // namespace; an active shorter schema cannot claim it.
+                        if component_override_owner(key, components.keys().map(String::as_str))
+                            != Some(id.as_str())
+                        {
+                            continue;
+                        }
+                        let tail = &key[id.len() + 1..];
+                        let remainder = if path == tail {
+                            Some("")
+                        } else {
+                            path.strip_prefix(tail)
+                                .and_then(|rest| rest.strip_prefix('.'))
+                        };
+                        if let Some(remainder) = remainder {
+                            overridden = true;
+                            let pointer = remainder
+                                .split('.')
+                                .filter(|part| !part.is_empty())
+                                .fold(child(override_base, key), |base, part| child(&base, part));
+                            self.add(pointer, field);
+                        }
+                    }
+                }
+                if !overridden
+                    && matches!(field.value_type, PropertyType::AssetReference { .. })
+                    && component_field(authored, path).is_none()
+                    && let Some(reference) =
+                        component_field(&effective, path).and_then(Value::as_str)
+                {
+                    let location = format!(
+                        "schema-default:{} at {}",
+                        field.id,
+                        path.split('.')
+                            .fold(child(base, id), |base, part| child(&base, part))
+                    );
+                    self.default_references.insert(location, reference.into());
+                }
+            }
         }
     }
     fn components<'a>(

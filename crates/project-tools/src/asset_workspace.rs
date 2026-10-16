@@ -204,6 +204,24 @@ pub struct AssetWorkspace {
     composition: Option<CompositionContext>,
 }
 type DocumentValidator = Arc<dyn Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static>;
+fn reject_schema_default_rewrites(
+    fields: &AssetFields,
+    matches: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let dependencies: Vec<_> = fields
+        .default_references
+        .iter()
+        .filter(|(_, reference)| matches(reference))
+        .map(|(location, _)| location.as_str())
+        .collect();
+    if !dependencies.is_empty() {
+        return Err(format!(
+            "Asset is supplied by an immutable installed schema default; author explicit component values before moving, replacing or detaching it: {}",
+            dependencies.join(", ")
+        ));
+    }
+    Ok(())
+}
 impl AssetWorkspace {
     /// Construct a workspace with structural scene preflight and builtin render
     /// resource contracts only. Hosts must provide with_composition for source
@@ -648,10 +666,7 @@ impl AssetWorkspace {
         USAGE_DOCUMENT_WALKS.with(|walks| walks.set(walks.get() + 1));
         let value = serde_json::to_value(document).map_err(|e| e.to_string())?;
         let fields = AssetFields::collect(document, self.composition.as_ref())?;
-        for location in fields.references {
-            let Some(text) = value.pointer(&location).and_then(Value::as_str) else {
-                continue;
-            };
+        let mut add_usage = |location: String, text: &str| {
             let id = if let Some(id) = text.strip_prefix("asset://") {
                 manifest.assets.contains_key(id).then(|| id.to_owned())
             } else {
@@ -665,6 +680,14 @@ impl AssetWorkspace {
                     reference: text.into(),
                 });
             }
+        };
+        for location in &fields.references {
+            if let Some(text) = value.pointer(location).and_then(Value::as_str) {
+                add_usage(location.clone(), text);
+            }
+        }
+        for (location, reference) in &fields.default_references {
+            add_usage(location.clone(), reference);
         }
         for (owner, asset) in &manifest.assets {
             for dependency in asset.dependencies.iter().collect::<BTreeSet<_>>() {
@@ -1066,6 +1089,7 @@ impl AssetWorkspace {
         let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
         let matches =
             |text: &str| same_path(text, old) || (rewrite_id && text == asset_reference(id));
+        reject_schema_default_rewrites(&fields, matches)?;
         let diagnostics = fields.ambiguous(&value, matches);
         for path in &fields.references {
             if value
@@ -1095,10 +1119,13 @@ impl AssetWorkspace {
                 }
             }
         }
-        Ok((
-            serde_json::from_value(value).map_err(|error| error.to_string())?,
-            diagnostics,
-        ))
+        let candidate = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        // Detaching an authored value may expose the same deleted asset from
+        // its schema default. Preflight this effective dependency as well, so
+        // neither a missing pointer nor field removal can bypass the guard.
+        let candidate_fields = AssetFields::collect(&candidate, self.composition.as_ref())?;
+        reject_schema_default_rewrites(&candidate_fields, matches)?;
+        Ok((candidate, diagnostics))
     }
     fn validate_mutation_dependencies(
         &self,
@@ -1909,6 +1936,387 @@ mod tests {
             },
             |_, _| Ok(()),
         )
+    }
+
+    const DEFAULT_ASSET_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 248, 15, 4, 0, 9,
+        251, 3, 253, 251, 94, 107, 43, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    fn schema_default_workspace(
+        workspace: AssetWorkspace,
+        doc: &mut GraphDocument,
+        defaults: Value,
+        field_path: &str,
+    ) -> AssetWorkspace {
+        use module_engine_core::{ComponentSchema, PropertySchema, PropertyScope, PropertyType};
+        let field = PropertySchema {
+            id: format!("audit.defaults.{field_path}"),
+            label: "Default asset".into(),
+            scope: PropertyScope::Component {
+                component: "audit.defaults".into(),
+            },
+            value_type: PropertyType::AssetReference {
+                kinds: vec!["png".into()],
+                optional: false,
+            },
+            default: module_engine_core::component_field(&defaults, field_path)
+                .unwrap()
+                .clone(),
+            requires_modules: vec![],
+            requires_components: vec![],
+        };
+        with_source_contract(
+            workspace,
+            doc,
+            ComponentSchema {
+                id: "audit.defaults".into(),
+                owner_module: "audit.defaults.owner".into(),
+                version: "1".into(),
+                label: "Schema default assets".into(),
+                defaults,
+                fields: vec![field],
+                requires_modules: vec![],
+                requires_components: vec![],
+            },
+            |_, _| Ok(()),
+        )
+    }
+
+    #[test]
+    fn schema_default_asset_usages_refuse_file_mutations_before_commit() {
+        for source in ["local", "array", "prefab", "shallow-local"] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            write(&root, "assets/textures/b.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let old = id(&doc, "assets/textures/a.png");
+            let replacement = id(&doc, "assets/textures/b.png");
+            let (defaults, path, authored) = match source {
+                "local" => (json!({"path":"assets/textures/a.png"}), "path", json!({})),
+                "array" => (
+                    json!({"slots":[{"path":"assets/textures/a.png"}]}),
+                    "slots.0.path",
+                    json!({"slots":[]}),
+                ),
+                _ => (
+                    json!({"material":{"path":"assets/textures/a.png"}}),
+                    "material.path",
+                    json!({"material":{}}),
+                ),
+            };
+            let game = doc.game.as_mut().unwrap();
+            if source == "prefab" || source == "shallow-local" {
+                game.prefabs
+                    .get_mut("asset-template")
+                    .unwrap()
+                    .components
+                    .insert(
+                        "audit.defaults".into(),
+                        if source == "shallow-local" {
+                            json!({"material":{"path":"assets/textures/b.png"}})
+                        } else {
+                            authored.clone()
+                        },
+                    );
+                if source == "shallow-local" {
+                    game.scenes.get_mut("arena").unwrap().objects[1]
+                        .components
+                        .insert("audit.defaults".into(), authored);
+                }
+            } else {
+                game.scenes.get_mut("arena").unwrap().objects[0]
+                    .components
+                    .insert("audit.defaults".into(), authored);
+            }
+            let workspace = schema_default_workspace(workspace, &mut doc, defaults, path);
+            workspace.validate_candidate(&doc).unwrap();
+            AssetManifest::from_value(&doc.asset_manifest)
+                .unwrap()
+                .verify(&root)
+                .unwrap();
+            let usages = workspace.usages(&doc, &old).unwrap();
+            assert!(!usages.is_empty(), "{source}");
+            assert!(
+                usages.iter().all(|usage| {
+                    usage.location.starts_with("schema-default:audit.defaults.")
+                        && usage.reference == "assets/textures/a.png"
+                }),
+                "{source}: {usages:?}"
+            );
+            if source == "shallow-local" {
+                assert_eq!(usages.len(), 1);
+                assert!(usages[0].location.contains("/objects/1/components/"));
+            }
+            let project_path = root.join("project.json");
+            crate::save_document_with_backup(&project_path, &doc).unwrap();
+            let project_bytes = fs::read(&project_path).unwrap();
+            let schema_before = workspace
+                .composition
+                .as_ref()
+                .unwrap()
+                .systems
+                .components()
+                .schema("audit.defaults")
+                .unwrap()
+                .clone();
+            let moved = workspace
+                .move_asset(&doc, &old, "assets/textures/moved.png")
+                .unwrap_err();
+            assert!(
+                moved.contains("immutable installed schema default"),
+                "{source}: {moved}"
+            );
+            for policy in [
+                DeletePolicy::RefuseUsed,
+                DeletePolicy::Detach,
+                DeletePolicy::ReplaceWith(replacement.clone()),
+            ] {
+                let error = workspace.delete_asset(&doc, &old, policy).unwrap_err();
+                assert!(
+                    error.contains("schema-default:audit.defaults."),
+                    "{source}: {error}"
+                );
+            }
+            assert_eq!(
+                fs::read(root.join("assets/textures/a.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            assert_eq!(
+                fs::read(root.join("assets/textures/b.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            assert!(!root.join("assets/textures/moved.png").exists());
+            assert!(!root.join(".asset-history").exists());
+            assert!(!root.join(".asset-trash").exists());
+            assert_eq!(fs::read(project_path).unwrap(), project_bytes);
+            assert_eq!(
+                workspace
+                    .composition
+                    .as_ref()
+                    .unwrap()
+                    .systems
+                    .components()
+                    .schema("audit.defaults")
+                    .unwrap(),
+                &schema_before
+            );
+            workspace.validate_candidate(&doc).unwrap();
+            AssetManifest::from_value(&doc.asset_manifest)
+                .unwrap()
+                .verify(&root)
+                .unwrap();
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn schema_default_stable_id_survives_move_but_cannot_be_deleted_or_relinked() {
+        let (root, workspace, mut doc) = fixture();
+        write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+        write(&root, "assets/textures/b.png", DEFAULT_ASSET_PNG);
+        workspace.synchronize(&mut doc).unwrap();
+        let asset = id(&doc, "assets/textures/a.png");
+        let replacement = id(&doc, "assets/textures/b.png");
+        doc.game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("arena")
+            .unwrap()
+            .objects[0]
+            .components
+            .insert("audit.defaults".into(), json!({}));
+        let workspace = schema_default_workspace(
+            workspace,
+            &mut doc,
+            json!({"path":asset_reference(&asset)}),
+            "path",
+        );
+        workspace.validate_candidate(&doc).unwrap();
+        assert_eq!(workspace.usages(&doc, &asset).unwrap().len(), 1);
+        let operation = workspace
+            .move_asset(&doc, &asset, "assets/textures/moved.png")
+            .unwrap();
+        workspace.validate_candidate(&operation.document).unwrap();
+        assert_eq!(
+            workspace.usages(&operation.document, &asset).unwrap()[0].reference,
+            asset_reference(&asset)
+        );
+        assert_eq!(operation.document.game, doc.game);
+        for policy in [
+            DeletePolicy::RefuseUsed,
+            DeletePolicy::Detach,
+            DeletePolicy::ReplaceWith(replacement),
+        ] {
+            assert!(
+                workspace
+                    .delete_asset(&operation.document, &asset, policy)
+                    .unwrap_err()
+                    .contains("schema-default:audit.defaults.path")
+            );
+        }
+        assert!(root.join("assets/textures/moved.png").exists());
+        assert_eq!(
+            operation.record.undo(&root, &operation.document).unwrap(),
+            doc
+        );
+        crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn authored_and_override_asset_values_suppress_defaults_but_detach_cannot_reveal_deleted_asset()
+    {
+        for source in ["local", "prefab", "leaf-override", "aggregate-override"] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let game = doc.game.as_mut().unwrap();
+            if source == "prefab" {
+                game.prefabs
+                    .get_mut("asset-template")
+                    .unwrap()
+                    .components
+                    .insert(
+                        "audit.defaults".into(),
+                        json!({"material":{"path":"assets/textures/a.png"}}),
+                    );
+            } else {
+                let object = &mut game.scenes.get_mut("arena").unwrap().objects[0];
+                object.components.insert(
+                    "audit.defaults".into(),
+                    if source == "local" {
+                        json!({"material":{"path":"assets/textures/a.png"}})
+                    } else {
+                        json!({})
+                    },
+                );
+                if source == "leaf-override" {
+                    object.overrides.insert(
+                        "audit.defaults.material.path".into(),
+                        json!("assets/textures/a.png"),
+                    );
+                } else if source == "aggregate-override" {
+                    object.overrides.insert(
+                        "audit.defaults.material".into(),
+                        json!({"path":"assets/textures/a.png"}),
+                    );
+                }
+            }
+            let workspace = schema_default_workspace(
+                workspace,
+                &mut doc,
+                json!({"material":{"path":"assets/textures/a.png"}}),
+                "material.path",
+            );
+            workspace.validate_candidate(&doc).unwrap();
+            let usages = workspace.usages(&doc, &asset).unwrap();
+            assert_eq!(usages.len(), 1, "{source}: {usages:?}");
+            assert!(!usages[0].location.starts_with("schema-default:"));
+            let error = workspace
+                .delete_asset(&doc, &asset, DeletePolicy::Detach)
+                .unwrap_err();
+            if source == "aggregate-override" {
+                // Scene resolution fills defaults before whole-aggregate
+                // overrides. An empty override therefore hides the field;
+                // semantic preflight must reject that required missing value.
+                assert!(error.contains("audit.defaults.material.path"), "{error}");
+            } else {
+                assert!(
+                    error.contains("immutable installed schema default"),
+                    "{source}: {error}"
+                );
+            }
+            assert!(root.join("assets/textures/a.png").exists());
+            assert!(!root.join(".asset-history").exists());
+            assert!(!root.join(".asset-trash").exists());
+            let operation = workspace
+                .move_asset(&doc, &asset, "assets/textures/moved.png")
+                .unwrap();
+            workspace.validate_candidate(&operation.document).unwrap();
+            assert_eq!(
+                workspace.usages(&operation.document, &asset).unwrap().len(),
+                1
+            );
+            assert!(!root.join("assets/textures/a.png").exists());
+            assert_eq!(
+                operation.record.undo(&root, &operation.document).unwrap(),
+                doc
+            );
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn inactive_or_unpinned_schema_defaults_do_not_claim_archived_attachments() {
+        for mode in [
+            "inactive",
+            "missing-owner",
+            "stale-owner",
+            "missing-schema",
+            "stale-schema",
+        ] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            doc.game
+                .as_mut()
+                .unwrap()
+                .scenes
+                .get_mut("arena")
+                .unwrap()
+                .objects[0]
+                .components
+                .insert("audit.defaults".into(), json!({}));
+            let workspace = schema_default_workspace(
+                workspace,
+                &mut doc,
+                json!({"path":"assets/textures/a.png"}),
+                "path",
+            );
+            match mode {
+                "inactive" => doc.game.as_mut().unwrap().execution.stages.clear(),
+                "missing-owner" => {
+                    doc.module_versions.remove("audit.defaults.owner");
+                }
+                "stale-owner" => {
+                    doc.module_versions
+                        .insert("audit.defaults.owner".into(), "stale".into());
+                }
+                "missing-schema" => {
+                    doc.engine_lock
+                        .as_mut()
+                        .unwrap()
+                        .component_schemas
+                        .remove("audit.defaults");
+                }
+                _ => {
+                    doc.engine_lock
+                        .as_mut()
+                        .unwrap()
+                        .component_schemas
+                        .get_mut("audit.defaults")
+                        .unwrap()
+                        .version = "stale".into();
+                }
+            }
+            assert!(workspace.usages(&doc, &asset).unwrap().is_empty(), "{mode}");
+            // A source-only structural caller does not pretend the inactive or
+            // mismatched schema supplied an effective reference.
+            let workspace = AssetWorkspace {
+                validator: None,
+                ..workspace
+            };
+            let operation = workspace
+                .move_asset(&doc, &asset, "assets/textures/moved.png")
+                .unwrap();
+            assert_eq!(operation.document.game, doc.game);
+            assert_eq!(operation.document.engine_lock, doc.engine_lock);
+            assert_eq!(operation.document.module_versions, doc.module_versions);
+            crate::history::remove_test_directory(&root);
+        }
     }
 
     #[test]
