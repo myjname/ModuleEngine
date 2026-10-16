@@ -1,6 +1,60 @@
 # Исправления ревью и повторной подготовки Custom — 16.10.2026
 
-Работа выполняется. Проверенная исходная база — `b4f099b51a2cb37bc007a678b355d775c34935e3`, новая ветка `codex/review-fixes-and-custom-reuse`. Исходное tracked tree чистое. Свидетельства ревью в `outputs/independent-audit/linux-review-b4f099b/` сохраняются; исправления выполняются в основном checkout, не в архиве ревью.
+Четыре дефекта ревью и повторная компиляция неизменённого Rust Custom после Stop исправлены и проверены на Windows/Linux. Финальный code checkpoint — `3233497c45f2e00ce4c853980c9a01ec53122005`, база — `b4f099b51a2cb37bc007a678b355d775c34935e3`, ветка — `codex/review-fixes-and-custom-reuse`. Готовый `outputs/ModuleEngine.exe` обновлён. Функциональные проверки исправлений завершены; строгая цель Player 60 FPS остаётся невыполненной на обеих проверенных конфигурациях.
+
+## Что изменилось и как пользоваться
+
+- Перенос, удаление и замена ассетов обрабатывают типизированные ссылки. Текстовые поля и неизвестные архивные данные сохраняются; операция с неоднозначными ссылками возвращает диагностику.
+- Apply/Inherit в Inspector меняют overrides выбранного компонента. Компоненты с похожими ID, например `foo` и `foo.bar`, сохраняют собственные данные независимо.
+- Rust Custom запускает фактический Cargo product после проверки native target. Ошибка сборки показывает диагностику компилятора; очистка не затрагивает чужие или ещё используемые продукты.
+- Player и Team вычисляют один рабочий граф перед выбором features и исходников. Неподключённый альтернативный Vulkan-рендер не добавляет Vulkan в software-only пакет.
+- Game, Scene и применение Rust на лету используют общий ограниченный store неизменяемых программ. Stop освобождает игровой host; следующий запуск создаёт отдельный worker с исходным состоянием, используя проверенный готовый код. Никакой новой настройки пользователю включать не требуется.
+
+Повторное использование не означает пропуск проверки входов: изменения исходника, SDK, зависимостей, compiler context или продуктов сборки проверяются. Неподдержанный context безопасно компилируется отдельно. Холодная сборка, новый context и повреждённый cache всё ещё могут потребовать компиляции. Пределы и причины miss описаны в [custom-program-store.md](custom-program-store.md).
+
+## Финальная приёмка implementation checkpoint
+
+Все файлы ниже находятся в `outputs/review-fixes-20261016/`. Namespace store остаётся v3; финальные `final-*` относятся к checkpoint `3233497c45f2e00ce4c853980c9a01ec53122005`. Более ранние результаты сохранены в `pre-v3/`, `pre-linux-clippy-fix/` и в журнале этапов ниже; они не подменяют финальную проверку.
+
+| Проверка | Windows | Ubuntu / WSLg |
+| --- | --- | --- |
+| Workspace, all targets, offline/locked/release | 585 passed, 6 ignored | 594 passed, 6 ignored |
+| Doctests, fmt, Clippy `-D warnings`, normal Editor/Player build | Passed | Passed |
+| Native Workbench: независимые state/PID и повтор после Stop | Passed, 18,71 с | Passed, 10,74 с |
+| Настоящий Custom80мс, egui и hot apply | Passed, 13,56 с | Passed, 7,44 с |
+| Исходный полный Editor benchmark, watchdog45с, 90+90 frames | Passed, DX12, 19,484 с | Passed, Vulkan: X11 13,122 с / Wayland 20,254 с |
+| Full export, SDK prewarm, GameWorker acceptance | Passed | Passed |
+| Player/Team export и строгая проверка перенесённого Player | Passed | Passed |
+| Software-active / Vulkan-inactive Player и Team | Passed | Passed |
+| Standalone Player: строгая цель 60FPS / 1080p / 20 врагов | **Не достигнута** | **Не достигнута** |
+
+Native Editor acceptance проверяет настоящие WGPU окна и кадры, выполнение команд Play/Stop, новый actor после Stop, время0 и сохранность документа/файла. Автоматизированный сценарий использует общий dispatcher кнопок; внешние клики мышью не проверяет. Оба Linux backend проверены через **llvmpipe software Vulkan**: это доказательство работоспособности Wayland/X11, не аппаратной производительности Linux.
+
+Windows Player: WGPU/DX12 на RTX 4080 SUPER, реальные 1920×1080, 20 живых врагов, 120 уникальных кадров и 0 error frames. Получено **59,9644 FPS**, mean interval **16,6766 мс**, p95 **18,3717 мс** при бюджете **16,6667 мс**. `target_met=false` в `final-windows-player-dx12/native-frame-report.json` сохраняется, хотя UI timing и workload predicates выполнены. Функциональное завершение benchmark и UI timing не заменяют этот критерий. Предыдущий checkpoint также не выполнил строгую цель 60 FPS; его результат сохранён в архиве.
+
+Linux Player: реальные 1920×1080, WGPU/Vulkan на llvmpipe, **15,5078 FPS** по различимым завершённым игровым кадрам, их mean interval **64,4837 мс**, p95 **91,0565 мс**. UI callback mean 15,4944 FPS / p95 72,1309 мс приведён отдельно. `target_met=false`, `ui_timing_met=false`, `shipping_twenty_enemy_load_met=false`: длинный прогон без ручного ввода дошёл до Defeat/health0. Benchmark завершился, 120 уникальных кадров и 0 error frames, но это **не успешная приёмка нагрузки 20 врагов / 60 FPS**. Нельзя переносить этот software-результат на аппаратный Linux GPU.
+
+Linux Full-фикстура явно создана без `game.audio_cues`, поскольку native audio остаётся прежним ограничением Linux. Авторский `game-project-v4.json` не менялся. Дальнейшая работа над стабильностью интервала игровых кадров и аппаратная Linux-проверка остаются незакрытыми пунктами.
+
+Шесть ignored cases в стандартном suite каждой ОС не скрываются: native Workbench, slow-UI/hot-apply и две runtime проверки установленного toolchain/context выполнены отдельными native приёмками. Все четыре прошли на финальном source каждой ОС. Старый диагностический синхронный catch-up тест и emitter фикстуры не являются критериями новой производительности; emitter запускался на этапе4.
+
+Основные доказательства: `final-{windows,linux}-{workspace-tests,doc-tests,fmt,clippy,build}.log`, `stage5-windows-final-*`, `stage5-linux-v3-*`, `stage5-linux-final-summary.json`, `final-{windows,linux}-editor-*/report.json`, `final-*-game-worker/game-worker-report.json`, `final-*-software-metadata.json`. Итоговый агрегатор отдельно сообщает функциональную готовность, цель Player60FPS и сохранность исходного проекта.
+
+Итоговая строгая сводка: `functional_state=passed`, `player_60fps_state=failed`, pending0. Единственные два failed requirements — Windows/Linux Player60FPS. Общий `state=failed` и exit1 сохраняются: успех функциональных проверок не превращает невыполненную производительность в зелёный результат. Source seal содержит 155 main files при 152 required native files; все 107 backend/document/tool entries также сверены по SHA. Финальный JSON — `final-summary.json`; предварительный перед docs commit сохранён отдельно.
+
+## Готовый результат и сохранность
+
+Запускать обновлённый Windows Editor можно из `outputs/ModuleEngine.exe`. Его SHA-256 — `2477792D79F64A360AE7BEE34DF1BA81DEBEFB949FE6A4E6FA19EF79C5E66BD3`: он совпадает с final normal build, обоими проверенными Team EXE и их package pins. Время сборки предшествует всем заключительным native/package сценариям. Промежуточный normal build имел другой SHA; защита публикации отклонила его старое ожидаемое значение до замены файла. После сверки опубликован фактически проверенный финальный EXE.
+
+Native Linux Editor SHA-256 — `f66a2fb317a507d15615621d2378f77dbf7cd2a251b6f1b6ab6feed9f7a91b19`. Доставленные Player имеют собственные package manifests: общий Cargo target binary меняется при сборках разных features и не служит идентификатором всех пакетов сразу.
+
+Семь защищённых исходных JSON/layout/binding/SDK файлов сохранили baseline SHA. Единственная намеренная замена из списка baseline — готовый Windows EXE; прежний бинарник сохранён в `outputs/review-fixes-20261016/prior-ModuleEngine-DX12.exe` с исходным SHA. Новые Full/Team/Player каталоги — реальные проверочные экспорты; рабочая ветка и исходники остаются в одном checkout. Остаточных owned native процессов Windows/Linux после приёмки нет; `final-process-preservation.json` и Linux idle snapshot сохраняются рядом с итоговым JSON. Никто из посторонних процессов не останавливался.
+
+Инструменты установлены в ранее существующую Ubuntu по явному разрешению. Для Linux используется `.tools/linux-x86_64/env.sh`, native Rust/Cargo1.99.0, GCC13.3, pkg-config и DXC1.9.2609.5. Точная копия toolchain/registry/DXC на ext4 сверена по содержимому, mode и symlinks; полная content proof ускорилась со102,04 до2,26с. ОС, GPU-драйверы, release profiles, IPC limits и критерии benchmark не менялись. Windows GUI сохранил WGPU/DX12, Linux — WGPU/Vulkan с X11 и Wayland; Glow не использовался.
+
+## Журнал этапов
+
+Следующие разделы сохраняют промежуточные находки и красные проверки. Фразы «ещё требуется» относятся к моменту конкретного этапа; актуальное состояние указано в таблице финальной приёмки выше.
 
 ## Границы и порядок
 
@@ -106,3 +160,11 @@ Latest normal native Linux Editor/Player/examples собраны (Cargo5м47с c
 Повтор исходного exact real repair test прошёл за **86,31 с** (`stage5-windows-v3-real-repair.log`), включая root-only repair с сохранением подтверждённых SDK dependencies, SDK corruption со старым mtime при новом store/source, missing SDK product, настоящий последующий hit и last-lease cleanup. Предыдущий полный красный лог сохранён как `stage5-windows-full-pre-v3-red.log`. Старые оконные reports/logs перенесены в `pre-v3/`: они подтверждают предыдущую реализацию, но финальные проверки нового layout должны быть выполнены заново. Для них создаются новые Full fixtures `windows-full-v3` и native `review-acceptance-20261016-v3`; предыдущие fixtures не изменяются. Полный Windows suite на финальном layout запущен повторно.
 
 Полный повтор Windows на v3 прошёл: workspace/all-targets **585 passed / 6 ignored**, включая runtime **61 passed / 2 ignored**, где actual corruption/include/coalescing tests выполнены; wall всего workspace **9м39с**. Doctests, `fmt --check`, workspace all-targets Clippy `-D warnings` и normal Editor/Player build также exit0 (`final-windows-{workspace-tests,doc-tests,fmt,clippy,build}.log`). Explicit native Workbench v3 прошёл за **33,69с**; обе ignored runtime проверки установленного context и native tools выполнены отдельно — **1+1 passed** за 2,41/0,36с. Новый Windows CLI SHA-256 — `6896247F63E8E409F214A1630E38792F79E432373F34F346D36C3B4B98FA88A2`; он ещё не опубликован в `outputs/ModuleEngine.exe`. Новые Full/native/package приёмки и Linux full workspace остаются обязательными.
+
+На code checkpoint `c44c2654e96824e8631b72abb831a9371a40dd62` Windows v3 raw slow-UI/hot-apply acceptance с настоящим Custom80мс прошёл за **14,66с**. Новый Full-v3 экспорт, capabilities, SDK prewarm, неизменённый DX12 Editor benchmark и GameWorker acceptance прошли (`final-windows-*`). Player и Team действительно экспортированы; Team capabilities/Custom check exit0. Перенесённый Player прошёл строгую package/render verification из TEMP при PATH только Windows/System32 и заведомо отсутствующем DXC.
+
+Standalone Windows Player benchmark завершён функционально: физические 1920×1080, WGPU/DX12 RTX4080SUPER, workload/рендер без ошибок, UI timing met. **Строгая цель60FPS не достигнута**: cadence различимых завершённых игровых кадров **59,9469FPS**, mean interval16,6814мс, p95 **19,2432мс** при бюджете16,6667мс. `target_met=false` сохраняется в `final-windows-player-dx12/native-frame-report.json`; результат не округляется до успешных60FPS и не подменяется GUI callback FPS. Это остаётся ограничением производительности, хотя original Editor45s и функциональные проверки исправлений проходят.
+
+Реальные software-active/inactive-Vulkan Windows Player/Team экспорты также прошли. В обоих рабочий граф и shader map очищены от alternative/unused источников, published engine_profile/engine_lock сохранились; Player native features — только `["ui"]`. Team check и relocated software Player strict verification без Rust/DXC прошли. `final-windows-software-metadata.json` фиксирует исходный fixture SHA и проверки projection/profile. Linux v3 повтор и его полный workspace/package этап ещё выполняются.
+
+На checkpoint `c44c2654` полный Linux workspace завершился **594 passed / 0 failed / 6 ignored** за 19м21с, включая реальные corruption/include/coalescing проверки; doctests прошли. Затем strict Clippy нашёл один `collapsible_if` в Linux-only проверке разрешения `-l` библиотек. Commit `3233497c45f2e00ce4c853980c9a01ec53122005` объединяет вложенные условия в let-chain без изменения проверки и без lint allow. Windows normal rebuild exit0, но его SHA изменился на `BD4199BFC0159764D6A580BCD6E7E1847DA2AB83A9EF26C2725AEEDD27C6D726`, поэтому финальные suites/native/package приёмки повторяются на обеих платформах. Предыдущие logs/reports сохранены в `pre-linux-clippy-fix/`, Windows artifacts — в его `windows/`; прежние Full fixtures не исправлялись на месте. Новые Full roots — `windows-full-final` и native `review-acceptance-20261016-final`.
