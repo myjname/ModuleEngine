@@ -58,16 +58,16 @@ fn executable(program: &Path, env: &BTreeMap<OsString, OsString>) -> Result<Path
         }
         return Ok(path);
     }
+    let mut name = program.as_os_str().to_owned();
+    if cfg!(windows) && program.extension().is_none() {
+        name.push(".exe");
+    }
     for dir in std::env::split_paths(
         env.get(std::ffi::OsStr::new("PATH"))
             .map(OsString::as_os_str)
             .unwrap_or_default(),
     ) {
-        let file = dir.join(format!(
-            "{}{}",
-            program.to_string_lossy(),
-            std::env::consts::EXE_SUFFIX
-        ));
+        let file = dir.join(&name);
         if file.is_file() {
             return Ok(file);
         }
@@ -535,6 +535,186 @@ pub(crate) fn native_cache_test_child(name: &str, ignored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_tool_names_preserve_extensions_and_path_precedence() {
+        let fixture = TestArtifactGuard::new(&std::env::temp_dir(), "tool-names").unwrap();
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let environment = BTreeMap::from([(
+            "PATH".into(),
+            std::env::join_paths([&first, &second]).unwrap(),
+        )]);
+        for selected in ["cargo.exe", "rustc.exe", "selected.cmd"] {
+            // A similarly named earlier entry must not change the selected name.
+            fs::write(first.join(format!("{selected}.exe")), "wrong suffix").unwrap();
+            let expected = second.join(selected);
+            fs::write(&expected, "selected tool").unwrap();
+            assert_eq!(
+                executable(Path::new(selected), &environment).unwrap(),
+                expected
+            );
+            let earlier = first.join(selected);
+            fs::write(&earlier, "earlier selected tool").unwrap();
+            assert_eq!(
+                executable(Path::new(selected), &environment).unwrap(),
+                earlier
+            );
+        }
+        for selected in ["cargo", "rustc"] {
+            let expected = first.join(format!("{selected}{}", std::env::consts::EXE_SUFFIX));
+            fs::write(&expected, "bare tool").unwrap();
+            assert_eq!(
+                executable(Path::new(selected), &environment).unwrap(),
+                expected
+            );
+        }
+        let absolute = second.join("absolute-tool");
+        fs::write(&absolute, "explicit path").unwrap();
+        assert_eq!(executable(&absolute, &environment).unwrap(), absolute);
+        assert!(executable(Path::new("missing-selected.exe"), &environment).is_err());
+        assert!(executable(&second.join("missing-absolute"), &environment).is_err());
+    }
+
+    #[test]
+    fn relative_selected_tool_path_keeps_its_filename() {
+        let current = std::env::current_dir().unwrap();
+        let fixture = TestArtifactGuard::new(&current, "relative-tool").unwrap();
+        let absolute = fixture.path().join("selected.exe");
+        fs::write(&absolute, "explicit relative tool").unwrap();
+        let relative = PathBuf::from(fixture.path().file_name().unwrap()).join("selected.exe");
+        let resolved = executable(&relative, &BTreeMap::new()).unwrap();
+        assert_eq!(resolved, current.join(relative));
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            absolute.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires restored native Windows tools and registry sources"]
+    fn actual_windows_exe_tool_names_compile_with_and_without_store() {
+        const TEST: &str =
+            "cache_context::tests::actual_windows_exe_tool_names_compile_with_and_without_store";
+        const CHILD: &str = "MODULE_ENGINE_EXE_NAMES_TEST_CHILD";
+        const CARGO: &str = "MODULE_ENGINE_EXE_NAMES_TEST_CARGO";
+        const RUSTC: &str = "MODULE_ENGINE_EXE_NAMES_TEST_RUSTC";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        if std::env::var(CHILD).ok().as_deref() != Some(TEST) {
+            let selected = ScriptCompiler::new(root.into(), root.join(".work/tool-names-query"));
+            let environment = capture_environment(std::env::vars_os(), true);
+            let cargo = executable(
+                selected
+                    .cargo_binary
+                    .as_deref()
+                    .unwrap_or(Path::new("cargo")),
+                &environment,
+            )
+            .unwrap();
+            let rustc = executable(
+                selected
+                    .rustc_binary
+                    .as_deref()
+                    .unwrap_or(Path::new("rustc")),
+                &environment,
+            )
+            .unwrap();
+            let mut path = vec![
+                cargo.parent().unwrap().to_path_buf(),
+                rustc.parent().unwrap().into(),
+            ];
+            path.extend(std::env::split_paths(
+                environment.get(std::ffi::OsStr::new("PATH")).unwrap(),
+            ));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    TEST,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, TEST)
+                .env(CARGO, &cargo)
+                .env(RUSTC, &rustc)
+                .env("PATH", std::env::join_paths(path).unwrap());
+            let output = run_bounded(
+                command,
+                vec![],
+                Duration::from_secs(900),
+                &AtomicBool::new(false),
+                None,
+            )
+            .unwrap();
+            assert!(output.success, "{}{}", output.stdout, output.stderr);
+            print!("{}", output.stdout);
+            return;
+        }
+        let fixture = TestArtifactGuard::new(&std::env::temp_dir(), "exe-names").unwrap();
+        let cargo = PathBuf::from(std::env::var_os(CARGO).unwrap());
+        let rustc = PathBuf::from(std::env::var_os(RUSTC).unwrap());
+        let context = ScriptContext::new(1.0, 0.01, vec![]);
+        for (tool, absolute) in [("cargo", &cargo), ("rustc", &rustc)] {
+            for (spelling, selected) in [
+                ("bare", PathBuf::from(tool)),
+                ("suffixed", PathBuf::from(format!("{tool}.exe"))),
+                ("absolute", absolute.clone()),
+            ] {
+                for stored in [false, true] {
+                    let mode = if stored { "stored" } else { "uncached" };
+                    let name = format!("{tool}-{spelling}-{mode}");
+                    let mut compiler = ScriptCompiler::new(root.into(), fixture.path().join(&name));
+                    compiler.cargo_binary = Some(cargo.clone());
+                    compiler.rustc_binary = Some(rustc.clone());
+                    if tool == "cargo" {
+                        compiler.cargo_binary = Some(selected.clone());
+                    } else {
+                        compiler.rustc_binary = Some(selected.clone());
+                    }
+                    if stored {
+                        compiler =
+                            compiler.with_program_store(Arc::new(CompiledProgramStore::default()));
+                    }
+                    let program = compiler
+                        .compile_kind(
+                            "fn speed(time:f64,base:f64)->f64{base+time}",
+                            ScriptKind::Speed,
+                        )
+                        .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    assert!(program.executable().is_file(), "{name}");
+                    assert_eq!(
+                        program
+                            .tick(&context, Duration::from_secs(5))
+                            .unwrap()
+                            .speed,
+                        Some(2.0),
+                        "{name}"
+                    );
+                    println!(
+                        "{name}: selected tool compiled and native worker returned expected value"
+                    );
+                    if tool == "rustc" && spelling == "suffixed" && stored {
+                        let error = compiler
+                            .compile_kind(
+                                "fn speed(_:f64,_:f64)->f64{missing_selected_tool_test_value}",
+                                ScriptKind::Speed,
+                            )
+                            .unwrap_err();
+                        assert!(matches!(error, ScriptError::Compile(_)), "{error}");
+                        assert!(error.to_string().contains("E0425"), "{error}");
+                        println!("{name}: genuine Rust compilation error remains visible");
+                    }
+                }
+            }
+        }
+    }
     #[test]
     #[ignore = "requires restored native tools and audited registry sources"]
     fn actual_supported_native_context_is_cacheable() {
