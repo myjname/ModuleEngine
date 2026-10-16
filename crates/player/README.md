@@ -1,5 +1,7 @@
 # Standalone Player
 
+[English](README.md) | [Русский](README.ru.md) | [Documentation](../../docs/README.md)
+
 This package contains the shared native Player UI and a separate executable. It
 has no production dependency on the Editor or the Two Arenas project.
 

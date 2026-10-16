@@ -1,58 +1,74 @@
-# Игровой этап: от авторской сцены до Player
+<a id="игровой-этап-от-авторской-сцены-до-player"></a>
 
-Цель — проверить общие модули на законченной небольшой игре. Две арены являются данными проекта: исполнитель не знает их названий, число монстров или правила победы конкретного уровня.
+# Game stage: from authored scene to Player
 
-Страница описывает игровой маршрут 0.4; последующие изменения выделили общий Host, опциональные игровые пакеты и самостоятельный Player. Актуальные завершённые этапы и открытые цели сведены в [текущем состоянии](current-status.md); результаты каждого отчёта относятся только к его snapshot.
+[English](next-stage.md) | [Русский](ru/next-stage.md) | [Documentation](README.md)
 
-## Что где находится
+The goal is to verify shared modules in a complete small game. The two arenas are project data: the executor does not know their names, monster counts, or the victory rules of a particular level.
 
-| Задача | Реализация | Контракт |
+This page describes the 0.4 game path; subsequent changes extracted the shared Host, optional gameplay packages, and standalone Player. Current completed stages and open goals are collected in [current status](current-status.md); each report's results apply only to its own snapshot.
+
+<a id="что-где-находится"></a>
+
+## Where things live
+
+| Task | Implementation | Contract |
 | --- | --- | --- |
-| Авторские сцены и шаблоны | [engine-core/src/scenes.rs](../crates/engine-core/src/scenes.rs) | GameProject, AuthoredScene, AuthoredObject, Prefab |
-| Исполнение подсистем | [engine-core/src/systems.rs](../crates/engine-core/src/systems.rs) | SystemRegistry, ExecutionGraph, ExecutableSystem |
-| Игровые правила | [engine-core/src/game.rs](../crates/engine-core/src/game.rs) | GameSession, GameInput, GameEvent; отдельно зарегистрированные системы |
-| Статические модели и изображения | [engine-content/src/lib.rs](../crates/engine-content/src/lib.rs) | ContentLibrary; renderer-neutral Mesh/Material |
-| Rust Custom | [runtime-script/src/lib.rs](../crates/runtime-script/src/lib.rs) | Постоянный worker, ScriptTick, явно объявленное состояние |
-| Редактор сцен и графа систем | [editor/src/game_ui.rs](../crates/editor/src/game_ui.rs) | Авторские данные отдельно от Play-копии |
-| Общая сборка подсистем | [game-host/src/game_host.rs](../crates/game-host/src/game_host.rs) | Один GameHost для редактора и Player |
-| Отдельная игра и экспорт | [Player crate](../crates/player/README.md), [game_package.rs](../crates/editor/src/game_package.rs) | Пакет player.json, native Player, ресурсы и скомпилированные программы |
+| Authored scenes and prefabs | [engine-core/src/scenes.rs](../crates/engine-core/src/scenes.rs) | GameProject, AuthoredScene, AuthoredObject, Prefab |
+| Subsystem execution | [engine-core/src/systems.rs](../crates/engine-core/src/systems.rs) | SystemRegistry, ExecutionGraph, ExecutableSystem |
+| Gameplay rules | [engine-core/src/game.rs](../crates/engine-core/src/game.rs) | GameSession, GameInput, GameEvent; separately registered systems |
+| Static models and images | [engine-content/src/lib.rs](../crates/engine-content/src/lib.rs) | ContentLibrary; renderer-neutral Mesh/Material |
+| Rust Custom | [runtime-script/src/lib.rs](../crates/runtime-script/src/lib.rs) | Persistent worker, ScriptTick, explicitly declared state |
+| Scene and system-graph editor | [editor/src/game_ui.rs](../crates/editor/src/game_ui.rs) | Authored data separated from the Play copy |
+| Shared subsystem composition | [game-host/src/game_host.rs](../crates/game-host/src/game_host.rs) | One GameHost for editor and Player |
+| Standalone game and export | [Player crate](../crates/player/README.md), [game_package.rs](../crates/editor/src/game_package.rs) | player.json package, native Player, assets, and compiled programs |
 
-## Проверяемый результат
+<a id="проверяемый-результат"></a>
 
-Создать/изменить сцену, сохранить JSON и открыть его повторно. Изменить шаблон монстра: у всех экземпляров изменяется общий параметр, а локальные переопределения остаются. Play запускает отдельный GameSession; Stop возвращает авторские значения.
+## Verifiable result
 
-Импортировать статическую модель glTF/GLB с UV и непрозрачным материалом. Подключить PNG/JPEG как текстуру материала. Та же нейтральная геометрия поступает в Vulkan из Object и ECS; сравниваются состояния, события и изображения.
+Create/edit a scene, save JSON, and reopen it. Change the monster prefab: the shared parameter changes in every instance while local overrides remain. Play starts a separate GameSession; Stop restores authored values.
 
-Игровой пример: WASD, камера сверху под углом, удар ЛКМ к курсору. Каждый противник в области получает урон один раз за взмах. Стены и препятствия блокируют движение. После двадцати малых монстров открывается проход во вторую сцену. Босс имеет тяжёлую атаку с предупреждением и областью на земле. Здоровье игрока переносится; проигрыш и победа показываются в игровом UI; R начинает заново.
+Import a static glTF/GLB model with UVs and an opaque material. Connect a PNG/JPEG as its material texture. The same neutral geometry reaches Vulkan from Object and ECS; states, events, and images are compared.
 
-Ввод собирает host, симуляция работает с шагом 1/60 секунды. Порядок систем задаётся стадиями графа, а типы ресурсов и зависимости проверяются до запуска. За один внешний кадр допускается до пятнадцати шагов; чрезмерное время кадра отбрасывается, чтобы приложение не зависало на догоняющей симуляции.
+Game example: WASD, an angled overhead camera, and left-click attacks toward the cursor. Each opponent in the area takes damage once per swing. Walls and obstacles block movement. After twenty small monsters, a passage into the second scene opens. The boss has a heavy attack with a warning and a ground area. Player health carries across; defeat and victory appear in the game UI; R restarts.
 
-## Состояние и применение изменений
+The host gathers input, and simulation uses a 1/60-second step. System order is defined by graph stages; resource types and dependencies are validated before launch. Up to fifteen steps are permitted per external frame; excessive frame time is dropped to avoid freezing the application in catch-up simulation.
 
-Исходный GameProject не изменяется действиями Play. Состояние native-систем и Custom относится к живому экземпляру системы. При загрузке новой сцены сценовые системы создаются заново. Игрок с компонентом persistent переносит свои компонентные данные; позиции задаются входом новой сцены. Restart создаёт начальные сценовые состояния, Stop уничтожает Play-копию.
+<a id="состояние-и-применение-изменений"></a>
 
-Rust Custom объявляет сериализуемое состояние заголовком `module-engine-state`. Код компилируется отдельно и исполняется постоянным процессом. Совместимое применение сохраняет состояние; несовместимый кандидат остаётся отдельно до явного сброса или предоставления совместимого JSON для миграции. На отказе команды/состояния действует предыдущая рабочая версия.
+## State and applying changes
 
-Все системы готовят изменения, затем executor вызывает validate_tick у каждой. Host-транзакция проверяет и применяет команды выбранному WorldProvider до system commit_tick. Ошибка вызывает rollback_tick у систем, действительно вошедших в этот шаг, и откат host-транзакции, восстанавливая game/resources/events/owned state. Provider сохраняется между fixed ticks и прямыми командами, а при входе в сцену, переходе или Restart создаётся заново. Его validate_commands должен быть без побочных эффектов, apply_commands — атомарным; после публикации host может применить обратный portable пакет. Скрытое состояние и произвольные внешние действия native-кода требуют собственных транзакционных hooks; ошибки отката явно сообщаются.
+Play actions do not modify the source GameProject. Native-system and Custom state belongs to the live system instance. Scene systems are recreated when a new scene loads. A player with the persistent component carries its component data across; positions are defined by the new scene's entry. Restart creates initial scene states; Stop destroys the Play copy.
 
-Граф рендера и HLSL можно применять к существующей игре. Граф native игровых систем редактируется как кандидат; применение требует Stop. Пересборка обычных native-модулей остаётся отдельной операцией. Подробности: [состояние Custom](custom-state.md), [исполнение](module-execution.md).
+Rust Custom declares serializable state with the `module-engine-state` header. Code compiles separately and runs in a persistent process. Compatible application preserves state; an incompatible candidate remains separate until an explicit reset or compatible migration JSON is provided. If commands/state are rejected, the previous working version remains active.
 
-## Неактивные возможности
+All systems stage changes, then the executor calls validate_tick on each one. The host transaction validates and applies commands to the selected WorldProvider before system commit_tick. An error invokes rollback_tick on systems that actually entered that step and rolls back the host transaction, restoring game/resources/events/owned state. The provider is retained between fixed ticks and direct commands, and recreated on scene entry, transition, or Restart. Its validate_commands must have no side effects and apply_commands must be atomic; after publication, the host can apply an inverse portable batch. Hidden state and arbitrary external native-code actions require their own transactional hooks; rollback errors are reported explicitly.
 
-Активные компоненты определяются метаданными подключённых систем и их явно объявленными расширениями, включая Custom params.components. Обычный инспектор показывает только активные поля. Неактивные авторские данные сохраняются для восстановления, а runtime и новые поставки не получают их. Это относится к любому модулю, включая потенциальную репликацию; готового сетевого модуля здесь нет.
+The render graph and HLSL can be applied to an existing game. The native gameplay-system graph is edited as a candidate; application requires Stop. Rebuilding ordinary native modules remains a separate operation. Details: [Custom state](custom-state.md), [execution](module-execution.md).
 
-Личный dock layout хранится отдельно от проекта. Начальный layout с Game/Scene создаётся, когда сохранённого личного layout ещё нет; существующая раскладка не заменяется. Окно можно выбрать вручную из списка типов областей.
+<a id="неактивные-возможности"></a>
 
-## Сборка игры
+## Inactive capabilities
 
-`--export-game` собирает Rust Custom и все выбранные GPU-стадии заранее, копирует нужные ресурсы и проверяет новый пакет из его собственного корня. `Player.exe` на Windows и `Player` на Linux открывают игру без редакторских панелей. Rust/Cargo/DXC и native исходники игроку не нужны. Для выбранного Vulkan-renderer нужен совместимый драйвер; доступность native сервисов зависит от платформы.
+Active components are determined by metadata from connected systems and their explicitly declared extensions, including Custom params.components. The ordinary inspector displays only active fields. Inactive authored data is retained for restoration, while runtime and new deliveries do not receive it. This applies to any module, including potential replication; there is no ready-made networking module here.
 
-Player собирается отдельным [пакетом](../crates/player/README.md) без production зависимости от Editor и Two Arenas. Native features выбираются явно; общий GameHost вынесен из редактора, ARPG и audio опциональны. Независимый Puzzle и переносимые Player-пакеты проверены в [этапах 5–8](modular-runtime-progress.md). Успех этих проверок не означает достижения performance-цели.
+The personal dock layout is stored separately from the project. An initial layout with Game/Scene is created when no saved personal layout exists; an existing layout is not replaced. The window can be selected manually from the area-type list.
 
-Цель: 60 FPS, 1920×1080, двадцать активных врагов на текущем ПК и фиксированном содержимом примера. `--game-check` измеряет обработку GameHost; `--player-benchmark` — реальный оконный цикл с conversion/upload/HUD/presentation/vsync. Среднее и p95/max публикуются в разных отчётах с явной нагрузкой; processing FPS не подменяет presented frame cadence. Эти измерения не обещают скорость на произвольных ассетах.
+<a id="сборка-игры"></a>
 
-## Границы
+## Building the game
 
-Импорт пока статический: без скелетной анимации, прозрачности и полного PBR. Столкновения — управляемые тела на горизонтальной плоскости и прямоугольные препятствия; динамических rigid body и navmesh нет. Аудио — короткие PCM WAV по событиям, один голос; пространственный звук и микшер позже. Сохранение прогресса после выхода и бесшовная подгрузка отложены. Native Linux сборки и WSLg/X11/Wayland-проверки уже выполнены; Linux audio/dialogs, аппаратная сертификация, cold Editor within45s и строгие Player60FPS остаются открытыми. Отдельный Player и отсутствие обязательной зависимости от ARPG уже реализованы; это не обещание полного удаления любого неиспользуемого native-кода. Актуальные основания — в [текущем состоянии](current-status.md).
+`--export-game` compiles Rust Custom and every selected GPU stage in advance, copies required assets, and verifies the new package from its own root. `Player.exe` on Windows and `Player` on Linux open the game without editor panels. Players need no Rust/Cargo/DXC or native source code. The selected Vulkan renderer requires a compatible driver; native-service availability depends on the platform.
 
-Документы для дальнейшего развития: [сцены](scenes.md), [игровые системы](gameplay.md), [контент](content.md), [редактор игры](editor-game.md), [Player](player.md).
+Player is built as a separate [package](../crates/player/README.md) without a production dependency on Editor or Two Arenas. Native features are selected explicitly; the shared GameHost was moved out of the editor, and ARPG and audio are optional. Independent Puzzle and portable Player packages were verified in [stages 5–8](modular-runtime-progress.md). Successful checks do not imply that the performance target has been achieved.
+
+Target: 60 FPS, 1920×1080, twenty active enemies on the current PC with fixed example content. `--game-check` measures GameHost processing; `--player-benchmark` measures the actual window loop with conversion/upload/HUD/presentation/vsync. Mean and p95/max are published in separate reports with an explicit workload; processing FPS does not stand in for presented frame cadence. These measurements do not promise performance with arbitrary assets.
+
+<a id="границы"></a>
+
+## Boundaries
+
+Import is currently static: no skeletal animation, transparency, or full PBR. Collisions use controlled bodies on a horizontal plane and rectangular obstacles; there are no dynamic rigid bodies or navmesh. Audio is short event-driven PCM WAV, one voice; spatial audio and a mixer come later. Progress saving after exit and seamless streaming are deferred. Native Linux builds and WSLg/X11/Wayland checks have already been performed; Linux audio/dialogs, hardware certification, cold Editor within45s, and strict Player60FPS remain open. Separate Player and the absence of a mandatory ARPG dependency are already implemented; this does not promise complete removal of every unused piece of native code. Current supporting evidence is in [current status](current-status.md).
+
+Documents for further development: [scenes](scenes.md), [gameplay systems](gameplay.md), [content](content.md), [game editor](editor-game.md), [Player](player.md).

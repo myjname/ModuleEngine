@@ -1,5 +1,7 @@
 # Shared authored-game host
 
+[English](shared-game-host.md) | [Русский](ru/shared-game-host.md) | [Documentation](README.md)
+
 `module-engine-host` owns authored sessions, transactional Rust Custom adapters,
 renderer candidates, content caches and the interactive actor. Applications pass
 one cloned `CompositionContext`, resolved asset/compilation/backend locations and

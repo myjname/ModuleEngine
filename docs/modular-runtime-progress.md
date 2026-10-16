@@ -1,5 +1,7 @@
 # Modular runtime migration
 
+[English](modular-runtime-progress.md) | [Русский](ru/modular-runtime-progress.md) | [Documentation](README.md)
+
 This is an implementation record, not a claim that the planned architecture is
 already available. Baseline: `b6194b385687692058542c9cc3131e806cd60d13`.
 Run evidence: `outputs/modular-ecs-20261015-41613750/`.

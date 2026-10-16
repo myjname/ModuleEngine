@@ -1,70 +1,86 @@
-# Результат игрового этапа 0.4
+<a id="результат-игрового-этапа-04"></a>
 
-Этап реализован в `E:\ModuleEngine`: авторские сцены и шаблоны, граф исполняемых систем, постоянное состояние Rust Custom, статический импорт и самостоятельный Windows Player. Прежний `project.json` оставлен для демонстрационного маршрута; новая игра находится в `game-project.json`.
+# Results of the 0.4 Game Stage
 
-## Что запускать
+[English](release-v04.md) | [Русский](ru/release-v04.md) | [Documentation](README.md)
 
-| Результат | Путь относительно корня проекта |
+The stage was implemented in `E:\ModuleEngine`: authored scenes and templates, an executable-system graph, persistent Rust Custom state, static import, and standalone Windows Player. The previous `project.json` is retained for the demonstration route; the new game is in `game-project.json`.
+
+<a id="что-запускать"></a>
+
+## What to Run
+
+| Result | Path relative to the project root |
 | --- | --- |
-| Редактор 0.4 | `outputs/ModuleEngine.exe` |
-| Игра без редакторских окон | `outputs/game-player-v04/Player.exe` |
-| Полный редактируемый workspace | `outputs/source-project-v04` |
-| Редактор для команды с выбранной архитектурой | `outputs/team-build-v04/ModuleEngine.exe` |
-| Результаты проверки | `outputs/verification-v04` |
+| Editor 0.4 | `outputs/ModuleEngine.exe` |
+| Game without editor windows | `outputs/game-player-v04/Player.exe` |
+| Fully editable workspace | `outputs/source-project-v04` |
+| Team editor with the selected architecture | `outputs/team-build-v04/ModuleEngine.exe` |
+| Verification results | `outputs/verification-v04` |
 
 ```powershell
 .\outputs\ModuleEngine.exe
-# Game / Scene → Play; редактирование авторской сцены после Stop.
+# Game / Scene → Play; edit the authored scene after Stop.
 .\outputs\game-player-v04\Player.exe
 ```
 
-WASD — движение; ЛКМ — один удар к курсору, поражающий каждого врага в области один раз; R — перезапуск. После первой арены войдите в зелёный проход и победите босса. Его тяжёлая атака предварительно показывает красную область. E демонстрирует работу Rust Custom. Управление, экспорт и замеры подробно описаны в [Player](player.md).
+WASD moves; left mouse button performs one attack toward the cursor, hitting each enemy in the area once; R restarts. After the first arena, enter the green passage and defeat the boss. Its heavy attack displays a red area in advance. E demonstrates Rust Custom. Controls, export, and measurements are described in detail in [Player](player.md).
 
-## Почему появились эти части
+<a id="почему-появились-эти-части"></a>
 
-Сцена теперь является сохраняемыми данными, а Play работает с её копией. Шаблоны распространяют общие изменения на экземпляры, сохраняя индивидуальные overrides. Компоненты подключённых модулей определяют обычные поля инспектора; архив неактивных компонентов сохраняется у автора и исключается из runtime/новых поставок.
+## Why These Parts Were Added
 
-Граф систем задаёт порядок и типизированные зависимости; реестр подключает реализации через фабрики. Object и ECS действительно используют разные хранилища. Экземпляр provider сохраняется между кадрами. Проверка мира проходит до публикации состояния систем/Custom; отказ откатывает кадр. Stop, переход сцены и закрытие вызывают lifecycle hooks. [Контракты и расширение](module-execution.md).
+The scene is now saved data, and Play works with a copy. Templates propagate shared changes to instances while preserving individual overrides. Components of connected modules define ordinary Inspector fields; the inactive-component archive is preserved for the author and excluded from runtime/new distributions.
 
-Rust Custom исполняется постоянным процессом с явно объявленным состоянием. Совместимое применение сохраняет состояние; несовместимое требует явного reset или миграции. Экспорт заранее собирает workers и GPU SPIR-V, чтобы игроку не нужны были компиляторы. [Состояние и ошибки](custom-state.md), [формат ресурсов](content.md).
+The system graph defines order and typed dependencies; the registry connects implementations through factories. Object and ECS really use different storage. The provider instance is retained between frames. World validation happens before system/Custom state publication; rejection rolls the frame back. Stop, scene transition, and closing call lifecycle hooks. [Contracts and extension](module-execution.md).
 
-## Проверки 14 октября 2026
+Rust Custom runs as a persistent process with explicitly declared state. Compatible application preserves state; an incompatible change requires explicit reset or migration. Export prebuilds workers and GPU SPIR-V so that players need no compilers. [State and errors](custom-state.md), [resource format](content.md).
 
-Ниже сохранены результаты первоначальной поставки 0.4. Текущие сборки по тем же путям дополнены визуалом ближнего боя; его устройство, снимок и отдельные результаты проверки описаны в [combat-feedback](combat-feedback.md). Предыдущие сборки сохранены в `outputs/update-backup-v04-combat-*`, первоначальные отчёты — в `outputs/verification-v04`.
+<a id="проверки-14-октября-2026"></a>
 
-- **126 unit tests прошли**, включая реальные Rust-процессы, GPU, зависимые ресурсы, состояния, UI-ввод, сцены/шаблоны, упаковку и lifecycle.
-- Workspace Clippy и генерация rustdoc прошли с `-D warnings`; форматирование проверено.
-- Прежние CPU, Vulkan/Rust/source-export integration и настройки Project проверены отдельно.
-- Object/ECS выполняют одинаковые 180 действий: совпадают мир, события, состояния и фактические Vulkan-пиксели с импортированной моделью.
-- Автопилот прошёл две сцены: 20 монстров, переход, босс и победа. Тестовое здоровье повышено до 5000, остальная механика сохранена; это проверка прохождения, а не баланса. Смерть проверена отдельной сценой с 1 HP, затем Restart восстановил авторскую сцену.
-- Player перенесён в отдельную папку. В проверке Rust/Cargo отсутствовали в PATH, `MODULE_ENGINE_DXC` указывал на отсутствующий файл; использовались готовые workers/SPIR-V. В пакете нет native Rust-исходников, SDK или компиляторов. Попытка вызвать команду редактора из Player отклонена.
-- Полный экспорт подтвердил доступность Engine. Перенесённая Team-поставка скомпилировала Custom через собственный `.sdk` и проверила авторскую игру; Engine остался недоступен, принудительный `--profile full` отклонён. Использовались установленные Rust/MSVC и существующий кеш закреплённых сторонних зависимостей; новая установка инструментов не проверялась.
+## Verification on 14 October 2026
 
-### Производительность
+The initial 0.4 delivery results are preserved below. Current builds at the same paths have gained melee visuals; their design, screenshot, and separate verification results are described in [combat-feedback](combat-feedback.md). Previous builds are preserved in `outputs/update-backup-v04-combat-*`, initial reports in `outputs/verification-v04`.
 
-Референс: RTX 4080 SUPER, Windows, Vulkan + оконное представление egui/OpenGL, монитор 3440×1440 144 Hz. Фактические framebuffer и игровой canvas — **1920×1080**. Сцена и здоровье обычные; во всех 120 измеренных кадрах оставались 20 живых врагов и статус Playing. Перед измерением — 30 прогретых кадров.
+- **126 unit tests passed**, including real Rust processes, GPU, dependent resources, state, UI input, scenes/templates, packaging, and lifecycle.
+- Workspace Clippy and rustdoc generation passed with `-D warnings`; formatting was checked.
+- Previous CPU, Vulkan/Rust/source-export integration, and Project settings were checked separately.
+- Object/ECS execute the same 180 actions: world, events, state, and actual Vulkan pixels with the imported model match.
+- The autopilot completed two scenes: 20 monsters, transition, boss, and victory. Test health was increased to 5000; other mechanics were preserved; this checks completion, not balance. Death was checked in a separate scene with 1 HP, then Restart restored the authored scene.
+- Player was moved to a separate folder. During verification, Rust/Cargo were absent from PATH, and `MODULE_ENGINE_DXC` pointed to a missing file; prebuilt workers/SPIR-V were used. The package contains no native Rust sources, SDK, or compilers. An attempt to invoke an editor command from Player was rejected.
+- Full export confirmed Engine availability. The moved Team distribution compiled Custom through its own `.sdk` and verified the authored game; Engine remained unavailable, and forced `--profile full` was rejected. Installed Rust/MSVC and an existing cache of pinned third-party dependencies were used; fresh tool installation was not checked.
 
-| Измерение | Среднее | p95 | Максимум |
+<a id="производительность"></a>
+
+### Performance
+
+Reference: RTX 4080 SUPER, Windows, Vulkan + egui/OpenGL window presentation, 3440×1440 144 Hz monitor. Actual framebuffer and game canvas were **1920×1080**. The scene and health were normal; all 120 measured frames retained 20 living enemies and Playing status. Measurement followed 30 warmup frames.
+
+| Measurement | Mean | p95 | Maximum |
 | --- | --- | --- | --- |
-| GameHost: симуляция, Custom, звук, Vulkan/readback | 4,78 мс | 5,18 мс | 5,37 мс |
-| Полный оконный цикл Player | 9,68 мс | 11,00 мс | 11,60 мс |
+| GameHost: simulation, Custom, audio, Vulkan/readback | 4,78 ms | 5,18 ms | 5,37 ms |
+| Full Player window loop | 9,68 ms | 11,00 ms | 11,60 ms |
 
-Оконный цикл: **103,35 FPS**, цель 60 FPS выполнена. Это callback start-to-start с обработкой, выводом, vsync и планированием ОС; время физического появления изображения на экране отдельно не измерялось. Окно было без фокуса, пользовательского ввода во время замера не было; игровые системы и противники продолжали работать. Размер, нагрузка и статус проверяются самим отчётом. Результат относится к этому ПК и фиксированному примеру.
+Window loop: **103,35 FPS**, the 60 FPS target was met. This is callback start-to-start with processing, presentation, vsync, and OS scheduling; the time when the image physically appeared on screen was not measured separately. The window was unfocused, with no user input during measurement; game systems and enemies continued running. The report itself validates size, load, and status. The result applies to this PC and the fixed example.
 
-Исходные данные: `outputs/verification-v04/player-native/native-frame-report.json`, `player-final-functional/game-report.json`; `release-evidence.json` содержит контрольные суммы executable и условия проверки. Полное описание методики — [game-verification.md](game-verification.md).
+Source data: `outputs/verification-v04/player-native/native-frame-report.json`, `player-final-functional/game-report.json`; `release-evidence.json` contains executable checksums and verification conditions. The full methodology is in [game-verification.md](game-verification.md).
 
-## Проверка интерфейса
+<a id="проверка-интерфейса"></a>
 
-![Авторская сцена и инспектор](media/editor-game-v04.png)
+## Interface Verification
 
-![Граф игровых систем с ресурсными связями](media/editor-systems-v04.png)
+![Authored scene and Inspector](media/editor-game-v04.png)
 
-![Игровой HUD и предупреждение босса](media/player-boss-v04.png)
+![Game-system graph with resource connections](media/editor-systems-v04.png)
 
-Последний снимок использует отдельную авторскую fixture: старт во второй сцене и персонаж рядом с боссом. Для диагностического двухкадрового screenshot реально выполняется один fixed tick. Снимок проверяет видимость HUD/области атаки; это не доказательство прохождения игры. Поставляемый проект не изменён этой fixture.
+![Game HUD and boss warning](media/player-boss-v04.png)
 
-## Что остаётся дальше
+The last screenshot uses a separate authored fixture: starting in the second scene with the character beside the boss. The diagnostic two-frame screenshot actually executes one fixed tick. The screenshot checks visibility of the HUD/attack area; it is not proof of completing the game. This fixture did not change the shipped project.
 
-Это работающий небольшой движок и игровой пример. Пока нет скелетной анимации, полного PBR/прозрачности, динамической физики/navmesh, микшера и пространственного звука, сохранения прогресса после выхода, бесшовного streaming и Linux. Аудио сейчас одноголосное PCM WAV. GPU кадр всё ещё возвращается на CPU; нативный swapchain и несколько кадров в полёте — следующий путь масштабирования.
+<a id="что-остаётся-дальше"></a>
 
-Визуальный Rust поддерживает ограниченное подмножество, а остальной код хранит текстом. Native-модули требуют пересборки. Player использует тот же host executable в игровом режиме: физическое исключение редакторского кода из бинарника отдельно не выполнено. Свежая установка Windows/инструментов на другой машине не проверялась. Дальнейшие решения записаны в [questions.md](questions.md).
+## What Remains
+
+This is a working small engine and game example. Skeletal animation, full PBR/transparency, dynamic physics/navmesh, mixer and spatial audio, progress saving after exit, seamless streaming, and Linux are not yet present. Audio is currently single-voice PCM WAV. The GPU frame still returns to the CPU; a native swapchain and multiple frames in flight are the next scaling route.
+
+Visual Rust supports a limited subset and stores the remaining code as text. Native modules require a rebuild. Player uses the same host executable in game mode: physical exclusion of editor code from the binary has not been done separately. A fresh Windows/tool installation on another machine was not checked. Further decisions are recorded in [questions.md](questions.md).

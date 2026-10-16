@@ -1,68 +1,82 @@
-# Scene и Assets
+<a id="scene-и-assets"></a>
 
-Для расстановки авторской сцены используются отдельные окна **Scene**, **Hierarchy**, **Inspector** и **Assets**. Окно **Game** запускает игровую Play-копию; его камера и управление остаются игровыми. Окна можно открыть из Windows и разместить в раскладке редактора.
+# Scene and Assets
 
-![Авторские окна, манипулятор и проводник ресурсов](media/editor-scene-assets.png)
+[English](scene-assets.md) | [Русский](ru/scene-assets.md) | [Documentation](README.md)
 
-## Расстановка объектов
+Separate **Scene**, **Hierarchy**, **Inspector**, and **Assets** windows are used to arrange an authored scene. The **Game** window runs the game's Play copy; its camera and controls remain game-specific. Windows can be opened from Windows and placed in the editor layout.
 
-1. Выберите авторскую сцену и объект в Hierarchy либо щелчком по его геометрии в Scene. Hierarchy, Inspector и Scene используют общий выбор.
-2. Выберите **Move [G]**, **Rotate [R]** или **Scale [S]** в Scene. Потяните соответствующую ручку мышью.
-3. **World** задаёт оси мира, **Local** — оси объекта. **Snap** включает шаг перемещения, угла или масштаба выбранного инструмента.
-4. Отпускание левой кнопки завершает один жест и создаёт одну запись Undo. **Escape** отменяет незавершённый жест. **Ctrl+Z / Ctrl+Y** отменяют и повторяют завершённые изменения.
-   Save, Open, Undo и запуск Play также отменяют ещё не завершённое перетаскивание перед своим действием; для сохранения новой позиции сначала отпустите ручку.
-5. Числовые значения трансформации и поля компонентов можно редактировать в Inspector. Сохраните авторский документ через Ctrl+S.
+![Authoring windows, gizmo, and asset browser](media/editor-scene-assets.png)
 
-В первой версии выбран один объект. Одновременное изменение группы и общий центр группы отложены. Клавиши G/R/S/F относятся к активному Scene; текстовые поля сохраняют свой ввод.
+<a id="расстановка-объектов"></a>
 
-Камера Scene свободна для осмотра: **средняя кнопка** вращает вид, **Shift + средняя кнопка** сдвигает, **колесо** меняет расстояние, **F** фокусирует выбранный объект. Это личное состояние вида, а не изменение игровой камеры.
+## Arranging objects
 
-Авторские правки выполняются после Stop. Изменение Play-состояния не записывает убитых монстров или положение игрока в исходную сцену.
+1. Select the authored scene and an object in Hierarchy or by clicking its geometry in Scene. Hierarchy, Inspector, and Scene share selection.
+2. Select **Move [G]**, **Rotate [R]**, or **Scale [S]** in Scene. Drag the corresponding handle with the mouse.
+3. **World** uses world axes; **Local** uses object axes. **Snap** enables position, angle, or scale increments for the selected tool.
+4. Releasing the left button completes one gesture and creates one Undo entry. **Escape** cancels an unfinished gesture. **Ctrl+Z / Ctrl+Y** undo and redo completed changes.
+   Save, Open, Undo, and starting Play also cancel an unfinished drag before performing their action; release the handle first to preserve the new position.
+5. Numeric transform values and component fields can be edited in Inspector. Save the authored document with Ctrl+S.
 
-## Проводник ресурсов
+The first version selects one object. Simultaneous group changes and a shared group pivot are deferred. G/R/S/F apply to the active Scene; text fields retain their input.
 
-Assets показывает папки проекта, поиск, фильтр по типу, размеры и сведения о выбранном файле. Модели и текстуры имеют превью; прочие файлы остаются доступны как записи с метаданными. Ошибка или неподдерживаемое содержимое отображаются диагностикой, вместо подстановки другой модели.
+The Scene camera is free for inspection: **middle button** orbits the view, **Shift + middle button** pans, the **wheel** changes distance, and **F** focuses the selected object. This is personal view state rather than a game-camera change.
 
-1. Откройте **Windows → Assets**. Слева выберите папку; строка пути сверху позволяет вернуться к её родителю. В узкой области список папок заменяется выпадающим выбором, а сведения о ресурсе располагаются под списком файлов.
-2. Переключайте **Плитки / Список** и фильтр **Все типы / Модель / Текстура / Звук / Шейдер / Другой файл**. Без поиска показываются файлы текущей папки; поиск проверяет также её вложенные папки. Каждый Assets хранит свою папку, поиск и выбор ресурса.
-3. Щёлкните по файлу: справа появятся путь, размер, сведения и кнопка **Копировать ссылку**. Выбор файла не меняет выбранный объект сцены. Для модели показываются число частей, вершин и треугольников; для WAV — сведения из его заголовка.
-4. **Импорт…** открывает системный выбор файла и добавляет ресурс в выбранную папку `assets/`. **Новая папка…** создаёт дочернюю папку. **Обновить** перечитывает файлы и их зависимости после внешнего изменения.
-5. Используйте контекстное меню файла или кнопки выбранного ресурса **Переименовать…**, **Перенести…**, **В корзину…**, **Использования**. Файл можно также перетащить на папку: это запрос переноса с теми же проверками и сохранением. Имена папок служат навигацией; массовое переименование или перенос папки не выполняется.
+Authored edits are made after Stop. Changing Play state does not write killed monsters or the player's position into the source scene.
 
-Превью загружаются очередью в отдельном потоке. Проводник не создаёт игровой host или Vulkan-устройство для каждого файла, а уже загруженные миниатюры сохраняет в ограниченном кеше. Текстуры показывают свои пиксели с сохранением пропорций. Для моделей строится изображение загруженной геометрии с базовым цветом материала; текстуры и все проходы игрового рендера в этой миниатюре не воспроизводятся. Надпись **Превью загружается…** сменяется изображением или причиной ошибки; **Повторить превью** повторяет загрузку. Звук пока имеет сведения без встроенного проигрывателя.
+<a id="проводник-ресурсов"></a>
 
-Первое открытие Assets индексирует файлы проекта и назначает недостающие ID. Изменение манифеста отмечает проект несохранённым; Ctrl+S сохраняет новые ID. Первичное назначение ID считается миграцией метаданных: существующие Undo/Redo сцены сохраняются, а отмена перемещения не удаляет ID и не создаёт их заново. Индексация не повторяется при каждом изменении координат или кадре. Во время Play, включая Pause, изменение ресурсов требует Stop. Не завершённый JSON-черновик сначала нужно применить или отменить.
+## Asset browser
 
-Чтение файлов, хеширование и построение каталога выполняются в рабочем потоке. Assets показывает индикатор индексирования; остальные окна редактора остаются доступны. До завершения сканирования файловые операции проводника заблокированы. Результат принимается только для исходной папки и актуального индекса, а изменения сцены, сделанные за время сканирования, сохраняются. Обратные ссылки для всех файлов вычисляются общим обходом документа, а не отдельным обходом для каждой плитки.
+Assets displays project folders, search, a type filter, sizes, and selected-file details. Models and textures have previews; other files remain accessible as metadata entries. Errors or unsupported content are shown as diagnostics instead of substituting another model.
 
-Импорт поддерживает статические glTF/GLB, PNG/JPEG и базовый WAV. Модель копируется вместе с внешними буферами и изображениями. У каждого файла появляется постоянный ID; новое назначение ресурса использует `asset://ID`. Старые относительные пути остаются совместимыми.
+1. Open **Windows → Assets**. Select a folder on the left; the path bar at the top returns to its parent. In a narrow area, a dropdown replaces the folder list, and asset details appear below the file list.
+2. Switch `Плитки / Список` (Tiles / List) and the `Все типы / Модель / Текстура / Звук / Шейдер / Другой файл` filter (All types / Model / Texture / Audio / Shader / Other file). Without search, files in the current folder are displayed; search also checks its subfolders. Each Assets window retains its own folder, search, and asset selection.
+3. Click a file: its path, size, details, and the `Копировать ссылку` (Copy reference) button appear on the right. File selection does not change the selected scene object. Models show part, vertex, and triangle counts; WAV files show header information.
+4. `Импорт…` (Import…) opens the system file picker and adds an asset to the selected `assets/` folder. `Новая папка…` (New folder…) creates a child folder. `Обновить` (Refresh) rereads files and dependencies after an external change.
+5. Use the file context menu or the selected asset's `Переименовать…` (Rename…), `Перенести…` (Move…), `В корзину…` (Move to trash…), and `Использования` (Usages) buttons. A file can also be dragged onto a folder: this requests a move with the same checks and saving. Folder names provide navigation; bulk renaming or folder moves are not performed.
 
-Перетаскивание модели из Assets в Scene создаёт новый объект в точке под курсором; оно не заменяет модель уже находящегося там объекта. Заменить модель выбранного объекта можно явно через Inspector. Перетаскивание текстуры на объект назначает её его материалу.
+Previews load through a queue on a separate thread. The browser does not create a game host or Vulkan device for each file, and retains loaded thumbnails in a bounded cache. Textures display their pixels with aspect ratio preserved. Models get an image of loaded geometry with the material's base color; textures and every game-rendering pass are not reproduced in that thumbnail. `Превью загружается…` (Preview loading…) changes to an image or an error reason; `Повторить превью` (Retry preview) retries loading. Audio currently has details without a built-in player.
 
-Переименование и перенос меняют один файл и его известные ссылки. Для папок предусмотрены навигация и создание; перенос целого дерева папок не является этой операцией. Занятое назначение, путь вне `assets/`, защищённый backend или неразрешимая зависимость дают ошибку до изменения ресурсов.
+Opening Assets for the first time indexes project files and assigns missing IDs. A manifest change marks the project unsaved; Ctrl+S saves the new IDs. Initial ID assignment is treated as a metadata migration: existing scene Undo/Redo is retained, and undoing a move neither removes nor recreates IDs. Indexing does not repeat on every coordinate change or frame. During Play, including Pause, asset changes require Stop. An unfinished JSON draft must be applied or cancelled first.
 
-## Удаление и восстановление
+File reading, hashing, and catalog construction run on a worker thread. Assets displays an indexing indicator; other editor windows remain available. Browser file operations are locked until scanning completes. A result is accepted only for its original folder and current index, and scene edits made during the scan are preserved. Back references for all files are computed by a shared document traversal rather than a separate traversal per tile.
 
-Если ресурс используется, проводник показывает места использования. Для удаления сначала выберите замену либо явно отвяжите ссылки. Объекты остаются в сцене. Если файл является внутренней зависимостью модели или шейдера, отвязка запрещена: нужен подходящий ресурс замены или предварительное удаление использующего файла.
+Import supports static glTF/GLB, PNG/JPEG, and basic WAV. A model is copied together with external buffers and images. Every file receives a persistent ID; new asset assignments use `asset://ID`. Old relative paths remain compatible.
 
-Оригинал сохраняется в корзине проекта. Restore возвращает файл с прежним ID и не отменяет более поздние правки сцены; полный Undo удаления возвращает также прежние ссылки. Восстановление отказывается заменить уже существующий файл или занятый ID.
+Dragging a model from Assets into Scene creates a new object at the point under the cursor; it does not replace the model of an object already there. The selected object's model can be explicitly replaced through Inspector. Dragging a texture onto an object assigns it to the object's material.
 
-Файловое изменение и ссылки должны оставаться согласованными на диске. Поэтому редактор сохраняет текущий проект перед переименованием, переносом и удалением, затем сохраняет новый документ. Отмена сохранения отменяет операцию. Ошибка второго сохранения вызывает откат файлов; Undo/Redo файловой операции тоже сохраняет соответствующий документ.
+Rename and move change one file and its known references. Folders support navigation and creation; moving an entire folder tree is not this operation. An occupied destination, a path outside `assets/`, a protected backend, or an unresolvable dependency produces an error before assets change.
 
-Откройте вкладку **Корзина** в Assets и нажмите **Восстановить** у нужного файла. Если исходное имя занято или отсутствует необходимая зависимость, редактор покажет причину и сохранит текущий проект. **Escape** или **Отмена** закрывают диалог переименования, переноса и удаления без файловой операции.
+<a id="удаление-и-восстановление"></a>
 
-Checkpoint и объединение документов не перемещают исторические файлы автоматически. Перед восстановлением редактор проверяет пути, ID и хеши записанных ресурсов. Версия со старым путём после переноса либо с удалённым ресурсом отклоняется до изменения документа и позиции истории. Сначала отмените файловую операцию через Undo или восстановите ресурс из корзины. Файловый Undo сам возвращает файлы и соответствующие ссылки, поэтому после такого отката проверка принимает прежнюю версию.
+## Deletion and restoration
 
-## Что обновляется автоматически
+If an asset is in use, the browser shows its usages. To delete it, first select a replacement or explicitly unlink references. Objects remain in the scene. If the file is an internal model or shader dependency, unlinking is forbidden: a suitable replacement asset or prior deletion of the consuming file is required.
 
-Стабильные ID сохраняются при переносе файла. Известные старые пути обновляются в сценах, шаблонах, overrides и архивированных данных. Относительные URI glTF/GLB и буквальные HLSL includes пересчитываются. Исходники Custom, идентификаторы источников и имена модулей не переписываются как пути.
+The original is retained in the project's trash. Restore returns the file with its previous ID and does not undo later scene edits; a full deletion Undo also restores previous references. Restoration refuses to replace an existing file or an occupied ID.
 
-Для Rust Custom используйте `ctx.asset_path("ID")`, затем передайте полученный путь файловому или контентному API. Произвольно составленные в Rust пути нельзя автоматически исправить надёжно. Буквальный старый путь или вычисляемый файловый доступ без ID API блокирует перенос/удаление с указанием проблемного Custom. Macro includes и неизвестные glTF extensions также требуют отдельного разрешения, а не молчаливого переноса.
+The file change and references must remain consistent on disk. Therefore the editor saves the current project before renaming, moving, and deleting, then saves the new document. Cancelling saving cancels the operation. A second-save error rolls back files; Undo/Redo of a file operation also saves the corresponding document.
 
-Полный контракт, хранение снимков, API расширения и проверки описаны в [asset-workspace-api.md](asset-workspace-api.md). Установленный Engine и папка игры продолжают иметь отдельные основания путей; см. [editor-workflow.md](editor-workflow.md).
+Open the `Корзина` (Trash) tab in Assets and click `Восстановить` (Restore) beside the required file. If the original name is occupied or a required dependency is missing, the editor shows the reason and preserves the current project. **Escape** or `Отмена` (Cancel) closes rename, move, and delete dialogs without a file operation.
 
-## Откуда возникала задержка при изменении координат
+Checkpoints and document merging do not move historical files automatically. Before restoration, the editor checks paths, IDs, and hashes of recorded assets. A version with an old path after a move, or with a deleted asset, is rejected before changing the document or history position. First undo the file operation through Undo or restore the asset from trash. File Undo itself returns the files and corresponding references, so after that rollback the check accepts the previous version.
 
-Изменение трансформации должно передавать новое положение существующего объекта, сохраняя декодированную геометрию и исполнители рендера. Повторная сборка host, повторная загрузка моделей или полный проход хеширования Assets на каждом изменении координаты делают перетаскивание дорогим.
+<a id="что-обновляется-автоматически"></a>
 
-Сценарий проверки этого этапа: непрерывно двигать/вращать/масштабировать объект, наблюдать обратную связь в Scene, завершить жест, отменить и повторить его, проверить единственную запись истории и сохранённую сцену. Замер времени отделяется от функциональной проверки: без измерения на конкретном контенте нельзя утверждать фиксированное число FPS или задержку. Смена архитектуры, назначение другого ресурса и внешнее изменение его байтов по-прежнему могут требовать обновления соответствующих кешей.
+## What updates automatically
+
+Stable IDs survive file moves. Known old paths are updated in scenes, prefabs, overrides, and archived data. Relative glTF/GLB URIs and literal HLSL includes are recalculated. Custom source code, source identifiers, and module names are not rewritten as paths.
+
+For Rust Custom, use `ctx.asset_path("ID")`, then pass the resulting path to a file or content API. Arbitrarily constructed Rust paths cannot reliably be corrected automatically. A literal old path or computed file access without the ID API blocks move/delete and identifies the problematic Custom. Macro includes and unknown glTF extensions also require explicit resolution rather than a silent move.
+
+The full contract, snapshot storage, extension API, and checks are described in [asset-workspace-api.md](asset-workspace-api.md). The installed Engine and game folder continue to have separate path bases; see [editor-workflow.md](editor-workflow.md).
+
+<a id="откуда-возникала-задержка-при-изменении-координат"></a>
+
+## Why coordinate changes caused delays
+
+A transform change should pass the existing object's new position while retaining decoded geometry and render executors. Rebuilding the host, reloading models, or running a full Assets hash traversal on every coordinate change makes dragging expensive.
+
+This stage's verification scenario: continuously move/rotate/scale an object, observe feedback in Scene, complete the gesture, undo and redo it, and verify a single history entry and the saved scene. Timing is separate from functional verification: without measuring specific content, a fixed FPS or latency cannot be claimed. Architecture changes, assignment of a different asset, and external changes to its bytes may still require refreshing the corresponding caches.

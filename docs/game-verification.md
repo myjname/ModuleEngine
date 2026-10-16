@@ -1,5 +1,7 @@
 # End-to-end game acceptance and timing evidence
 
+[English](game-verification.md) | [Русский](ru/game-verification.md) | [Documentation](README.md)
+
 The game check uses the same `GameHost` as the editor and standalone Player. It
 requires the actual Vulkan device. From a full source project:
 

@@ -1,63 +1,81 @@
-# Архитектура 0.4
+<a id="архитектура-04"></a>
 
-Проект хранит архитектуру, авторские сцены и исходники в редактируемом JSON. `ModuleRegistry` описывает корневые world/render-модули, `SystemRegistry` устанавливает исполняемые игровые подсистемы. Нейтральный снимок отделяет хранение мира от рендера, а owned команды и состояние отделяют Rust Custom от конкретных хранилищ и Vulkan.
+# Architecture 0.4
 
-## Пакеты и границы
+[English](architecture.md) | [Русский](ru/architecture.md) | [Documentation](README.md)
 
-| Пакет | Назначение |
+The project stores its architecture, authored scenes, and source code in editable JSON. `ModuleRegistry` describes root world/render modules; `SystemRegistry` installs executable gameplay subsystems. A neutral snapshot separates world storage from rendering, while owned commands and state separate Rust Custom from specific storage implementations and Vulkan.
+
+<a id="пакеты-и-границы"></a>
+
+## Packages and boundaries
+
+| Package | Purpose |
 | --- | --- |
-| module-engine-core | GraphDocument, реестры, Object/ECS, WorldObject/команды, SceneSnapshot/Material, авторские сцены и шаблоны, SystemExecutor и GameSession. Не зависит от Vulkan, UI, импорта изображений или rustc. |
-| module-engine-content | Статический glTF/GLB, PNG/JPEG, декодированный кеш, материал/геометрия и зависимости ресурсов выбранного проекта. |
-| module-engine-vulkan | GPU-граф raster/compute, контракты ресурсов, HLSL/DXC и проверка SPIR-V, реальные текстурированные Forward/Deferred проходы. |
-| module-engine-custom | Частичные визуальные представления Rust, правки исходных диапазонов и сохранение opaque-текста. |
-| module-engine-script | Сборка Rust worker, постоянный процесс, ограниченный JSON-lines IPC и явно объявленное состояние с validate/commit/reject. |
-| module-engine-project | История документа, контрольные версии, diff/merge, миграция, asset manifests и экспорт зависимостей. |
-| module-engine-editor | Нативный egui/eframe UI, GameHost, редактор сцен/исполнения, политики Full/Team и отдельный Player-режим. |
+| module-engine-core | GraphDocument, registries, Object/ECS, WorldObject/commands, SceneSnapshot/Material, authored scenes and prefabs, SystemExecutor, and GameSession. Does not depend on Vulkan, UI, image import, or rustc. |
+| module-engine-content | Static glTF/GLB, PNG/JPEG, decoded cache, material/geometry, and asset dependencies of the selected project. |
+| module-engine-vulkan | Raster/compute GPU graph, resource contracts, HLSL/DXC and SPIR-V validation, actual textured Forward/Deferred passes. |
+| module-engine-custom | Partial visual representations of Rust, source-span edits, and preservation of opaque text. |
+| module-engine-script | Rust worker compilation, persistent process, bounded JSON-lines IPC, and explicitly declared state with validate/commit/reject. |
+| module-engine-project | Document history, checkpoints, diff/merge, migration, asset manifests, and dependency export. |
+| module-engine-editor | Native egui/eframe UI, GameHost, scene/execution editor, Full/Team policies, and a separate Player mode. |
 
-## Два маршрута исполнения
+<a id="два-маршрута-исполнения"></a>
 
-Сохранённый демонстрационный маршрут `Runtime` обслуживает `World → scene.extract → зарегистрированный renderer → viewport.output`. Дополнительные входы принимают WorldCommands/RenderCommands; необязательный Scalar-граф управляет скоростью. Он обслуживает один viewport и ограниченный набор маршрутов. Обычный корневой Node descriptor сам по себе не создаёт поведение произвольной подсистемы. Этот маршрут используется старым `project.json`, окнами 3D Preview и Object Tree/Inspector.
+## Two execution paths
 
-Игровой маршрут использует `GraphDocument.game`: GameProject, сцены/шаблоны и ExecutionGraph. `SystemRegistry` регистрирует descriptor вместе с фабрикой `ExecutableSystem`. `SystemExecutor` создаёт экземпляры и исполняет сохранённые стадии/узлы в указанном порядке. Типы ресурсов, обязательные порты, `requires` и `after` проверяются до выполнения; в executor не добавляется ветвь на имя каждого нового модуля. `GameSession` владеет Play-копией, fixed clock 1/60 и каноническим `GameState.world: EcsWorld`. В ECS-маршруте второго провайдера нет; Object и явно подключённые сторонние провайдеры служат совместимыми проекциями. `module-engine-host` соединяет session, контент, persistent Custom, зарегистрированный `FrameRenderer` и явно запрошенные сервисы. Он общий для окна Game / Scene и Windows Player; от редактора, Vulkan и игровых пакетов общий crate не зависит.
+The retained demonstration `Runtime` path serves `World → scene.extract → registered renderer → viewport.output`. Additional inputs accept WorldCommands/RenderCommands; an optional Scalar graph controls speed. It serves one viewport and a limited set of routes. An ordinary root Node descriptor does not, by itself, create arbitrary subsystem behavior. This path is used by the old `project.json`, 3D Preview windows, and Object Tree/Inspector.
 
-Игровой порядок расположен в `game.execution`, а не выводится из позиций узлов или legacy Scalar-цепочки. В новом `game-project.json` скорость акторов задают компоненты сцены; прежний scalar controller не является его игровым циклом. Общий API native-систем не означает, что все корневые Graph-модули уже выполняются универсальным планировщиком. Приложение регистрирует Vulkan через его адаптер; общий host проверен также с независимым CPU-рендером и в headless-режиме. Другие GPU API и динамический native binary ABI пока не реализованы. См. [общий host](shared-game-host.md).
+The game path uses `GraphDocument.game`: GameProject, scenes/prefabs, and ExecutionGraph. `SystemRegistry` registers a descriptor together with an `ExecutableSystem` factory. `SystemExecutor` creates instances and executes saved stages/nodes in the specified order. Resource types, required ports, `requires`, and `after` are validated before execution; the executor does not gain a branch for each new module name. `GameSession` owns the Play copy, a fixed 1/60 clock, and the canonical `GameState.world: EcsWorld`. The ECS path has no second provider; Object and explicitly connected third-party providers serve as compatible projections. `module-engine-host` connects the session, content, persistent Custom, a registered `FrameRenderer`, and explicitly requested services. It is shared by the Game / Scene window and Windows Player; the shared crate does not depend on the editor, Vulkan, or gameplay packages.
 
-## Мир и контент
+Game order lives in `game.execution`; it is not inferred from node positions or the legacy Scalar chain. In the new `game-project.json`, scene components define actor speed; the old scalar controller is not its game loop. A shared native-system API does not mean that a universal scheduler already executes all root Graph modules. The application registers Vulkan through its adapter; the shared host has also been verified with an independent CPU renderer and in headless mode. Other GPU APIs and a dynamic native binary ABI are not implemented yet. See the [shared host](shared-game-host.md).
 
-В старом Runtime Object хранит реальную рекурсивную иерархию, ECS — независимые таблицы компонентов. В игровом маршруте изменяемые transform, parent, color, ссылки и динамические компоненты принадлежат одному ECS. Native-системы используют запросы по колонкам, а DTO объектов извлекаются для UI, IPC и проверок; [контракт и время жизни](ecs-world.md). `from_objects` создаёт оба хранилища из разрешённой авторской сцены без demo angular velocities. Их команды и снимки эквивалентны для одинаковых данных. Renderer получает вершины/UV, матрицы, цвет и Material; он не запрашивает ECS или объектное хранилище. Матрицы — row-major, вектор — столбец.
+<a id="мир-и-контент"></a>
 
-ContentLibrary присоединяет импортированные примитивы по стабильному object ID. Локальные матрицы glTF компонуются с матрицей объекта; TextureImage разделяется между снимками через Arc. Импорт и экспорт ограничены корнем выбранного проекта/пакета. Непрозрачный base-color материал исполняется на GPU; skeletons, transparency, полноценный PBR, mipmaps и streaming ещё не реализованы.
+## World and content
 
-## Авторство и сохранённые данные
+In the old Runtime, Object stores an actual recursive hierarchy, while ECS uses independent component tables. In the game path, mutable transforms, parents, colors, references, and dynamic components belong to one ECS. Native systems use column queries, and object DTOs are extracted for UI, IPC, and checks; see the [contract and lifetime](ecs-world.md). `from_objects` creates both stores from the resolved authored scene without demo angular velocities. Their commands and snapshots are equivalent for identical data. The renderer receives vertices/UVs, matrices, color, and Material; it does not query ECS or object storage. Matrices are row-major, and vectors are column vectors.
 
-EngineConfiguration задаёт активные feature-модули, exposed ranges и готовые варианты рендера. ProjectConfiguration хранит разрешённые значения/условия. Legacy PropertySchema фильтрует поля по фактическому участию active module/component. В Game / Scene схемы компонентов регистрируются отдельно от потребляющих их систем. Состав вычисляется по выбранной композиции, включая явно объявленные Custom `params.components`; mesh/material активируются подключённым рендером. Поля, defaults, ограничения и ссылки берутся из общей схемы, а не из случайного prefab. Неактивные авторские значения остаются у автора; runtime и новые stripped Team/Player данные их не получают.
+ContentLibrary attaches imported primitives by stable object ID. glTF local matrices compose with the object matrix; TextureImage is shared between snapshots through Arc. Import and export are restricted to the selected project/package root. Opaque base-color material runs on the GPU; skeletons, transparency, full PBR, mipmaps, and streaming are not implemented yet.
 
-Full Engine требует полного совместимого native source manifest. Team всегда Project-only: blueprint фиксирует архитектуру, игровой ExecutionGraph, bindings/source IDs, shaders и версии; сцены, активные шаблоны и разрешённый gameplay Rust остаются игровыми данными. Изменённые Full sources остаются editable. `.sdk` Team нужен для compiled Custom; package tools/assets root отделён от SDK source root. Самостоятельный Player имеет готовые workers и `.spirv`, не требует SDK/Rust/DXC. Это политики поставки, а не sandbox произвольного native/Rust кода.
+<a id="авторство-и-сохранённые-данные"></a>
 
-Личные Engine/Project dock layouts хранятся вне игры. Начальный Game layout создаётся только при отсутствии сохранённого личного layout; существующая раскладка сохраняется. В ней Game/Scene можно выбрать вручную из списка окон. Legacy Preview области имеют независимые камеры/выбор при общем шаге Runtime. Игровой scene viewport показывает отдельную Play-копию. Pause сохраняет runtime, Stop его уничтожает и возвращает авторские данные. Граф исполнения редактируется локальным черновиком; Apply требует Stop и проверяет целый кандидат. Координаты его canvas хранятся отдельно в `.user/full/game-systems-positions.json`.
+## Authoring and saved data
 
-## GPU и измерения
+EngineConfiguration defines active feature modules, exposed ranges, and ready-made rendering variants. ProjectConfiguration stores permitted values/conditions. Legacy PropertySchema filters fields by the actual participation of an active module/component. In Game / Scene, component schemas are registered separately from the systems that consume them. Membership is computed from the selected composition, including explicitly declared Custom `params.components`; the connected renderer activates mesh/material. Fields, defaults, constraints, and references come from the shared schema rather than an arbitrary prefab. Inactive authored values remain in the author's document; the runtime and newly stripped Team/Player data do not receive them.
 
-`render.vulkan` имеет внешний контракт Scene3D → Frame3D. Его subgraph соединяет реальную геометрию, Forward/G-buffer/Deferred, SSAO, tone mapping, FXAA и encoding. ResourceSpec задаёт format, semantic, extent, samples и access; DXC/SPIR-V reflection проверяет bindings и реальные image formats. Custom scene raster может явно включить material ABI через `scene_materials`.
+Full Engine requires a complete compatible native source manifest. Team is always Project-only: its blueprint pins the architecture, game ExecutionGraph, bindings/source IDs, shaders, and versions; scenes, active prefabs, and permitted gameplay Rust remain game data. Modified Full sources remain editable. Team's `.sdk` is required for compiled Custom; the package tools/assets root is separate from the SDK source root. Standalone Player has ready-made workers and `.spirv` and does not require SDK/Rust/DXC. These are delivery policies, not a sandbox for arbitrary native/Rust code.
 
-Renderer работает offscreen с синхронным readback в egui/glow. Vulkan swapchain и несколько кадров в полёте отсутствуют. Изображения проходов, vertex/readback buffers и GPU-атлас используются повторно; CPU чтение предпочитает cached coherent память. Player возвращает только RGBA8, без диагностического чтения depth/normal ownership каждого кадра. Это действующий путь исполнения и измерения текущей игры; он не является оценкой предельной скорости любого будущего движка.
+Personal Engine/Project dock layouts are stored outside the game. The initial Game layout is created only when no saved personal layout exists; an existing layout is retained. Game/Scene can be selected manually from its window list. Legacy Preview areas have independent cameras/selections while sharing a Runtime step. The game scene viewport displays a separate Play copy. Pause preserves the runtime; Stop destroys it and restores authored data. The execution graph is edited in a local draft; Apply requires Stop and validates the entire candidate. Its canvas coordinates are stored separately in `.user/full/game-systems-positions.json`.
 
-Renderer-only benchmark измеряет проходы и readback. GameHost check включает симуляцию, Rust IPC, звук, контент и рендер. Настоящий Player window benchmark дополнительно включает texture conversion/upload, HUD, egui/OpenGL presentation, vsync и планирование ОС. Их результаты и критерии различаются: [GPU/HLSL](gpu-hlsl.md), [game verification](game-verification.md), [Player](player.md). Числа нового полного оконного замера публикуются после измерения, а не выводятся из renderer-only FPS.
+<a id="gpu-и-измерения"></a>
 
-## Кандидаты, состояние и отказ
+## GPU and measurements
 
-Rust компилируется в фоне. Совместимая версия переносит явно объявленное состояние; несовместимая остаётся кандидатом до reset или migration JSON. Legacy Preview и игровые экземпляры имеют отдельное owned состояние. Persistent worker устраняет запуск процесса каждый tick; после timeout/panic/невалидного пакета он перезапускается с последним принятым JSON. Globals не являются контрактом сохранения/миграции и не переносимы между версиями.
+`render.vulkan` has an external Scene3D → Frame3D contract. Its subgraph connects real geometry, Forward/G-buffer/Deferred, SSAO, tone mapping, FXAA, and encoding. ResourceSpec defines format, semantic, extent, samples, and access; DXC/SPIR-V reflection validates bindings and actual image formats. Custom scene raster can explicitly enable the material ABI through `scene_materials`.
 
-Игровой executor выполняет initialize/step всех систем, проверяет все staged outputs, затем host-транзакция проверяет и применяет пакет команд мира, и только после этого выполняются system commit hooks. Ошибка вызывает rollback у участвовавших систем и host-транзакции, возвращает world/resources/events/owned state. GameSession сохраняет один ECS между fixed ticks и прямыми командами. Если выбран совместимый внешний WorldProvider, его экземпляр также сохраняется; новый создаётся при входе в сцену, переходе или Restart. Provider обязан выполнять validate_commands без побочных эффектов, а apply_commands — атомарно. Для отката после публикации host применяет обратный portable пакет; скрытое состояние и внешние native эффекты требуют собственных транзакционных hooks. Запись файла не становится автоматически обратимой, а ошибка rollback явно сообщается. После перехода сцены сценовые системы создаются заново; persistent игрок переносит компоненты при локальных transform/references назначения.
+The renderer runs offscreen with synchronous readback into egui/glow. There is no Vulkan swapchain or support for multiple frames in flight. Pass images, vertex/readback buffers, and the GPU atlas are reused; CPU reading prefers cached coherent memory. Player returns only RGBA8, without diagnostic depth/normal ownership readback on every frame. This is the current game's actual execution and measurement path; it is not an estimate of the maximum performance of any future engine.
 
-Применение совместимого render graph/HLSL или разрешённых Project controls сохраняет живую игру. Изменение native ExecutionGraph требует Stop; обычный native world/renderer/UI исходник требует сборки. Legacy Runtime отдельно переносит провайдер при совпадении ID/типа/параметров мира и очищает несовместимые renderer controls. Эти механизмы не следует смешивать с сохранением игрового прогресса на диск.
+The renderer-only benchmark measures passes and readback. The GameHost check includes simulation, Rust IPC, audio, content, and rendering. The actual Player window benchmark additionally includes texture conversion/upload, HUD, egui/OpenGL presentation, vsync, and OS scheduling. Their results and criteria differ: [GPU/HLSL](gpu-hlsl.md), [game verification](game-verification.md), [Player](player.md). Figures for a new full window measurement are published after measurement, not inferred from renderer-only FPS.
 
-## История и объединение
+<a id="кандидаты-состояние-и-отказ"></a>
 
-Undo/redo и checkpoints сохраняют GraphDocument, включая сцены, шаблоны, графы, исходники и параметры. Они не сохраняют живые объекты, таймеры, GPU-ресурсы или Custom runtime state. Возврат документа не перематывает Play.
+## Candidates, state, and failure
 
-Merge нормализует обычные Graph nodes по ID и edges по входу. Сценовые arrays объектов и arrays стадий/узлов ExecutionGraph пока не имеют поэлементного ID-aware merge: пересекающиеся изменения такого массива дают конфликт целиком с base/ours/theirs. При конфликте preview сохраняет базу. Это граница текущего алгоритма, а не автоматическое объединение двух сцен.
+Rust compiles in the background. A compatible version transfers explicitly declared state; an incompatible one remains a candidate until reset or migration JSON is provided. Legacy Preview and game instances have separate owned state. A persistent worker eliminates process startup on every tick; after a timeout/panic/invalid packet, it restarts with the last accepted JSON. Globals are not a persistence/migration contract and are not portable between versions.
 
-Подробнее: [формат](graph-format.md), [исполнение модулей](module-execution.md), [сцены](scenes.md), [редактор игры](editor-game.md), [контент](content.md), [Custom state](custom-state.md), [история](history-assets.md).
+The game executor runs initialize/step for all systems and validates all staged outputs; the host transaction then validates and applies the world command batch, and only then are system commit hooks run. An error invokes rollback in the participating systems and host transaction, restoring world/resources/events/owned state. GameSession retains one ECS between fixed ticks and direct commands. If a compatible external WorldProvider is selected, its instance is retained too; a new instance is created on scene entry, transition, or Restart. The provider must implement validate_commands without side effects and apply_commands atomically. To roll back after publication, the host applies an inverse portable batch; hidden state and external native effects require their own transactional hooks. Writing a file does not automatically become reversible, and rollback failure is reported explicitly. After a scene transition, scene systems are recreated; the persistent player carries components across while using the destination's local transforms/references.
 
-Точные контракты формата 4, явная публикация профилей, миграция в копию и отдельные feature-selected Player описаны в [Engine profiles](engine-profiles.md). Общий Host не зависит от редактора; Player и редактор устанавливают одинаковые source-контракты через composition.
+Applying a compatible render graph/HLSL or permitted Project controls preserves the live game. Changing the native ExecutionGraph requires Stop; ordinary native world/renderer/UI source code requires a build. Legacy Runtime separately carries its provider across when world ID/type/parameters match, and clears incompatible renderer controls. These mechanisms should not be confused with saving game progress to disk.
+
+<a id="история-и-объединение"></a>
+
+## History and merging
+
+Undo/redo and checkpoints preserve GraphDocument, including scenes, prefabs, graphs, source code, and parameters. They do not preserve live objects, timers, GPU resources, or Custom runtime state. Restoring a document does not rewind Play.
+
+Merge normalizes ordinary Graph nodes by ID and edges by input. Scene object arrays and ExecutionGraph stage/node arrays do not yet have element-by-element ID-aware merging: overlapping changes to such an array produce a whole-array conflict with base/ours/theirs. On conflict, preview retains the base. This is a boundary of the current algorithm, not automatic merging of two scenes.
+
+More detail: [format](graph-format.md), [module execution](module-execution.md), [scenes](scenes.md), [game editor](editor-game.md), [content](content.md), [Custom state](custom-state.md), [history](history-assets.md).
+
+The precise format 4 contracts, explicit profile publication, migration into a copy, and separate feature-selected Players are described in [Engine profiles](engine-profiles.md). The shared Host does not depend on the editor; Player and the editor install the same source contracts through composition.

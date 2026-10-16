@@ -1,5 +1,7 @@
 # Reusable gameplay modules and the acceptance game
 
+[English](gameplay.md) | [Русский](ru/gameplay.md) | [Documentation](README.md)
+
 The actual Two Arenas project is data in
 `module_engine_two_arenas::demo_project()`, in `crates/example-two-arenas`.
 Its `ProjectExt::demo()` is an example-owned convenience adapter. The optional

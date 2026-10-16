@@ -1,60 +1,70 @@
-# Этап UI: меню и работа с проектом
+<a id="этап-ui-меню-и-работа-с-проектом"></a>
 
-Этап объединяет существующие возможности движка в рабочий процесс редактора: создать игру, открыть файл, импортировать ресурс, сохранить копию и собрать Player. Архитектура Engine и авторская игра по-прежнему разделены.
+# UI stage: menus and project workflow
 
-## Запуск
+[English](release-ui.md) | [Русский](ru/release-ui.md) | [Documentation](README.md)
 
-Из `E:\ModuleEngine`:
+This stage combines existing engine capabilities into an editor workflow: create a game, open a file, import an asset, save a copy, and build Player. Engine architecture and the authored game remain separate.
+
+<a id="запуск"></a>
+
+## Launch
+
+From `E:\ModuleEngine`:
 
 ~~~powershell
 .\outputs\ModuleEngine.exe
 .\outputs\ModuleEngine.exe game-project.json
 ~~~
 
-Руководство с назначением команд и последовательностью действий — [editor-workflow.md](editor-workflow.md). Работа с объектами и шаблонами — [editor-game.md](editor-game.md).
+The guide describing commands and the sequence of actions is [editor-workflow.md](editor-workflow.md). Working with objects and prefabs is covered in [editor-game.md](editor-game.md).
 
-## Что реализовано
+<a id="что-реализовано"></a>
 
-| Часть плана | Результат |
+## What is implemented
+
+| Plan area | Result |
 | --- | --- |
-| File | Два шаблона нового проекта на текущем Engine, Open, Recent, Save / Save As, импорт, Full / Team / Player экспорт и выход. |
-| Edit | Undo / Redo, History / Merge и горячие клавиши; текстовый Undo остаётся текстовому полю. |
-| Tools | Проверка проекта, сборка Windows Player, Diagnostics, Project Settings и последний отчёт операции. |
-| Windows | Активировать открытую область выбранного типа или добавить рядом с активной; сохранить, восстановить и сбросить личную раскладку. |
-| Защита работы | Save / Не сохранять / Отмена перед переходом, выходом, проверкой или экспортом; отмена/ошибка Open и New сохраняет рабочие правки. |
-| Фоновые операции | Нативные диалоги, копирование, импорт и сборки выполняются вне UI-потока; ошибки и CLI-логи доступны из отчёта. |
+| File | Two new-project templates using the current Engine, Open, Recent, Save / Save As, import, Full / Team / Player export, and exit. |
+| Edit | Undo / Redo, History / Merge, and keyboard shortcuts; text Undo remains with the text field. |
+| Tools | Project validation, Windows Player build, Diagnostics, Project Settings, and the latest operation report. |
+| Windows | Activate an open area of the selected type or add one next to the active area; save, restore, and reset the personal layout. |
+| Work protection | Save / Don't Save / Cancel before switching, exiting, validating, or exporting; cancelled/failed Open and New preserve working edits. |
+| Background operations | Native dialogs, copying, import, and builds run outside the UI thread; errors and CLI logs are accessible from the report. |
 
-File в нативном редакторе:
+File in the native editor:
 
-![Открытое меню File в ModuleEngine](media/editor-file-menu.png)
+![Open File menu in ModuleEngine](media/editor-file-menu.png)
 
-Windows в нативном редакторе:
+Windows in the native editor:
 
-![Открытое меню Windows в ModuleEngine](media/editor-windows-menu.png)
+![Open Windows menu in ModuleEngine](media/editor-windows-menu.png)
 
-Save As переносит авторские данные, шаблоны, отключённые поля и всю библиотеку `assets/` с объявленными зависимостями. Подтверждённая замена JSON сохраняет точные резервные копии метаданных; конфликтующие ресурсы не перезаписываются. Новый JSON получает собственную привязку к установленному Engine.
+Save As transfers authored data, prefabs, disabled fields, and the entire `assets/` library with declared dependencies. Confirmed JSON replacement retains exact metadata backups; conflicting assets are not overwritten. The new JSON receives its own binding to the installed Engine.
 
-Папка JSON задаёт пути игровых моделей, текстур, звука и рабочую директорию Rust Custom. Установленный Engine предоставляет backend, DXC, шейдерные includes и SDK/исходники для компиляции. Team сохраняет замороженную архитектуру. Для переноса самого движка предусмотрен отдельный Full source export.
+The JSON folder determines paths for game models, textures, and audio, and the Rust Custom working directory. The installed Engine supplies the backend, DXC, shader includes, and SDK/source code for compilation. Team retains a frozen architecture. A separate Full source export is available for moving the engine itself.
 
-## Проверка
+<a id="проверка"></a>
 
-Прошли **164 unit tests**, отдельный запуск workspace doc-tests, строгий Clippy и сборка Rustdoc с `-D warnings`. Итоги находятся в `.work/editor-ui-final-units.log`, `.work/editor-ui-doctests.log`, `.work/editor-ui-clippy.log` и `.work/editor-ui-rustdoc.log`. Число 164 относится только к unit tests.
+## Verification
 
-`outputs/editor-ui-verification/workflow-report.json` содержит `passed: true`. Проверка выполнила реальные клики меню **File / Edit / Tools / Windows**, создание двух шаблонов с сохранением Engine, импорт модели и авторское копирование. Копия сохранила исходный документ и неиспользуемый ресурс; исходный JSON не изменился. Vulkan-кадр с импортированной моделью отличался от пустого на **3624 пикселя**. Контрольный кадр экспортированного Player совпал с кадром авторской копии по пикселям. Проверка Windows подтвердила повторное использование области в текущем рабочем пространстве.
+**164 unit tests**, a separate workspace doc-test run, strict Clippy, and a Rustdoc build with `-D warnings` passed. Results are in `.work/editor-ui-final-units.log`, `.work/editor-ui-doctests.log`, `.work/editor-ui-clippy.log`, and `.work/editor-ui-rustdoc.log`. The count of 164 refers only to unit tests.
 
-Отдельные снимки нативного приложения показали открытые File, Edit, Tools и Windows; File и Windows приведены выше. Выбор файла/папки в системном диалоге не автоматизирован: проверены реальные COM-фабрики, Unicode-пути и ветви отмены файлового сервиса. Это не проверка всего интерактивного пути picker вручную.
+`outputs/editor-ui-verification/workflow-report.json` contains `passed: true`. Verification performed actual **File / Edit / Tools / Windows** menu clicks, created both templates while retaining Engine, imported a model, and made an authored copy. The copy preserved the source document and an unused asset; the source JSON did not change. The Vulkan frame with the imported model differed from the empty frame by **3624 pixels**. The exported Player's reference frame matched the authored copy's frame pixel for pixel. The Windows check confirmed reuse of an area in the current workspace.
 
-Обновлены готовый `outputs/ModuleEngine.exe` и поставки `outputs/source-project-v04`, `outputs/team-build-v04`, `outputs/game-player-v04`. Предыдущие файлы сохранены в `outputs/update-backup-v04-ui-20261014-223230`.
+Separate native application screenshots showed File, Edit, Tools, and Windows open; File and Windows are shown above. File/folder selection in the system dialog is not automated: actual COM factories, Unicode paths, and file-service cancellation branches were checked. This is not manual verification of the entire interactive picker path.
 
-| Поставка | Проверка результата |
+The ready-made `outputs/ModuleEngine.exe` and the `outputs/source-project-v04`, `outputs/team-build-v04`, and `outputs/game-player-v04` deliveries were updated. Previous files are retained in `outputs/update-backup-v04-ui-20261014-223230`.
+
+| Delivery | Result verification |
 | --- | --- |
-| Full source | `--capabilities` подтверждает полный inventory и доступный Engine; `--check` проверяет экспортированный игровой проект. |
-| Team | Engine остаётся недоступным; повторён весь `--editor-ui-check`, включая оба шаблона, Save As, SDK-компиляцию, четыре меню и совпадение Player-кадра. Отчёт: `outputs/editor-ui-verification/team/workflow-report.json`. |
-| Windows Player | Нативный Player с импортированной моделью запущен с PATH только Windows/System32 и без DXC. Готовый ARPG Player прошёл `--game-check` с заранее скомпилированной логикой: `outputs/editor-ui-verification/canonical-player/game-report.json`. Прохождение проверяется на авторской копии с повышенным здоровьем героя; это проверка механики, а не сложности игры. |
+| Full source | `--capabilities` confirms the full inventory and available Engine; `--check` validates the exported game project. |
+| Team | Engine remains unavailable; the full `--editor-ui-check` was repeated, including both templates, Save As, SDK compilation, all four menus, and Player frame matching. Report: `outputs/editor-ui-verification/team/workflow-report.json`. |
+| Windows Player | Native Player with the imported model was launched with PATH containing only Windows/System32 and with no DXC. The ready-made ARPG Player passed `--game-check` with precompiled logic: `outputs/editor-ui-verification/canonical-player/game-report.json`. Completion is checked on an authored copy with increased hero health; this checks mechanics rather than game difficulty. |
 
-Хеши готового редактора, Team editor и Player совпадают. Проверки поставок сведены в `outputs/editor-ui-verification/delivery-report.json`. Игровой `game-project.json` в корне остался без изменений. Пользовательская раскладка сохранена.
+The ready-made editor, Team editor, and Player hashes match. Delivery checks are collected in `outputs/editor-ui-verification/delivery-report.json`. The root game `game-project.json` remained unchanged. The user layout was retained.
 
-Команды для повторения проверки:
+Commands to repeat verification:
 
 ~~~powershell
 cargo test --locked --workspace --lib --bins
@@ -65,13 +75,15 @@ cargo doc --locked --workspace --no-deps
 .\outputs\ModuleEngine.exe --editor-ui-check game-project.json outputs\editor-ui-check
 ~~~
 
-Unit tests и doc-tests запускаются отдельно. Проверка UI вызывает команды реального egui-редактора, использует Vulkan-предпросмотр и экспортированный Player; GPU-проверкам нужны совместимый адаптер/драйвер и инструменты сборки. Сравнение пикселей относится к фиксированному контрольному контенту; производительность этим отчётом не измеряется.
+Unit tests and doc-tests run separately. The UI check invokes actual egui editor commands and uses Vulkan preview and exported Player; GPU checks require a compatible adapter/driver and build tools. Pixel comparison applies to fixed reference content; this report does not measure performance.
 
-## Границы этапа
+<a id="границы-этапа"></a>
 
-- Нативные файловые диалоги реализованы для Windows; Linux требует отдельной поставки и проверки.
-- Отдельный браузер ресурсов, выбор объекта в viewport и ручки перемещения/поворота/масштаба в этот этап не входят. Назначение модели и текстуры остаётся в Game / Scene.
-- Save As переносит игру, но требует доступного совместимого Engine по её привязке. Самостоятельная игра создаётся экспортом Player; перенос исходников и зависимостей Engine — Full export.
-- Фоновые операции показывают название, ожидание и время, без процента готовности. Одновременно выполняется одна операция.
+## Stage boundaries
 
-Ограничения Full / Team действуют при командах меню, открытии, сохранении и экспорте. Gameplay Systems и JSON-черновики нужно явно завершить; Undo, применение JSON и merge не стирают незавершённый граф.
+- Native file dialogs are implemented for Windows; Linux requires a separate delivery and verification.
+- A separate asset browser, viewport object selection, and move/rotate/scale handles are outside this stage. Model and texture assignment remain in Game / Scene.
+- Save As transfers the game but requires an available compatible Engine through its binding. A standalone game is created by Player export; Engine source and dependency transfer uses Full export.
+- Background operations display their name, waiting state, and elapsed time, without a completion percentage. One operation runs at a time.
+
+Full / Team restrictions apply to menu commands, opening, saving, and export. Gameplay Systems and JSON drafts must be explicitly completed; Undo, JSON application, and merge do not erase an unfinished graph.

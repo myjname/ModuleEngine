@@ -1,18 +1,26 @@
-# Статические модели, текстуры и материалы
+<a id="статические-модели-текстуры-и-материалы"></a>
 
-Контент загружается отдельной библиотекой `module-engine-content`. Мир хранит объекты и их устойчивые ID; библиотека присоединяет геометрию и материалы к извлечённому `SceneSnapshot`. Поэтому Object и ECS используют одинаковые файлы, а renderer получает одну нейтральную структуру.
+# Static Models, Textures, and Materials
 
-## Что загружается
+[English](content.md) | [Русский](ru/content.md) | [Documentation](README.md)
 
-Поддерживаются glTF 2.0 `.gltf` и `.glb`: треугольные индексированные и неиндексированные примитивы, иерархия статических узлов, их translation/rotation/scale или matrix, UV-набор 0, `baseColorFactor` и `baseColorTexture`. Внешние `.bin`, PNG/JPEG, embedded bufferView-изображения и base64 data URI читаются реально. Составной mesh сохраняет отдельные примитивы и материалы. glTF column-major матрицы переводятся в row-major конвенцию движка и соединяются с трансформацией игрового объекта.
+Content is loaded by a separate `module-engine-content` library. The world stores objects and their stable IDs; the library attaches geometry and materials to the extracted `SceneSnapshot`. Object and ECS therefore use the same files, and the renderer receives one neutral structure.
 
-Это ограниченный импорт статического контента, а не заявка на полное соответствие glTF. Skins, animations, morph targets, sparse accessors, нетреугольные примитивы, обязательные расширения, прозрачные материалы и текстурирование через другой UV-набор отклоняются с сообщением. Металличность, roughness, normal/emissive/occlusion-карты пока не участвуют в освещении. Renderer использует плоскую нормаль треугольника и простое встроенное освещение.
+<a id="что-загружается"></a>
 
-PNG/JPEG можно загружать отдельно и назначать существующей геометрии. RGB base-color текстуры трактуется как sRGB и переводится в линейный цвет в GPU-шейдере. Material factor и цвет объекта умножаются на результат. Текущий sampling — nearest с repeat; произвольные glTF sampler/filter modes и mipmaps пока не исполняются.
+## What Is Loaded
 
-## Ссылка из сцены
+Supported formats are glTF 2.0 `.gltf` and `.glb`: indexed and nonindexed triangle primitives, a static node hierarchy, their translation/rotation/scale or matrix, UV set 0, `baseColorFactor`, and `baseColorTexture`. External `.bin`, PNG/JPEG, embedded bufferView images, and base64 data URIs are actually read. A composite mesh retains separate primitives and materials. glTF column-major matrices are converted to the engine's row-major convention and combined with the game object's transform.
 
-В компонентах авторского объекта или экземпляра шаблона:
+This is limited static content import, not a claim of full glTF conformance. Skins, animations, morph targets, sparse accessors, nontriangle primitives, required extensions, transparent materials, and texturing through another UV set are rejected with a message. Metallic, roughness, normal/emissive/occlusion maps do not yet contribute to lighting. The renderer uses a flat triangle normal and simple built-in lighting.
+
+PNG/JPEG can be loaded separately and assigned to existing geometry. Base-color texture RGB is treated as sRGB and converted to linear color in the GPU shader. The material factor and object color multiply the result. Current sampling is nearest with repeat; arbitrary glTF sampler/filter modes and mipmaps are not yet executed.
+
+<a id="ссылка-из-сцены"></a>
+
+## Scene Reference
+
+In the components of an authored object or template instance:
 
 ~~~json
 {
@@ -24,30 +32,36 @@ PNG/JPEG можно загружать отдельно и назначать с
 }
 ~~~
 
-Компонент `material` необязателен: без него используются материалы glTF. Поля override также необязательны. Неизменённые встроенные объекты используют кубы; импортированный объект рисует свои вершины и треугольники. `demo_crystal.glb` — собственный маленький тестовый кристалл с встроенной PNG-текстурой.
+The `material` component is optional: glTF materials are used without it. Override fields are also optional. Unchanged built-in objects use cubes; an imported object draws its own vertices and triangles. `demo_crystal.glb` is a small original test crystal with an embedded PNG texture.
 
-## API и жизненный цикл
+<a id="api-и-жизненный-цикл"></a>
 
-`ContentLibrary::new(package_root)` фиксирует корень конкретного проекта/пакета. `load_model(path)` возвращает кешированный `Arc<LoadedModel>`. `enrich_snapshot(snapshot, bindings)` заменяет кубы объектов с указанными ID на примитивы модели, сохраняя трансформацию и цвет объекта. Несколько примитивов имеют исходный ID объекта. `load_texture(path)` возвращает кешированный `Arc<TextureImage>` для material override. Текстуры разделяются между снимками через Arc; они не декодируются заново каждый кадр.
+## API and Lifecycle
 
-`invalidate()` очищает декодированный кеш после изменений ресурсов. При открытии другой игры создаётся другая библиотека с её корнем. Смена модели мира не меняет правила чтения файлов или material ABI.
+`ContentLibrary::new(package_root)` fixes the root of a particular project/package. `load_model(path)` returns a cached `Arc<LoadedModel>`. `enrich_snapshot(snapshot, bindings)` replaces cubes for objects with the specified IDs with model primitives, preserving the object's transform and color. Multiple primitives have the original object ID. `load_texture(path)` returns a cached `Arc<TextureImage>` for a material override. Textures are shared between snapshots through Arc; they are not decoded again every frame.
 
-`import_model(source, destination_directory)` проверяет модель и все относительные зависимости, затем копирует их с сохранением структуры. Корень исходного импорта — каталог выбранной модели; зависимости вне этого каталога при импорте отклоняются. Если исходник использует соседний каталог через `../`, сначала поместите комплект ресурсов в проект и загружайте его от корня проекта. `import_texture(source, destination_filename)` сначала декодирует PNG/JPEG и только затем записывает файл в проект.
+`invalidate()` clears the decoded cache after resource changes. Opening another game creates another library with its own root. Switching the world model does not change file-reading rules or the material ABI.
 
-## Владение файлами и экспорт
+`import_model(source, destination_directory)` validates the model and all relative dependencies, then copies them while preserving their structure. The import source root is the selected model's directory; dependencies outside that directory are rejected during import. If the source uses a neighboring directory through `../`, first place the resource set in the project and load it from the project root. `import_texture(source, destination_filename)` first decodes PNG/JPEG and only then writes the file into the project.
 
-Пути игровых ресурсов относятся к выбранному пакету. Абсолютные пути и URL не используются. Внешние URI glTF разрешаются относительно каталога glTF; percent-encoding декодируется до проверки. Canonical path обязан остаться внутри пакета, включая цели символических ссылок. При загрузке относительный `../` разрешён только если результат остаётся внутри корня проекта. При копировании проверяется также существующая цель файла.
+<a id="владение-файлами-и-экспорт"></a>
 
-`dependencies(model_paths)` возвращает полное множество файлов моделей, буферов и изображений для экспортирования. Для `.glb` со всем контентом внутри это один файл; для внешнего `.gltf` — документ и его фактические зависимости. Отдельные material override-текстуры добавляются экспортёром по ссылкам компонентов. Player использует собственные файлы и не обращается к авторскому checkout.
+## File Ownership and Export
 
-Ограничения загрузки: 128 MiB на файл модели/буфера/encoded texture; текстура до 4096×4096, лимит декодирования 128 MiB; до миллиона вершин в примитиве и трёх миллионов элементов accessor; до 4096 узлов и 128 уровней иерархии. Binary range проверяется до создания iterator. GPU-атлас текущего renderer до 8192 по каждой оси. Для большой игры нужны streaming, mipmaps и более широкий material/resource контракт.
+Game resource paths are relative to the selected package. Absolute paths and URLs are not used. External glTF URIs are resolved relative to the glTF directory; percent-encoding is decoded before validation. The canonical path must remain inside the package, including symbolic link targets. During loading, relative `../` is allowed only if the result remains inside the project root. Copying also checks an existing file target.
 
-## Проверка
+`dependencies(model_paths)` returns the complete set of model, buffer, and image files for export. For a `.glb` with all content embedded, this is one file; for an external `.gltf`, the document and its actual dependencies. The exporter adds separate material override textures from component references. Player uses its own files and does not access the authored checkout.
+
+Loading limits: 128 MiB per model/buffer/encoded texture file; textures up to 4096×4096, decoding limit 128 MiB; up to one million vertices per primitive and three million accessor elements; up to 4096 nodes and 128 hierarchy levels. Binary ranges are validated before iterator creation. The current renderer's GPU atlas allows up to 8192 on each axis. A large game needs streaming, mipmaps, and a broader material/resource contract.
+
+<a id="проверка"></a>
+
+## Verification
 
 ~~~powershell
 cargo test --locked -p module-engine-content -p module-engine-vulkan
 ~~~
 
-Тесты импортируют bundled GLB, внешний glTF с `.bin` и PNG, копируют весь комплект и загружают самостоятельный JPEG. Проверяются матрицы узлов и отказы для внешних/закодированных обходов путей. Vulkan-тест отдельно подтверждает, что UV и текстура импортированного mesh меняют реальные пиксели Forward и Deferred; повторный кадр после использования кеша совпадает.
+Tests import the bundled GLB, an external glTF with `.bin` and PNG, copy the complete set, and load a standalone JPEG. They check node matrices and rejection of external/encoded path traversal. A separate Vulkan test confirms that the imported mesh's UVs and texture change real Forward and Deferred pixels; a repeated frame after cache use matches.
 
-Формат реализован по [спецификации Khronos glTF 2.0](https://github.com/KhronosGroup/glTF/tree/main/specification/2.0); список поддержанных возможностей выше задаёт фактическую границу этой версии.
+The format is implemented from the [Khronos glTF 2.0 specification](https://github.com/KhronosGroup/glTF/tree/main/specification/2.0); the supported-feature list above defines the actual boundary of this version.

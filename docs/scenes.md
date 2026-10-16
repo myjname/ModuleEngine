@@ -1,5 +1,7 @@
 # Authored scenes, templates and Play copies
 
+[English](scenes.md) | [Русский](ru/scenes.md) | [Documentation](README.md)
+
 `GraphDocument.game` is optional. Existing graph-only files load with no game.
 When present it contains a `GameProject`: named scenes, entry scene, named linked
 templates, audio cue paths and the authored execution graph. The normal project

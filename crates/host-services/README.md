@@ -1,5 +1,7 @@
 # Optional host services
 
+[English](README.md) | [Русский](README.ru.md) | [Documentation](../../docs/README.md)
+
 The default crate builds only the generic factory registry and service owner.
 It has no renderer, windowing, game-package, or platform playback dependency.
 Enable `audio` and call `install_audio` in an application profile to install

@@ -1,41 +1,51 @@
-# Review: <задача>
+# Review: <task>
 
-Скопируйте в `outputs/reviews/<task-id>/review.md`. Заполняйте результат фактами;
-шаблон и успешная сверка snapshot не являются независимым ревью.
+[English](review-template.md) | [Русский](ru/review-template.md) | [Documentation](README.md)
 
-## Задача и границы — автор
+Copy to `outputs/reviews/<task-id>/review.md`. Fill in the result with facts;
+the template and a successful snapshot comparison are not independent review.
 
-- Цель и ожидаемое поведение:
-- Нецели:
-- Критерии приёмки и способ их проверить:
-- Контракты/документы:
-- Исходные пользовательские изменения и где сохранены; какие файлы принадлежат задаче:
-- Diff/base и новые файлы для просмотра:
+<a id="задача-и-границы--автор"></a>
 
-## Проверяемая версия — автор, сверяет reviewer
+## Task and scope — author
+
+- Goal and expected behavior:
+- Non-goals:
+- Acceptance criteria and how to verify them:
+- Contracts/documents:
+- Initial user changes and where they are preserved; which files belong to the task:
+- Diff/base and new files to inspect:
+
+<a id="проверяемая-версия--автор-сверяет-reviewer"></a>
+
+## Version under review — author, verified by reviewer
 
 - `source.json`, HEAD, `source_digest`:
-- Дополнительные ignored/external inputs и artifact SHA, если нужны:
-- Проверки: точные команды, окружение/target/features, exit/result, ссылки на логи:
-- Непроверенное, пропуски и известные ограничения:
+- Additional ignored/external inputs and artifact SHA, if needed:
+- Checks: exact commands, environment/target/features, exit/result, links to logs:
+- Unverified areas, omissions and known limitations:
 
-## Независимое заключение — заполняет reviewer
+<a id="независимое-заключение--заполняет-reviewer"></a>
 
-- Reviewer, его роль и независимость от автора реализации; чистый контекст агента:
-- Проверенный `source_digest`, реально просмотренные файлы и контракты:
-- Собственные прогоны reviewer отдельно от прочитанных логов автора:
-- Подтверждённые замечания: ID, приоритет, файл/строка, триггер, последствие,
-  нарушенный критерий и воспроизведение. Если нет — прямо «подтверждённых замечаний
-  в проверенном объёме не найдено»; это не доказательство отсутствия всех ошибок.
-- Предположения/оставшиеся риски и пробелы:
-- Заключение: что можно принять и что остаётся открытым. Если reviewer недоступен,
-  явно «не прошло независимое ревью» с причиной.
+## Independent conclusion — completed by reviewer
 
-## Ответ и повторная приёмка — автор и reviewer
+- Reviewer, their role and independence from the implementation author; clean agent context:
+- Verified `source_digest`, files and contracts actually inspected:
+- Reviewer's own runs, separately from the author's logs they read:
+- Confirmed findings: ID, priority, file/line, trigger, consequence,
+  violated criterion and reproduction. If there are none, explicitly state “no confirmed findings
+  were found within the reviewed scope”; this does not prove that all errors are absent.
+- Assumptions/remaining risks and gaps:
+- Conclusion: what can be accepted and what remains open. If a reviewer is unavailable,
+  explicitly state “has not undergone independent review” with the reason.
 
-- Для каждого замечания: исправление или проверяемое возражение автора, результат
-  повторной проверки, решение reviewer; открытые разногласия сохраняются.
-- При изменении исходников: новый snapshot/digest, дополнительный diff и пересмотр
-  reviewer. При отсутствии изменений укажите исходный snapshot.
-- Финальная сверка snapshot: команда/результат, дата; фактические результаты приёмки
-  и ограничения. Не заменяйте их отметкой `review_passed=true` или галочкой CI.
+<a id="ответ-и-повторная-приёмка--автор-и-reviewer"></a>
+
+## Response and repeat acceptance — author and reviewer
+
+- For each finding: the author's fix or verifiable objection, repeat-check
+  result, reviewer's decision; preserve unresolved disagreements.
+- When sources change: new snapshot/digest, additional diff and reviewer
+  reinspection. If there are no changes, specify the original snapshot.
+- Final snapshot comparison: command/result, date; actual acceptance results
+  and limitations. Do not replace them with `review_passed=true` or a CI checkmark.

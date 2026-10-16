@@ -1,82 +1,98 @@
-# PropertySchema assets и сохранность Inspector после ревью 5e3f064
+<a id="propertyschema-assets-и-сохранность-inspector-после-ревью-5e3f064"></a>
 
-Работа начата от `5e3f0649d0b67bf41ddae330700385daa164f26c` в ветке `codex/property-defaults-inspector-keys`. Независимые воспроизведения: `outputs/independent-audit/four-p2-5e3f064/`; новые журналы и результаты: `outputs/remaining-authoring-fixes-5e3f064/`. Это продолжение аудита трёх конкретных ошибок, а не новая приёмка всего движка.
+# PropertySchema assets and Inspector preservation after review 5e3f064
 
-## Исходные ошибки и проверка до исправлений
+[English](remaining-authoring-fixes-20261016.md) | [Русский](ru/remaining-authoring-fixes-20261016.md) | [Documentation](README.md)
 
-`red-property-defaults.log`: реальный PNG используется только через `ModuleDescriptor.properties` / `PropertySchema.default`, но usage index возвращает ноль. Защита `ComponentSchema` из предыдущего этапа не покрывала этот другой механизм свойств.
+Work began from `5e3f0649d0b67bf41ddae330700385daa164f26c` on branch `codex/property-defaults-inspector-keys`. Independent reproductions: `outputs/independent-audit/four-p2-5e3f064/`; new logs and results: `outputs/remaining-authoring-fixes-5e3f064/`. This continues an audit of three specific defects, not a new acceptance of the entire engine.
 
-`red-inspector-keys.log`: настоящая egui-кнопка Apply теряет буквальный JSON-ключ `future.key` и смешивает его с вложенным `future → key`. JSON допускает оба одновременно. Зарегистрированный dot-path override не является универсальным адресом произвольных JSON-ключей.
+<a id="исходные-ошибки-и-проверка-до-исправлений"></a>
 
-`red-inspector-inheritance-direct.log`: Apply без правок создаёт local aggregate на экземпляре prefab и мешает последующему наследованию. Его проверяет уже собранный baseline test executable. Первоначальный Cargo-запуск третьего теста попал на временно несовместимые параллельные правки caller API; его compile-error журнал тоже сохранён отдельно и не считается воспроизведением дефекта.
+## Original defects and checks before fixes
 
-## PropertySchema и граница live IDs
+`red-property-defaults.log`: a real PNG is used only through `ModuleDescriptor.properties` / `PropertySchema.default`, but the usage index returns zero. The previous stage's `ComponentSchema` protection did not cover this other property mechanism.
 
-Доступность свойств определяется тем же Core API, что runtime: effective modules, owner, requires_modules, requires_components и legacy attachments конкретного объекта. Затем asset service отдельно проверяет exact owner module pin. Global и Module не требуют объекта; Object и legacy Component разрешаются только для переданного множества реальных live IDs.
+`red-inspector-keys.log`: the real egui Apply button loses the literal JSON key `future.key` and conflates it with nested `future → key`. JSON allows both simultaneously. A registered dot-path override is not a universal address for arbitrary JSON keys.
 
-`AssetWorkspace::with_property_object_ids` передаёт snapshot IDs, а не создаёт мир. Editor берёт его у уже принятого runtime. `Runtime::world_source_matches` сверяет подключённый источник мира, ID, модуль и параметры создания без запуска фабрик. Если автор переключил мир, старые ID не выдаются за ID нового мира. Авторские scene IDs и ключи property store не подменяют runtime IDs.
+`red-inspector-inheritance-direct.log`: Apply without edits creates a local aggregate on a prefab instance and prevents subsequent inheritance. An already built baseline test executable checks it. The initial Cargo run of the third test encountered temporarily incompatible parallel caller-API edits; its compile-error log is also saved separately and is not considered a defect reproduction.
 
-Без известного множества ID потенциально применимые Object/legacy Component asset schemas дают явную ошибку контекста до файловой операции. Global/Module и проекты без таких scoped asset contracts продолжают работать. Библиотечный клиент, который знает реальное множество, должен передать его явно; пустое множество отличается от неизвестного.
+<a id="propertyschema-и-граница-live-ids"></a>
 
-Authored ссылки остаются редактируемыми. Ссылки, пришедшие только из installed default, учитываются отдельно с происхождением. Перенос ссылки-пути, Delete, Replace и Detach отклоняются до commit файлов, проекта, history или trash, если операция потребовала бы менять immutable schema. Stable `asset://ID` допускает Move с сохранением ID. Явный допустимый null подавляет default. Повторная проверка кандидата после Detach предотвращает восстановление удаляемой зависимости из default. Формат проекта, schema pins и installed schemas не изменяются ради операции.
+## PropertySchema and the live-ID boundary
 
-Assets browser получает выбранный backend и тот же ID context, что файловые операции. Контекст участвует в актуальности фонового сканирования: результат другого backend или другого множества ID нельзя принять за текущий.
+Property availability is determined by the same Core API as runtime: effective modules, owner, requires_modules, requires_components and legacy attachments of the specific object. The asset service then separately checks the exact owner module pin. Global and Module require no object; Object and legacy Component are resolved only for the supplied set of actual live IDs.
 
-## Inspector: точные ключи и наследование
+`AssetWorkspace::with_property_object_ids` passes a snapshot of IDs rather than creating a world. Editor takes it from the already accepted runtime. `Runtime::world_source_matches` compares the connected world source, ID, module and creation parameters without launching factories. If the author switched worlds, old IDs are not presented as IDs of the new world. Authored scene IDs and property-store keys do not substitute for runtime IDs.
 
-Внутренний обход JSON различает точный ключ объекта и индекс массива. Буквальный `future.key`, вложенный `future → key`, числовые ключи, пустые строки, `/`, `~`, массивы и null сохраняют исходную структуру. Persisted формат не меняется.
+Without a known ID set, potentially applicable Object/legacy Component asset schemas produce an explicit context error before a file operation. Global/Module and projects without such scoped asset contracts keep working. A library client that knows the real set must pass it explicitly; an empty set differs from an unknown one.
 
-Dot override создаётся только для пути, однозначно представимого существующей грамматикой и принадлежащего нужному компоненту по longest-owner правилу. Если opaque правка требует local storage, переносится полный верхний aggregate с точным исходным ключом и соседними значениями.
+Authored references remain editable. References coming only from an installed default are tracked separately with provenance. Moving a path reference, Delete, Replace and Detach are rejected before committing files, project, history or trash if the operation would require changing an immutable schema. Stable `asset://ID` allows Move while preserving the ID. An explicit allowed null suppresses the default. Candidate revalidation after Detach prevents a removed dependency from being restored by a default. Project format, schema pins and installed schemas are not changed to enable an operation.
 
-Сравнение с эффективным prefab выполняется до обработки конфликта владельцев. Поэтому неизменённый унаследованный `foo.bar` не превращается в local aggregate только из-за отдельно прикреплённого компонента `foo.bar`. Реальная правка opaque поля по-прежнему материализует aggregate; его соседи и отдельный компонент остаются сохранны.
+The Assets browser receives the selected backend and the same ID context as file operations. Context participates in background-scan freshness: a result for a different backend or ID set cannot be accepted as current.
 
-Каждый такой верхний aggregate копируется один раз за Apply. Обход большого opaque массива не копирует весь массив повторно для каждого его элемента.
+<a id="inspector-точные-ключи-и-наследование"></a>
 
-## Проверки и ограничения
+## Inspector: exact keys and inheritance
 
-Проверенный code commit — `fb63b3ddae7cad52532761932855b755c61fb2c7`. Свежие результаты относятся к нему; старые количества тестов не используются. После него изменяются только документация и её source inventory.
+Internal JSON traversal distinguishes an exact object key from an array index. Literal `future.key`, nested `future → key`, numeric keys, empty strings, `/`, `~`, arrays and null retain their original structure. The persisted format is unchanged.
 
-| Проверка | Windows | Ubuntu/WSL2 |
+A dot override is created only for a path unambiguously representable in the existing grammar and belonging to the required component under the longest-owner rule. If an opaque edit requires local storage, the entire top-level aggregate is transferred with its exact original key and neighboring values.
+
+Comparison against the effective prefab happens before owner-conflict handling. An unchanged inherited `foo.bar` therefore does not become a local aggregate merely because a separate `foo.bar` component is attached. A real opaque-field edit still materializes the aggregate; its neighbors and the separate component are preserved.
+
+Each such top-level aggregate is copied once per Apply. Traversing a large opaque array does not copy the whole array again for every element.
+
+<a id="проверки-и-ограничения"></a>
+
+## Checks and limitations
+
+The verified code commit is `fb63b3ddae7cad52532761932855b755c61fb2c7`. Fresh results refer to it; old test counts are not reused. Only documentation and its source inventory change afterward.
+
+| Check | Windows | Ubuntu/WSL2 |
 | --- | --- | --- |
 | Offline locked release workspace/all-targets | 605 passed, 0 failed, 9 ignored | 614 passed, 0 failed, 8 ignored |
-| Отдельно выбранные native parent tests | 7 passed | 6 passed |
+| Separately selected native parent tests | 7 passed | 6 passed |
 | fmt, strict all-targets Clippy, doc-tests, Editor/Player build | exit0 | exit0 |
-| Свежий Full → Player, Full → Team → Player | passed | passed |
-| Перенесённые Player, PATH без Cargo/Rust/DXC | 2 passed | 2 passed |
-| Настоящее окно Editor, 90 stopped + 90 Play samples | WGPU/DX12, passed | WGPU/Vulkan X11 и Wayland, passed |
+| Fresh Full → Player, Full → Team → Player | passed | passed |
+| Relocated Player, PATH without Cargo/Rust/DXC | 2 passed | 2 passed |
+| Real Editor window, 90 stopped + 90 Play samples | WGPU/DX12, passed | WGPU/Vulkan X11 and Wayland, passed |
 | Game-worker: slow Custom, lifecycle, fault latch | passed | passed |
 
-Журналы: `windows-workspace-tests.log`, `linux-workspace-tests.log`, `windows-native-*.log`, `linux-native-*.log`, `windows-integration-*.log`, `linux-integration-*.log`. Сводные результаты: `windows-verification-summary.json`, `linux-verification-summary.json`, `linux-integration-all-summary.json`. Они проверяют собственные immutable snapshots каждого экспорта, hashes всех файлов пакетов, SDK identity и exact contract lock. Ранний экспорт не обязан совпадать с последним shared Cargo executable после последующих сборок; оба сохранённых snapshots проверены отдельно. Full — исходный проект, запущенный собранным Editor; исполняемый Editor поставляется с Team.
+Logs: `windows-workspace-tests.log`, `linux-workspace-tests.log`, `windows-native-*.log`, `linux-native-*.log`, `windows-integration-*.log`, `linux-integration-*.log`. Summary results: `windows-verification-summary.json`, `linux-verification-summary.json`, `linux-integration-all-summary.json`. They verify each export's own immutable snapshots, hashes of all package files, SDK identity and exact contract lock. An early export need not match the latest shared Cargo executable after later builds; both saved snapshots were checked separately. Full is the source project run by the built Editor; the executable Editor is shipped with Team.
 
-Native tests исполняются по фактическим test executable из свежего Cargo JSON, с нормальным loader environment. Stop/reuse на Linux: `root_artifacts_built` 1 → 1 → 1; на Windows 1 → 2 → 2 с явно записанным появлением environment key `=C:` перед Scene. Последующий Stop/Game использует fresh artifact; состояние и worker PID независимы. Три вызова Cargo для freshness proof не означают три root compilation. Windows tool matrix включает 12 вариантов Cargo/Rustc имени/пути и сохранение настоящей ошибки Rust.
+Native tests run using actual test executables from fresh Cargo JSON, with a normal loader environment. Stop/reuse on Linux: `root_artifacts_built` 1 → 1 → 1; on Windows 1 → 2 → 2 with the explicitly recorded appearance of environment key `=C:` before Scene. Subsequent Stop/Game uses a fresh artifact; state and worker PIDs are independent. Three Cargo calls for freshness proof do not mean three root compilations. The Windows tool matrix includes 12 Cargo/Rustc name/path variants and preservation of a real Rust error.
 
-Все три первоначальных дефекта имеют regression tests; Inspector проверяется через реальную egui-кнопку Apply с save/reopen и strict profile/lock validation. PropertySchema tests используют настоящие PNG и файловые операции. Для Object/legacy Component custom Runtime выдаёт ID17/29, отличные от authored Scene1/2; счётчик фабрики подтверждает отсутствие повторного создания мира при сканировании.
+All three original defects have regression tests; Inspector is checked through the real egui Apply button with save/reopen and strict profile/lock validation. PropertySchema tests use real PNGs and file operations. For Object/legacy Component, custom Runtime provides ID17/29, different from authored Scene1/2; a factory counter confirms that scanning does not recreate the world.
 
-Неудачные промежуточные попытки сохранены. Первый focused project run имел 30 passed / 1 failed из-за некорректного fixture: attachment29 не имел доступного свойства. Добавлено независимое Boolean-свойство; gated AssetReference остаётся доступен только object17. Исправленный тест прошёл в обоих полных прогонах. Заметки `windows-verification-attempt-note.json` и `linux-collector-attempt-note.json` описывают исправленные предположения сборщиков отчётов, без изменений продукта. Первоначальные журналы сохранены; итоговые проверки выполнялись заново.
+Failed intermediate attempts are preserved. The first focused project run had 30 passed / 1 failed because of an invalid fixture: attachment29 had no available property. An independent Boolean property was added; the gated AssetReference remains available only to object17. The corrected test passed in both full runs. Notes `windows-verification-attempt-note.json` and `linux-collector-attempt-note.json` describe corrected report-collector assumptions, without product changes. Original logs are preserved; final checks ran afresh.
 
-## Оконные измерения и оставшиеся границы
+<a id="оконные-измерения-и-оставшиеся-границы"></a>
 
-Windows на RTX 4080 SUPER: prewarmed Editor завершился за 18,74 с, p95 обработчика — 2,33/2,59 мс, интервал callback — 7,89/7,46 мс. Focus=false, visibility=null: это не ручная foreground input-to-display проверка.
+## Window measurements and remaining boundaries
 
-Linux — WSLg software Vulkan `llvmpipe (LLVM 20.1.2)`. X11/Wayland завершились за 13,19/22,32 с, оба complete=true, measurements_valid=true, errors=[]. p95 обработчика X11 — 9,18/10,10 мс, callback — 25,55/27,23 мс; Wayland — 10,48/10,58 мс и 107,34/69,27 мс. У X11 focus/visible подтверждены во всех 90 samples каждой фазы; Wayland focus подтверждён, visibility неизвестна. Эти данные не подтверждают 60 FPS.
+Windows on RTX 4080 SUPER: the prewarmed Editor finished in 18.74 s, handler p95 was 2.33/2.59 ms, and callback interval 7.89/7.46 ms. Focus=false, visibility=null: this is not a manual foreground input-to-display check.
 
-Linux fixture явно лишён audio cues только в свежем Full из-за текущего unsupported native WAV. Удалённые cues, SHA capability source и оригинального JSON записаны в `linux-integration-audio-fixture.json`. Авторские данные и scheduled Rust неизменны. Compiler-less Player verify выполняет offscreen960×540 с отключёнными native services; он не проверяет звук, реальное presentation window или пользовательский ввод.
+Linux is WSLg software Vulkan `llvmpipe (LLVM 20.1.2)`. X11/Wayland finished in 13.19/22.32 s, both complete=true, measurements_valid=true, errors=[]. X11 handler p95 was 9.18/10.10 ms, callback 25.55/27.23 ms; Wayland was 10.48/10.58 ms and 107.34/69.27 ms. X11 focus/visible were confirmed in all 90 samples of each phase; Wayland focus was confirmed, visibility unknown. These data do not confirm 60 FPS.
 
-В этот этап не входят cold Editor within45s, строгие Player60FPS, native Linux audio/dialogs, аппаратная Linux-сертификация и ручная foreground input-to-display QA. Их прежний открытый статус не меняется от успешных authoring regression tests.
+The Linux fixture explicitly removes audio cues only in the fresh Full because native WAV is currently unsupported. Removed cues, SHA of the capability source and original JSON are recorded in `linux-integration-audio-fixture.json`. Authored data and scheduled Rust are unchanged. Compiler-less Player verify runs offscreen960×540 with native services disabled; it does not check sound, a real presentation window or user input.
 
-## Сборка и сохранность
+This stage excludes cold Editor within45s, strict Player60FPS, native Linux audio/dialogs, hardware Linux certification and manual foreground input-to-display QA. Their previous open status is unchanged by successful authoring regression tests.
 
-Новая Windows-сборка: `outputs/ModuleEngine-authoring-fixed.exe`, SHA256 `D9DEB3C70D36432D2BD0C9AF39C8D4A910E2ABF2836D832F05E902EFC8AC195C`. Запуск:
+<a id="сборка-и-сохранность"></a>
+
+## Build and preservation
+
+New Windows build: `outputs/ModuleEngine-authoring-fixed.exe`, SHA256 `D9DEB3C70D36432D2BD0C9AF39C8D4A910E2ABF2836D832F05E902EFC8AC195C`. Launch:
 
 ```powershell
 .\outputs\ModuleEngine-authoring-fixed.exe game-project-v4.json
 ```
 
-Прежние `outputs/ModuleEngine.exe` (SHA2477792D…) и `outputs/ModuleEngine-review-fixed.exe` (SHAA5E4F9E8…) сохранены. Девять защищённых файлов и ignored metadata сверены с `stage0-baseline.json`. Авторские проекты, SDK metadata, binding и personal layouts не заменялись. Текущих native-процессов этих проверок после завершения не осталось; сторонние процессы не останавливались.
+Previous `outputs/ModuleEngine.exe` (SHA2477792D…) and `outputs/ModuleEngine-review-fixed.exe` (SHAA5E4F9E8…) are preserved. Nine protected files and ignored metadata were compared against `stage0-baseline.json`. Authored projects, SDK metadata, binding and personal layouts were not replaced. No native processes of these checks remained after completion; unrelated processes were not stopped.
 
-Работа выполнена в одном Git checkout. Full/Team/Player папки — export acceptance fixtures, а не дополнительные development copies; dependency targets используются повторно. ОС, драйверы, security settings, ABI/SDK identity, release profiles, GUI/backend policy, watchdog и IPC limits не менялись. Использованы уже установленные инструменты.
+Work was performed in one Git checkout. Full/Team/Player folders are export acceptance fixtures, not additional development copies; dependency targets are reused. OS, drivers, security settings, ABI/SDK identity, release profiles, GUI/backend policy, watchdog and IPC limits were unchanged. Existing installed tools were used.
 
-Повтор базовых проверок после подключения существующего окружения инструментов:
+Repeat basic checks after loading the existing tool environment:
 
 ```text
 cargo fmt --all -- --check
@@ -86,4 +102,4 @@ cargo test --offline --locked --release --workspace --doc
 cargo build --offline --locked --release -p module-engine-editor -p module-engine-player
 ```
 
-Для native сценариев нужны реальные Rust/Cargo/DXC, Vulkan и выбранная оконная система. Точные executable, команды, hashes и normal-loader environment сохранены в текущих evidence. Документация API: [AssetWorkspace](asset-workspace-api.md).
+Native scenarios need real Rust/Cargo/DXC, Vulkan and the selected window system. Exact executables, commands, hashes and normal-loader environment are saved in the current evidence. API documentation: [AssetWorkspace](asset-workspace-api.md).

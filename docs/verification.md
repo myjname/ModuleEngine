@@ -1,24 +1,30 @@
-# Маршруты проверок
+<a id="маршруты-проверок"></a>
 
-Реестр [scripts/verification.json](../scripts/verification.json) и stdlib launcher
-[scripts/verify.py](../scripts/verify.py) выбирают существующие проверки. Они не
-меняют Rust, Cargo profiles, продуктовые watchdogs или критерии производительности.
-Новый маршрут не заменяет полную приёмку из исторических отчётов.
+# Verification Routes
 
-## Запуск и окружение
+[English](verification.md) | [Русский](ru/verification.md) | [Documentation](README.md)
 
-Новые профили требуют Python 3.9+ без сторонних пакетов и уже настроенную native
-Rust/Cargo toolchain. Ничего не устанавливается и не скачивается. Cargo вызывается
-с `--offline --locked`. Проверку закреплённых инструментов выполняйте существующим
-`scripts/bootstrap.ps1 -Json`; восстановление остаётся отдельной явной операцией.
-В Linux подключите существующий `.tools/linux-x86_64/env.sh` и сверяйте условия в
-[Linux guide](linux-support.md). Launcher наследует toolchain и normal loader
-environment, включая законный DXC `LD_LIBRARY_PATH`; он не настраивает их заново.
-Windows wrapper новых профилей также не подменяет `CARGO_HOME`: если готовый
-offline registry находится в `.work/cargo-home`, до запуска задайте
-`$env:CARGO_HOME = (Resolve-Path .work/cargo-home).Path`. Используйте фактический
-установленный cache; отсутствие пакетов диагностируется Cargo, не исправляется
-загрузкой или очисткой.
+The [scripts/verification.json](../scripts/verification.json) registry and stdlib launcher
+[scripts/verify.py](../scripts/verify.py) select existing checks. They do not
+change Rust, Cargo profiles, product watchdogs, or performance criteria.
+The new route does not replace full acceptance from historical reports.
+
+<a id="запуск-и-окружение"></a>
+
+## Launch and Environment
+
+New profiles require Python 3.9+ without third-party packages and an already configured native
+Rust/Cargo toolchain. Nothing is installed or downloaded. Cargo runs
+with `--offline --locked`. Verify pinned tools using the existing
+`scripts/bootstrap.ps1 -Json`; restoration remains a separate explicit operation.
+On Linux, source the existing `.tools/linux-x86_64/env.sh` and check the conditions in the
+[Linux guide](linux-support.md). The launcher inherits the toolchain and normal loader
+environment, including legitimate DXC `LD_LIBRARY_PATH`; it does not configure them again.
+The Windows wrapper for new profiles also does not replace `CARGO_HOME`: if the ready
+offline registry is in `.work/cargo-home`, before running set
+`$env:CARGO_HOME = (Resolve-Path .work/cargo-home).Path`. Use the actual
+installed cache; Cargo diagnoses missing packages, rather than fixing them
+through downloading or cleanup.
 
 ```powershell
 $python = 'C:\path\to\python.exe'
@@ -27,10 +33,10 @@ $python = 'C:\path\to\python.exe'
 .\verify.ps1 -Profile quick -Python $python
 ```
 
-`-Python` имеет приоритет над `MODULE_ENGINE_VERIFY_PYTHON`. Затем wrapper проверяет
-доступный Python/py. WindowsApps aliases не запускаются; персональный путь Python
-не хранится в репозитории. `-Plan`/`-List` не запускают Cargo/bootstrap и не создают
-run-каталоги. При прямом запуске Python используется тот же CLI:
+`-Python` takes precedence over `MODULE_ENGINE_VERIFY_PYTHON`. The wrapper then checks
+available Python/py. WindowsApps aliases are not launched; a personal Python path
+is not stored in the repository. `-Plan`/`-List` do not run Cargo/bootstrap or create
+run directories. Direct Python execution uses the same CLI:
 
 ```sh
 python3 scripts/verify.py --list
@@ -38,234 +44,252 @@ python3 scripts/verify.py --profile native --plan
 ./verify.sh --profile quick
 ```
 
-`MODULE_ENGINE_VERIFY_PYTHON` может задавать interpreter и для shell wrapper.
-У прямого `verify.py` профиль по умолчанию `quick`; **у старых wrappers без
-аргументов остаётся прежний тяжёлый legacy suite**.
+`MODULE_ENGINE_VERIFY_PYTHON` can also specify the shell wrapper's interpreter.
+Direct `verify.py` defaults to `quick`; **old wrappers without
+arguments retain the previous heavy legacy suite**.
 
-## Профили
+<a id="профили"></a>
 
-| Профиль | Объём | Чего он не подтверждает |
+## Profiles
+
+| Profile | Scope | What it does not confirm |
 | --- | --- | --- |
-| `quick` | `cargo fmt --all -- --check`, все lib tests пакетов `module-engine-core` и `module-engine-project`. | Не workspace, Editor, Vulkan runtime, secondary Custom builds или ignored acceptance. Холодная компиляция всё равно может быть долгой. |
-| `contracts` | Quick плюс `cargo_build::tests::`, четыре Inspector-регрессии, 99 сценариев свойств Inspector, четыре прежних Save As tests и 28 сценариев сохранности workflow. | Не всё UI, native dialogs или полный authoring suite. |
-| `native` | Пять явных ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context и Windows executable spellings. | Не desktop benchmark, screen latency, Full export или строгие 60 FPS. Windows-only test на Linux отмечается `skipped`, а не пройденным. |
-| `native-tools` | Три native linker/cache/executable-spelling проверки из `native`, без GameUI и GPU. | Не полный `native`; на Linux Windows-only test отмечается `skipped`. Используется Windows CI. |
-| `package` | Две ignored проверки `game_package`: native target modes и concurrent immutable snapshots. Они собирают минимальные Cargo fixtures и исполняют их продукты. | **Не реальный Full/Team/Player game export, relocation или полная приёмка поставки.** Эти CLI-проверки остаются адресным/legacy маршрутом. |
+| `quick` | `cargo fmt --all -- --check`, all lib tests of `module-engine-core` and `module-engine-project`. | Not the workspace, Editor, Vulkan runtime, secondary Custom builds, or ignored acceptance. Cold compilation can still be slow. |
+| `contracts` | Quick plus `cargo_build::tests::`, four Inspector regressions, 99 Inspector property scenarios, four previous Save As tests, and 28 workflow preservation scenarios. | Not all UI, native dialogs, or the full authoring suite. |
+| `native` | Five explicit ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context, and Windows executable spellings. | Not desktop benchmark, screen latency, Full export, or strict 60 FPS. A Windows-only test is marked `skipped` on Linux, not passed. |
+| `native-tools` | Three native linker/cache/executable-spelling checks from `native`, without GameUI or GPU. | Not full `native`; a Windows-only test is marked `skipped` on Linux. Used by Windows CI. |
+| `package` | Two ignored `game_package` checks: native target modes and concurrent immutable snapshots. They build minimal Cargo fixtures and execute their products. | **Not a real Full/Team/Player game export, relocation, or full delivery acceptance.** These CLI checks remain a targeted/legacy route. |
 
-Проверки выполняются последовательно. Для Rust tests launcher сначала получает
-`cargo metadata`, затем `cargo test --no-run --message-format=json` для выбранного
-package/target. `contracts` использует обычную test-сборку; `native` и `package` -
-release. Фактический native host задаётся явно через `--target`; чужой явный
-`CARGO_BUILD_TARGET` отклоняется. Target directory берётся из Cargo metadata,
-не собирается предположением `target/debug` или `target/release`.
+Checks run sequentially. For Rust tests, the launcher first obtains
+`cargo metadata`, then `cargo test --no-run --message-format=json` for the selected
+package/target. `contracts` uses a normal test build; `native` and `package` use
+release. The actual native host is explicitly specified through `--target`; a different explicit
+`CARGO_BUILD_TARGET` is rejected. The target directory comes from Cargo metadata,
+not an assumed `target/debug` or `target/release` path.
 
-Прямой test executable выбирается по package ID, canonical manifest, target
-name/kind и `profile.test=true`. Нужны успешный Cargo process, ровно один
-`build-finished.success=true`, один distinct executable, существующий native
-PE/ELF внутри target directory. `fresh=true` допустим. Путь и SHA записываются;
-подмена файла между шагами отклоняется.
+The direct test executable is selected by package ID, canonical manifest, target
+name/kind, and `profile.test=true`. Requirements are a successful Cargo process, exactly one
+`build-finished.success=true`, one distinct executable, and an existing native
+PE/ELF inside the target directory. `fresh=true` is allowed. The path and SHA are recorded;
+file substitution between steps is rejected.
 
-Test binary запускается **напрямую в normal loader environment**, а не через
-`cargo test` или `cargo run`. Для exact tests сначала требуется единственный
-результат `--list --ignored --exact <name>`; ноль тестов никогда не считается
-успехом. После выполнения сверяется libtest summary с найденным набором. Это
-сохраняет важное условие Stop/reuse из [предыдущей проверки loader](postfix-p2-fixes-20261016.md).
+The test binary runs **directly in the normal loader environment**, not through
+`cargo test` or `cargo run`. Exact tests first require a unique
+`--list --ignored --exact <name>` result; zero tests never counts as
+success. After execution, the libtest summary is checked against the discovered set. This
+preserves the important Stop/reuse condition from the [previous loader check](postfix-p2-fixes-20261016.md).
 
 ## CI
 
-[GitHub Actions и обязательный check](ci.md) выполняют `contracts` на Windows и
-Linux и добавляют native/package маршруты для изменений исходников. Перед offline
-проверками CI явно восстанавливает инструменты и locked dependencies. Для
-обязательности merge требуется применённое правило ветки; наличие YAML не является
-доказательством первого успешного hosted запуска или настроенной защиты.
+[GitHub Actions and the required check](ci.md) run `contracts` on Windows and
+Linux and add native/package routes for source changes. Before offline
+checks, CI explicitly restores tools and locked dependencies. Enforcing
+merge requirements needs an applied branch rule; having YAML is not
+proof of a first successful hosted run or configured protection.
 
-## Проверки свойств Inspector
+<a id="проверки-свойств-inspector"></a>
 
-Три `game_ui::tests::inspector_generated_*` в
-[game_ui.rs](../crates/editor/src/game_ui.rs) входят в `contracts` как отдельные
-exact tests. Это конечная воспроизводимая матрица без новой зависимости:
-шесть ключей (`literal.key`, `0`, пустой, `/~`, `a/b`, `a~b`) и восемь payload
-(null, bool, число, строка, пустые object/array, вложенный object и mixed array).
+## Inspector Property Checks
 
-- 48 случаев проверяют, что Apply без редактирования сохраняет authored документ
-  и не переименовывает существующий local opaque member после save/reopen.
-- 48 случаев проверяют отсутствие local delta для унаследованных данных и
-  получение будущих изменений prefab/defaulted fields после save/reopen.
-- Три положительных контроля проверяют настоящий registered edit, сохранение
-  существующего override и намеренную локальную правку opaque aggregate.
+Three `game_ui::tests::inspector_generated_*` tests in
+[game_ui.rs](../crates/editor/src/game_ui.rs) are included in `contracts` as separate
+exact tests. This is a finite reproducible matrix without a new dependency:
+six keys (`literal.key`, `0`, empty, `/~`, `a/b`, `a~b`) and eight payloads
+(null, bool, number, string, empty object/array, nested object, and mixed array).
 
-Используются настоящий egui Apply, production save/read и проверка контрактов
-документа. Ожидания — исходный authored документ и явно заданные последующие
-значения; тесты не воспроизводят алгоритм flatten/merge/ownership. Проверка
-`get(key)` различает присутствующий null и отсутствующий member; inactive unknown
-payload и соседний namespace `foo.bar` должны сохраниться. Положительный edit
-контроль не позволяет принять бездействующий Apply за успешную проверку.
+- 48 cases check that Apply without editing preserves the authored document
+  and does not rename an existing local opaque member after save/reopen.
+- 48 cases check the absence of a local delta for inherited data and
+  receipt of future prefab/defaulted-field changes after save/reopen.
+- Three positive controls check a real registered edit, preservation
+  of an existing override, and an intentional local opaque-aggregate edit.
 
-Матрица не является случайным fuzzing и не доказывает все возможные JSON или
-операции Assets. При новом дефекте добавляйте его минимальный случай и расширяйте
-соответствующее свойство, сохраняя существующие проверки typed references/defaults.
+They use real egui Apply, production save/read, and document-contract
+validation. Expectations are the original authored document and explicitly specified subsequent
+values; tests do not reproduce the flatten/merge/ownership algorithm. The
+`get(key)` check distinguishes present null from an absent member; inactive unknown
+payload and neighboring namespace `foo.bar` must survive. A positive edit
+control prevents accepting a no-op Apply as successful verification.
 
-## Сохранность Save As и файловой истории
+The matrix is not random fuzzing and does not prove all possible JSON or
+Assets operations. For a new defect, add its minimal case and extend
+the corresponding property while retaining existing typed-reference/default checks.
 
-Три exact tests `app::editor_workflow::workflow_tests::preservation_*` в
-[editor_workflow.rs](../crates/editor/src/editor_workflow.rs) используют настоящие
-команды, worker, save/read и файловую историю. Матрица конечная, без fuzzing и
-новых зависимостей:
+<a id="сохранность-save-as-и-файловой-истории"></a>
 
-- 18 случаев: шесть точных ключей/значений и бинарных payload через Cancel,
-  занятый ресурс назначения и успешный Save As. Проверяются исходные байты,
-  dirty JSON, Play/history/Recent, opaque payload, stable asset ID и Engine binding.
-- Четыре случая Rename/Delete × Undo/Redo: отказ публикации JSON обязан откатить
-  файлы и сохранить историю. Единственный допустимый staged recovery JSON
-  сверяется с кандидатом; повтор после восстановления пути обязан пройти.
-- Шесть случаев ветвления истории: Rename → Undo → Delete не позволяет вернуть
-  отброшенную ветку через Redo. Сохраняются стабильные ID, unknown/null payload,
-  бинарные байты, соседний ресурс и исходный binding.
+## Save As and File History Preservation
 
-Ожидания — оригинальный документ, сохранённые bytes/hash и strict reopen,
-а не повторение алгоритма rollback. Успешный Save As служит положительным контролем.
-Четыре существующих `workflow_tests::save_as_*` также входят в `contracts`:
-picker error, same-path publication failure, copy и invalid JSON.
+Three exact tests `app::editor_workflow::workflow_tests::preservation_*` in
+[editor_workflow.rs](../crates/editor/src/editor_workflow.rs) use real
+commands, worker, save/read, and file history. The matrix is finite, without fuzzing or
+new dependencies:
 
-Это не crash/power-loss recovery, все возможные I/O отказы или GUI dialogs.
-Конфликт ресурса проверяет отказ до публикации, не откат её частичного завершения.
-Реальный отказ записи отдельно проверяется в Undo/Redo. На WSL/DrvFS Full fixtures
-медленнее; потолок двух больших матриц — 300 секунд, без изменения product watchdogs.
+- 18 cases: six exact keys/values and binary payloads through Cancel,
+  an occupied destination resource, and successful Save As. They check original bytes,
+  dirty JSON, Play/history/Recent, opaque payload, stable asset ID, and Engine binding.
+- Four Rename/Delete × Undo/Redo cases: JSON publication failure must roll back
+  files and preserve history. The only permitted staged recovery JSON
+  is compared with the candidate; retry after restoring the path must pass.
+- Six history-branching cases: Rename → Undo → Delete prevents returning
+  to the discarded branch through Redo. Stable IDs, unknown/null payload,
+  binary bytes, the neighboring resource, and original binding are preserved.
 
-## Выбор по изменению
+Expectations are the original document, saved bytes/hash, and strict reopen,
+rather than repeating the rollback algorithm. Successful Save As is a positive control.
+Four existing `workflow_tests::save_as_*` tests also belong to `contracts`:
+picker error, same-path publication failure, copy, and invalid JSON.
 
-| Что меняется | Начальный маршрут | Дополнительное доказательство |
+This does not cover crash/power-loss recovery, every possible I/O failure, or GUI dialogs.
+A resource conflict checks rejection before publication, not rollback of partial completion.
+Actual write failure is separately checked in Undo/Redo. On WSL/DrvFS, Full fixtures
+are slower; the limit for the two large matrices is 300 seconds, without changing product watchdogs.
+
+<a id="выбор-по-изменению"></a>
+
+## Selection by Change
+
+| What changes | Initial route | Additional evidence |
 | --- | --- | --- |
-| Только нейтральный Core или Project data/history | `quick` | Адресная регрессия изменённого контракта. |
-| Inspector, schemas/defaults, prefab, authored JSON | `contracts` | Для нового UI-поведения — его отдельный сценарий; четыре прежние регрессии не проверяют все окна. |
-| Save As, Assets и файловая Undo/Redo history | `contracts` | Адресный сценарий нового отказа; bounded матрицы не заменяют остальные export/authoring контракты. |
-| Custom compiler, toolchain, store, lifecycle/slow ticks | `contracts`, затем `native` | Измерения без конкурирующих native/GPU/build операций; desktop/cold-start проверяются отдельно при изменении этих требований. |
-| Выбор Cargo products или Player packaging | `contracts`, затем `package` | Для изменённого export/delivery — отдельная Full/Team/Player приёмка реальной игры. |
+| Only neutral Core or Project data/history | `quick` | Targeted regression for the changed contract. |
+| Inspector, schemas/defaults, prefab, authored JSON | `contracts` | A separate scenario for new UI behavior; four previous regressions do not check every window. |
+| Save As, Assets, and file Undo/Redo history | `contracts` | A targeted scenario for the new failure; bounded matrices do not replace other export/authoring contracts. |
+| Custom compiler, toolchain, store, lifecycle/slow ticks | `contracts`, then `native` | Measurements without competing native/GPU/build operations; desktop/cold-start are checked separately when those requirements change. |
+| Cargo product selection or Player packaging | `contracts`, then `package` | For changed export/delivery, separate Full/Team/Player acceptance of the real game. |
 
-Это начальный набор, а не разрешение пропустить проверку нового поведения. Для
-исправления сначала воспроизведите ошибку; после правки повторите его сценарий
-и затронутые контракты. Повторять весь legacy suite после документационной правки
-или успешного малого тестового изменения без нового основания не требуется.
+This is an initial set, not permission to skip checking new behavior. For a
+fix, reproduce the error first; after editing, repeat that scenario
+and affected contracts. Repeating the entire legacy suite after a documentation edit
+or a successful small test change without a new reason is unnecessary.
 
-## Inventory ignored tests
+<a id="inventory-ignored-tests"></a>
 
-Все девять `#[ignore]` перечислены в реестре с назначением. Семь включены в
-`native`/`package`, два намеренно исключены:
+## Ignored Test Inventory
 
-- `runtime_delivery::tests::emit_stage4_software_inactive_vulkan_fixture` - только
-  подготовка fixture; требует нового абсолютного `MODULE_ENGINE_STAGE4_FIXTURE_PATH`.
-- `compat_tests::audit_slow_custom_catchup_wall_time` - историческая диагностика;
-  не gate нового поведения или производительности.
+All nine `#[ignore]` entries are listed in the registry with their purpose. Seven are included in
+`native`/`package`; two are intentionally excluded:
 
-Registry не даёт произвольного `--step`, который незаметно включал бы emitter.
-Новый ignored test нужно осмысленно добавить в inventory и нужный профиль.
+- `runtime_delivery::tests::emit_stage4_software_inactive_vulkan_fixture` — only
+  fixture preparation; requires a new absolute `MODULE_ENGINE_STAGE4_FIXTURE_PATH`.
+- `compat_tests::audit_slow_custom_catchup_wall_time` — historical diagnostics;
+  not a gate for new behavior or performance.
 
-## Сохранность, сериализация и результат
+The registry does not provide an arbitrary `--step` that could silently enable the emitter.
+A new ignored test must be deliberately added to the inventory and appropriate profile.
 
-Каждый запуск создаёт новый `outputs/verification/<UTC-time>-<nonce>/` с
-`result.json` и отдельными stdout/stderr logs каждой команды. Launcher-owned
-TEMP/TMP/TMPDIR указывают на уникальный короткий `.work/v/<run-token>` только в дочернем
-окружении. Существующие tests могут создавать собственные изолированные fixtures
-в `.work/test-temp` и использовать caches согласно своему контракту. Короткий TEMP
-уменьшает вложенные MSVC object paths; resolved путь обязан оставаться в checkout,
-фактический `temporary_directory` записывается в отчёт. `--output-root` допускается только внутри `outputs`
-этого checkout; существующие отчёты не перезаписываются.
+<a id="сохранность-сериализация-и-результат"></a>
 
-Один OS file lock `work/verification/launcher.lock` сериализует все исполнения
-нового launcher в этом checkout: в том числе shared GPU/native setup и
-конкурирующие build steps. При занятом lock второй запуск завершается с явной
-ошибкой. Lock освобождается ОС при закрытии процесса; stale-файл удалять не нужно.
-Этот lock **не блокирует legacy wrappers, внешние программы или вручную запущенный
-Cargo**. Native/GPU/timing сценарии по-прежнему запускайте без таких конкурентов.
+## Preservation, Serialization, and Result
 
-Перед и после шагов проверяется inventory корневых JSON, `assets`, `game-assets`,
-`.user`, `.history`, `.asset-history`, `.asset-trash`. Новые/изменённые/удалённые
-защищённые файлы означают failure. Launcher не делает reset, очистку или
-автоматический restore пользователя. Это контроль изменения, не filesystem
-sandbox; внешние связанные ресурсы за пределами этих каталогов им не защищаются.
-Сами выбранные tests используют собственные fixtures, не авторский game JSON.
+Each run creates a new `outputs/verification/<UTC-time>-<nonce>/` with
+`result.json` and separate stdout/stderr logs for every command. Launcher-owned
+TEMP/TMP/TMPDIR point to a unique short `.work/v/<run-token>` only in the child
+environment. Existing tests may create their own isolated fixtures
+in `.work/test-temp` and use caches according to their contract. A short TEMP
+reduces nested MSVC object paths; the resolved path must remain within the checkout,
+and the actual `temporary_directory` is recorded in the report. `--output-root` is allowed only inside this checkout's
+`outputs`; existing reports are not overwritten.
 
-Report фиксирует UTC timestamps, profile/scope, SHA реестра/launcher/wrappers, доступный HEAD и
-digest tracked dirty diff, native host/toolchain, команды/cwd/exit codes/timeouts,
-логи, выбранные executable paths/SHA и test names. Если Git недоступен, записывается
-ошибка snapshot; untracked source не входит в dirty diff digest. Защищённый author
-inventory фиксируется отдельно. Это не новая сертификация published EXE.
+One OS file lock, `work/verification/launcher.lock`, serializes all executions
+of the new launcher in this checkout, including shared GPU/native setup and
+competing build steps. If the lock is occupied, a second launch exits with an explicit
+error. The OS releases the lock when the process closes; the stale file need not be deleted.
+This lock **does not block legacy wrappers, external programs, or manually invoked
+Cargo**. Continue running native/GPU/timing scenarios without such competitors.
 
-Статусы `passed`, `failed`, `skipped`, `not_run` различаются. После ошибки следующие
-шаги не выполняются; platform skip содержит причину. Ошибка preflight оставляет
-шаги `not_run`. Ненулевой exit или отсутствующая программа не могут унаследовать
-успех прежнего процесса. На timeout завершается только запущенное launcher дерево
-процесса; результат cleanup записывается. Windows использует `taskkill /PID /T`,
-Linux - собственную process group; это не управление посторонними процессами.
-`--timeout <seconds>` - явный предел каждой команды, включая компиляцию; он не
-меняет watchdog внутри продукта. По умолчанию build timeout 1200 секунд, test
-timeouts указаны в реестре.
+Before and after steps, the inventory of root JSON, `assets`, `game-assets`,
+`.user`, `.history`, `.asset-history`, and `.asset-trash` is checked. New/changed/deleted
+protected files mean failure. The launcher does not reset, clean up, or
+automatically restore user data. This monitors changes; it is not a filesystem
+sandbox, and does not protect external linked resources beyond these directories.
+Selected tests themselves use their own fixtures, not authored game JSON.
 
-## Legacy и performance
+The report records UTC timestamps, profile/scope, SHA of registry/launcher/wrappers, available HEAD and
+a digest of tracked dirty diff, native host/toolchain, commands/cwd/exit codes/timeouts,
+logs, selected executable paths/SHA, and test names. If Git is unavailable, a
+snapshot error is recorded; untracked source is outside the dirty-diff digest. The protected author
+inventory is recorded separately. This is not new certification of a published EXE.
 
-`verify.ps1` и `verify.sh` без аргументов сохраняют прежний объём, порядок и
-настройки. `verify.ps1 -NativeBenchmarks` по-прежнему не требует Python. Исправлен
-только выбор normal release Editor: executable берётся из CargoJSON с проверкой
-identity/unique successful product и native PE вместо ручного пути.
+Statuses `passed`, `failed`, `skipped`, and `not_run` are distinct. After an error, subsequent
+steps do not run; a platform skip contains a reason. A preflight error leaves
+steps `not_run`. A nonzero exit or missing program cannot inherit
+success from a previous process. On timeout, only the process tree started by the launcher
+is terminated; cleanup results are recorded. Windows uses `taskkill /PID /T`,
+Linux its own process group; this does not manage unrelated processes.
+`--timeout <seconds>` is an explicit per-command limit, including compilation; it does not
+change the product's internal watchdog. The default build timeout is 1200 seconds; test
+timeouts are specified in the registry.
 
-Отдельного нового `performance` profile нет. Legacy `-NativeBenchmarks` запускает
-весь прежний suite, затем native Editor/Player benchmarks на выбранном legacy
-проекте; его исторические outputs повторно используются. Этот legacy маршрут не
-получает новые author-file guards, timestamp reports и lock автоматически. Editor
-benchmark требует isolated Full: при создании Editor возможна запись Recent.
-Для строгой приёмки используйте отдельный проверенный Full package/окружение и
-адресные normal executable команды из соответствующего отчёта; не запускайте
-legacy benchmark на единственном авторском проекте.
+<a id="legacy-и-performance"></a>
 
-Один exit 0 legacy script не подтверждает Player `target_met=true`: нужно читать
-`native-frame-report.json`. Сохраняются различия functional completion,
-`measurements_valid`, cold/prewarmed, hardware/software Vulkan и strict cadence.
-Новые native/package profiles также не закрывают открытые цели из
+## Legacy and Performance
+
+`verify.ps1` and `verify.sh` without arguments retain their previous scope, order, and
+settings. `verify.ps1 -NativeBenchmarks` still does not require Python. Only
+normal release Editor selection was fixed: the executable comes from CargoJSON with
+identity/unique successful product and native PE checks rather than a manually constructed path.
+
+There is no new separate `performance` profile. Legacy `-NativeBenchmarks` runs
+the entire previous suite, then native Editor/Player benchmarks on the selected legacy
+project; its historical outputs are reused. This legacy route does not
+automatically gain new author-file guards, timestamp reports, or the lock. Editor
+benchmark requires an isolated Full package: creating Editor may write Recent.
+For strict acceptance, use a separate verified Full package/environment and
+targeted normal executable commands from the relevant report; do not run
+the legacy benchmark on the only authored project.
+
+A single legacy script exit 0 does not confirm Player `target_met=true`: read
+`native-frame-report.json`. The distinctions between functional completion,
+`measurements_valid`, cold/prewarmed, hardware/software Vulkan, and strict cadence remain.
+New native/package profiles also do not complete the open goals from
 [current-status](current-status.md).
 
-## Проверка launcher без Cargo и GPU
+<a id="проверка-launcher-без-cargo-и-gpu"></a>
+
+## Launcher Verification Without Cargo or GPU
 
 ```powershell
 & $python -B -m unittest discover -s scripts -p test_verify.py -v
 ```
 
-Fixtures создаются только в `work/verification-tests`. Тесты используют synthetic
-CargoJSON/PE/ELF, mocked test processes и собственные короткие Python children
-для exit/timeout; Rust/Cargo/native engine не запускаются. Они проверяют profile
-isolation, все девять ignored entries, OS skip, selector failures, zero-test
-rejection, normal environment, lock, отчёт отказа и сохранность author files.
-Это unit проверка launcher; реальные профили должны проходить отдельно на
-целевом Windows/Linux окружении и текущем source snapshot.
+Fixtures are created only in `work/verification-tests`. Tests use synthetic
+CargoJSON/PE/ELF, mocked test processes, and their own short Python children
+for exit/timeout; Rust/Cargo/native engine are not launched. They check profile
+isolation, all nine ignored entries, OS skip, selector failures, zero-test
+rejection, normal environment, lock, failure reporting, and author-file preservation.
+This is unit verification of the launcher; real profiles must pass separately in the
+target Windows/Linux environment on the current source snapshot.
 
-## Проверка внедрения 16 октября 2026
+<a id="проверка-внедрения-16-октября-2026"></a>
 
-Работа выполнена поверх `c64bc34ffd28419cfd851838c16a2a48c9c2fcf8` с сохранением
-исходных пользовательских изменений. Этапы проверялись последовательно:
+## Rollout Verification on 16 October 2026
 
-| Проверка | Результат |
+The work was performed on top of `c64bc34ffd28419cfd851838c16a2a48c9c2fcf8`, preserving
+existing user changes. Stages were checked sequentially:
+
+| Check | Result |
 | --- | --- |
-| Контекст проекта | Уточнены актуальные контракты и открытые цели; проверены ссылки и UTF-8/LF. |
-| Launcher и wrappers | 18 Python unit tests; отдельные dispatch/legacy/shell fixtures и 20 mocked CargoJSON/PE cases. |
-| Windows, этап маршрута | `quick`, `contracts`, `native` (5 tests), `package` (2 tests) прошли. |
-| Linux Ubuntu/WSL, этап маршрута | `quick` прошёл: 102 Core + 59 Project tests. |
-| Windows после новых свойств | `contracts` прошёл: 102 Core + 60 Project + 9 Cargo + 7 Inspector = 178 tests. Три Inspector tests исполнили 99 новых сценариев. |
-| Linux после новых свойств | `contracts` прошёл: 102 Core + 59 Project + 10 Cargo + 7 Inspector = 178 tests, включая ту же матрицу. Набор platform-specific tests отличается от Windows. |
-| Чувствительность к дефекту | Временный возврат dot-path записи вместо точного member дал ожидаемый отказ на `key-0-null`; production-код восстановлен побайтно, затем Windows/Linux contracts прошли. |
-| Пользовательская работа | Все 11 исходно защищённых файлов сохранили SHA-256, включая `game-project-v4.json`, служебные данные и четыре прежних EXE. |
+| Project context | Current contracts and open goals clarified; links and UTF-8/LF checked. |
+| Launcher and wrappers | 18 Python unit tests; separate dispatch/legacy/shell fixtures and 20 mocked CargoJSON/PE cases. |
+| Windows, routing stage | `quick`, `contracts`, `native` (5 tests), and `package` (2 tests) passed. |
+| Linux Ubuntu/WSL, routing stage | `quick` passed: 102 Core + 59 Project tests. |
+| Windows after new properties | `contracts` passed: 102 Core + 60 Project + 9 Cargo + 7 Inspector = 178 tests. Three Inspector tests ran 99 new scenarios. |
+| Linux after new properties | `contracts` passed: 102 Core + 59 Project + 10 Cargo + 7 Inspector = 178 tests, including the same matrix. The platform-specific test set differs from Windows. |
+| Defect sensitivity | Temporarily reverting to dot-path writes instead of exact members produced the expected failure on `key-0-null`; production code was restored byte for byte, then Windows/Linux contracts passed. |
+| User work | All 11 initially protected files retained SHA-256, including `game-project-v4.json`, service data, and four previous EXEs. |
 
-Команды, фактические test executable/SHA и логи лежат в отдельных
-`outputs/verification/<run-id>/result.json`; индексы прогонов и контрольные суммы
-собраны в [результатах внедрения](../outputs/development-rollout-20261016/acceptance.json).
-Rust diff этого этапа добавляет только тесты; Cargo dependencies не менялись.
+Commands, actual test executable/SHA, and logs are in separate
+`outputs/verification/<run-id>/result.json`; run indexes and checksums
+are collected in the [rollout results](../outputs/development-rollout-20261016/acceptance.json).
+The Rust diff of this stage adds tests only; Cargo dependencies did not change.
 
-Первый ручной Windows baseline без настройки TEMP получил отказы доступа;
-повтор с локальным TEMP прошёл. Новые профили используют собственный TEMP.
-Git Bash mock harness также повторён вне ограниченной песочницы после отказа
-MSYS создать служебный объект. Это сохранённые отказы окружения, а не замолчанные
-успехи. В WSL файловые tests на `/mnt/e` заметно медленнее native filesystem;
-их время не является измерением движка.
+The first manual Windows baseline without TEMP setup received access failures;
+a repeat with local TEMP passed. New profiles use their own TEMP.
+The Git Bash mock harness was also repeated outside the restricted sandbox after MSYS
+failed to create a service object. These are preserved environment failures, not silently declared
+successes. In WSL, file tests on `/mnt/e` are noticeably slower than on a native filesystem;
+their duration is not an engine measurement.
 
-Полные legacy suites без аргументов, desktop/performance benchmarks и реальная
-Full/Team/Player delivery acceptance в этом внедрении не повторялись. Linux
-`native`/`package` не прогонялись новым launcher. Открытые cold-start/60 FPS и
-аппаратные Linux цели не закрыты этими проверками.
+Full legacy suites without arguments, desktop/performance benchmarks, and real
+Full/Team/Player delivery acceptance were not repeated in this rollout. Linux
+`native`/`package` were not run by the new launcher. Open cold-start/60 FPS and
+hardware Linux goals are not completed by these checks.

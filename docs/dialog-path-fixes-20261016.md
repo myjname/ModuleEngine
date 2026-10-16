@@ -1,60 +1,76 @@
-# Пути системных диалогов и транзакция Save As
+<a id="пути-системных-диалогов-и-транзакция-save-as"></a>
 
-Работа начата от `f9cff695229e78382e1e0b16177c310c6df0478f` в ветке `codex/dialog-path-hints`. Пользовательские изменения `game-project-v4.json` исключены из исправления. Рабочие данные, раскладки и три прежних EXE проверяются по исходным SHA-256 из `outputs/dialog-path-fixes-f9cff69/stage0-baseline.json`.
+# System dialog paths and the Save As transaction
 
-## Подтверждённые ошибки
+[English](dialog-path-fixes-20261016.md) | [Русский](ru/dialog-path-fixes-20261016.md) | [Documentation](README.md)
 
-1. После New/Save As путь проекта может быть каноническим Windows-путём `\\?\E:\…`. Его родитель, путь с `/` или `.`/`..` передавался напрямую в `SHCreateItemFromParsingName`. Shell возвращал `0x80070057` ещё до открытия окна. Точная исходная реализация из базового коммита воспроизвела это в `baseline-dialog-probe.log`; обычный `E:\ModuleEngine` принимался. Этот probe не открывал модальное окно.
-2. Независимый Codex reviewer обнаружил, что Save As вызывает применение JSON до выбора файла. Отмена уже могла заменить документ, очистить черновик и остановить Play. Новая регрессия на старом поведении действительно упала: `cancel: dispatch applied JSON`, 0 passed / 1 failed (`red-save-as-v2.log`). Первая подготовительная попытка `red-save-as.log` не скомпилировалась и доказательством этой ошибки не является.
+Work began from `f9cff695229e78382e1e0b16177c310c6df0478f` on branch `codex/dialog-path-hints`. User changes to `game-project-v4.json` are excluded from the fix. Working data, layouts and the three previous EXEs are checked against the original SHA-256 hashes in `outputs/dialog-path-fixes-f9cff69/stage0-baseline.json`.
 
-## Принятые границы
+<a id="подтверждённые-ошибки"></a>
 
-Начальная папка применяется только как подсказка Windows Shell. Исходный путь канонизируется без предварительного изменения его семантики; затем допускается обычная форма drive/UNC с проверкой, что она указывает на ту же папку. UTF-16 сохраняется без потерь. Device/volume namespace и имена со значимыми завершающими точками/пробелами не превращаются в другой путь. Недоступная или непредставимая папка, ошибка Shell parser и отказ SetFolder не блокируют выбор другой папки.
+## Confirmed defects
 
-Ошибки создания диалога, обязательных настроек, Show и чтения результата остаются ошибками. Cancel возвращает отсутствие выбранного пути. New, Open, Save As, Export и Import используют общую настройку диалога. Нормализация не применяется к возвращённому пути, Recent, Engine binding или файловому вводу-выводу.
+1. After New/Save As, the project path can be a canonical Windows path, `\\?\E:\…`. Its parent, a path with `/` or `.`/`..` was passed directly to `SHCreateItemFromParsingName`. Shell returned `0x80070057` before opening the window. The exact original implementation from the base commit reproduced this in `baseline-dialog-probe.log`; ordinary `E:\ModuleEngine` was accepted. This probe did not open a modal window.
+2. An independent Codex reviewer found that Save As applies JSON before file selection. Cancellation could already have replaced the document, cleared the draft and stopped Play. The new regression actually failed on the old behavior: `cancel: dispatch applied JSON`, 0 passed / 1 failed (`red-save-as-v2.log`). The first preparatory attempt, `red-save-as.log`, did not compile and is not evidence of this defect.
 
-Save As получает проверенного кандидата без применения к живому редактору. Запись копии публикует JSON, привязку и ресурсы прежним файловым сервисом; только успех переключает документ. Ошибка публикации также оставляет исходную работу открытой. Для того же физического файла сначала сохраняется кандидат, затем применяется; история не заменяется новой историей загрузки. При неудачной замене файла существующий writer может оставить recovery-файл `*.tmp-*` с кандидатом; исходные файлы и состояние редактора при этом остаются прежними.
+<a id="принятые-границы"></a>
 
-Linux сохраняет явную границу отсутствия нативных диалогов. Графический backend редактора не меняется: Windows WGPU/DX12, Linux WGPU/Vulkan через X11 или Wayland. Проверки WSLg характеризуют программный llvmpipe, а не производительность физического Linux GPU.
+## Accepted boundaries
 
-## Проверка
+The initial folder is used only as a Windows Shell hint. The source path is canonicalized without first changing its semantics; an ordinary drive/UNC form is then allowed after verifying that it points to the same folder. UTF-16 is preserved losslessly. Device/volume namespaces and names with significant trailing dots/spaces are not converted into another path. An inaccessible or unrepresentable folder, Shell parser error or SetFolder failure does not prevent choosing another folder.
 
-Исходники исправления: **`0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`**, ветка **`codex/dialog-path-hints`**. Все результаты ниже получены на этой версии трёх изменённых Rust-файлов; их SHA зафиксированы в `frozen-source-v2-hashes.json`. Последующие правки касаются документации и её inventory. Доказательства хранятся отдельно в `outputs/dialog-path-fixes-f9cff69/`; прежние отчёты не считаются результатами новой версии.
+Errors in dialog creation, required settings, Show and result reading remain errors. Cancel returns no selected path. New, Open, Save As, Export and Import use shared dialog configuration. Normalization does not apply to the returned path, Recent, Engine binding or file IO.
 
-| Проверка | Windows | Ubuntu / WSL2 |
+Save As receives a validated candidate without applying it to the live editor. Writing the copy publishes JSON, binding and resources through the existing file service; only success switches the document. Publication failure also leaves the original work open. For the same physical file, the candidate is saved first, then applied; history is not replaced with new load history. If file replacement fails, the existing writer may leave a `*.tmp-*` recovery file with the candidate; original files and editor state remain unchanged.
+
+Linux retains its explicit lack of native dialogs. The editor's graphics backend is unchanged: Windows WGPU/DX12, Linux WGPU/Vulkan through X11 or Wayland. WSLg checks characterize software llvmpipe, not physical Linux GPU performance.
+
+<a id="проверка"></a>
+
+## Verification
+
+Fix sources: **`0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`**, branch **`codex/dialog-path-hints`**. All results below were obtained on this version of the three changed Rust files; their SHAs are recorded in `frozen-source-v2-hashes.json`. Subsequent edits concern documentation and its inventory. Evidence is stored separately in `outputs/dialog-path-fixes-f9cff69/`; previous reports are not treated as results for the new version.
+
+| Check | Windows | Ubuntu / WSL2 |
 | --- | --- | --- |
-| Форматирование | `cargo fmt --all -- --check`: успешно | Те же неизменённые Rust-файлы |
-| Строгий lint Editor, все targets, release | Успешно, `-D warnings` | Успешно, `-D warnings` |
-| Полный набор тестов Editor, все targets, release | **219 passed / 0 failed / 5 ignored** | **216 passed / 0 failed / 5 ignored** |
-| Нативный Play/Stop, общий скомпилированный код и независимые workers | Отдельный ignored-тест: **1 passed** | Отдельный ignored-тест: **1 passed** |
-| Release build Editor | Успешно | Успешно, native x86_64 ELF |
-| Экспорт изолированного Full и проверка ресурсов | Успешно, Puzzle | Успешно, Puzzle |
-| Настоящее окно Editor, Game/Scene, панорамирование графа, Play/Stop | **WGPU / DX12**, RTX 4080 SUPER | **WGPU / Vulkan**, X11 и Wayland, llvmpipe |
+| Formatting | `cargo fmt --all -- --check`: passed | The same unchanged Rust files |
+| Strict Editor lint, all targets, release | Passed, `-D warnings` | Passed, `-D warnings` |
+| Full Editor test suite, all targets, release | **219 passed / 0 failed / 5 ignored** | **216 passed / 0 failed / 5 ignored** |
+| Native Play/Stop, shared compiled code and independent workers | Separate ignored test: **1 passed** | Separate ignored test: **1 passed** |
+| Editor release build | Passed | Passed, native x86_64 ELF |
+| Isolated Full export and resource verification | Passed, Puzzle | Passed, Puzzle |
+| Real Editor window, Game/Scene, graph panning, Play/Stop | **WGPU / DX12**, RTX 4080 SUPER | **WGPU / Vulkan**, X11 and Wayland, llvmpipe |
 
-Все три оконных сценария завершили по 90 измеренных кадров в Stop и Play, подтвердили продвижение симуляции, сохранение исполнителей при панорамировании, корректный Stop, неизменность авторского документа и файла. В `report.json` каждого сценария `complete = true`, `measurements_valid = true`, `errors = []`. Исходный внутренний таймаут 45 секунд и внешний 90 секунд не увеличивались. Это проверка запуска на маленькой Puzzle-сцене, а не новое измерение производительности ARPG с 20 врагами. Сборки и GPU-проверки выполнялись последовательно; использовались существующие инструменты и offline-кеши, без установки ПО или изменения ОС и драйверов.
+All three window scenarios completed 90 measured frames each in Stop and Play, confirmed simulation progress, executor retention during panning, correct Stop, and unchanged authored document and file. Each scenario's `report.json` has `complete = true`, `measurements_valid = true`, `errors = []`. The original internal 45-second and external 90-second timeouts were not increased. This checks startup on a small Puzzle scene, not a new ARPG performance measurement with 20 enemies. Builds and GPU checks ran sequentially; existing tools and offline caches were used without installing software or changing the OS or drivers.
 
-Windows отдельно прошёл 17 workflow-тестов и восемь native-dialog тестов с подробным выводом (`windows-v2-workflow-details.log`, `windows-v2-native-dialogs-details.log`). Проверены русские имена/emoji, `/`, канонический `\\?\` путь, относительный путь, `.`/`..`, все четыре COM factory/configuration, необязательный SetFolder и строгие ошибки обязательных настроек/Show/GetResult. Для существующей папки длиннее 320 UTF-16 code units ShellItem подтвердил физическую идентичность; SetFolder остаётся best-effort.
+Windows separately passed 17 workflow tests and eight native-dialog tests with detailed output (`windows-v2-workflow-details.log`, `windows-v2-native-dialogs-details.log`). Coverage includes Russian names/emoji, `/`, canonical `\\?\` paths, relative paths, `.`/`..`, all four COM factories/configurations, optional SetFolder and strict errors in required settings/Show/GetResult. For an existing folder longer than 320 UTF-16 code units, ShellItem confirmed physical identity; SetFolder remains best-effort.
 
-Регрессии Save As проходят настоящий dispatch и завершение рабочего потока с подставленными исходами picker. Проверяются отмена, ошибка picker, ошибка публикации, ошибка записи в текущий путь, успешная запись в текущий файл с сохранением истории, копия кандидата с ресурсами и Engine binding, неверный JSON и повторный выбор после New → Save As → Recent. В каждом отказе сравниваются документ, точный черновик, история, Play, Recent и SHA всех прежних файлов. Только при ошибке замены текущего файла допускается ровно один recovery-файл существующего writer, с проверкой имени, расположения и содержимого кандидата. Конфликты ресурсов и отсутствие частичной публикации дополнительно проверяются полным набором `workspace_files`.
+Save As regressions run real dispatch and workflow completion with substituted picker outcomes. They check cancellation, picker error, publication failure, write failure at the current path, successful write to the current file with history preserved, candidate copying with resources and Engine binding, invalid JSON and repeat selection after New → Save As → Recent. Each failure compares the document, exact draft, history, Play, Recent and SHA of every previous file. Only failure to replace the current file permits exactly one recovery file from the existing writer, with its name, location and candidate contents checked. Resource conflicts and absence of partial publication are additionally checked by the full `workspace_files` suite.
 
-Нативные ignored-тесты запускались напрямую из продуктов, сообщённых Cargo JSON, после проверки PE/ELF и SHA. Linux-тест выполнялся с обычным `LD_LIBRARY_PATH` для DXC, без окружения Cargo test runner. JSON с путями и SHA тестовых исполняемых файлов сохранён рядом с логами.
+Native ignored tests ran directly from products reported by Cargo JSON after PE/ELF and SHA checks. The Linux test ran with ordinary `LD_LIBRARY_PATH` for DXC, without the Cargo test-runner environment. JSON with test-executable paths and SHAs is saved beside the logs.
 
-Первый полный Windows-прогон сохранил **216 passed / 3 failed / 5 ignored**: два новых fixture использовали отклоняемый сервисом путь с `..`, третья проверка не учитывала предусмотренный recovery-файл. Исправлены только fixture/assertions, после чего полный повторный прогон прошёл. Независимый reviewer подтвердил, что проверки исходных файлов и состояния не ослаблены. Первый оконный smoke остановился при создании junction из-за ограничений песочницы; после создания junction только в принадлежащем проверке Full-проекте продолжен через `-Resume`. Это сбой подготовки проверки, а не результат запуска окна. Старые логи сохранены.
+The first full Windows run retained **216 passed / 3 failed / 5 ignored**: two new fixtures used a path containing `..` rejected by the service, and the third check did not account for the intended recovery file. Only fixtures/assertions were fixed, after which the full rerun passed. The independent reviewer confirmed that source-file and state checks were not weakened. The first window smoke stopped during junction creation because of sandbox restrictions; after creating the junction only in the Full project owned by the check, it continued through `-Resume`. This was a verification-setup failure, not a window-launch result. Old logs are preserved.
 
-## Независимое Codex review
+<a id="независимое-codex-review"></a>
 
-Отдельный reviewer обнаружил преждевременное применение JSON в Save As до реализации исправления. После исправления он повторно проверил production diff и затем изменения тестов: новых подтверждённых ошибок не найдено. Reviewer не редактировал реализацию и не запускал Cargo/UI; приведённые выше прогоны выполнены основным агентом. Краткая запись находится в `independent-codex-review.txt`.
+## Independent Codex review
 
-## Готовая сборка и сохранность данных
+A separate reviewer discovered premature JSON application in Save As before the fix was implemented. After the fix, they rechecked the production diff and then test changes: no new confirmed defects were found. The reviewer did not edit the implementation or run Cargo/UI; the runs above were performed by the primary agent. A brief record is in `independent-codex-review.txt`.
 
-Новый файл: **`outputs/ModuleEngine-dialogs-fixed.exe`**, 32 026 112 байт.
+<a id="готовая-сборка-и-сохранность-данных"></a>
+
+## Ready build and data preservation
+
+New file: **`outputs/ModuleEngine-dialogs-fixed.exe`**, 32 026 112 bytes.
 
 SHA-256: **`472B6E8494F1C82734E63497A69EB2D687CF0B2D90D3BBC6751BAAB79091547D`**.
 
-Рядом сохранены `ModuleEngine-dialogs-fixed.exe.sha256` и `ModuleEngine-dialogs-fixed.code-commit.txt`; подробности происхождения — в `windows-delivery-artifact.json`. EXE совпадает по SHA с проверенным release-продуктом Cargo. `ModuleEngine.exe`, `ModuleEngine-review-fixed.exe` и `ModuleEngine-authoring-fixed.exe` сохранены.
+`ModuleEngine-dialogs-fixed.exe.sha256` and `ModuleEngine-dialogs-fixed.code-commit.txt` are saved beside it; provenance details are in `windows-delivery-artifact.json`. The EXE's SHA matches the verified Cargo release product. `ModuleEngine.exe`, `ModuleEngine-review-fixed.exe` and `ModuleEngine-authoring-fixed.exe` are preserved.
 
-Пользовательский `game-project-v4.json` сохранён с исходным SHA **`16E272712A31164CEC081E37B3327274AC2282CAF10CEE1BDDF410E0C531B34D`** и не включён в коммиты. Исходные проекты, Engine binding, обе раскладки Full, Recent, SDK и три старых EXE сверяются с `stage0-baseline.json`. Итоговые SHA, HEAD, ветка и статус Git сохраняются в `final-state.json`; ожидаемое оставшееся изменение — только пользовательский `game-project-v4.json`.
+The user `game-project-v4.json` is preserved with its original SHA **`16E272712A31164CEC081E37B3327274AC2282CAF10CEE1BDDF410E0C531B34D`** and excluded from commits. Original projects, Engine binding, both Full layouts, Recent, SDK and three old EXEs are compared against `stage0-baseline.json`. Final SHAs, HEAD, branch and Git status are saved in `final-state.json`; the only expected remaining change is the user's `game-project-v4.json`.
 
-## Пределы проверки
+<a id="пределы-проверки"></a>
 
-Реальные COM factory/configuration не означают ручную проверку интерактивного Show, выбора файла и overwrite prompt. Show/Cancel/error flow проверен через управляемый COM-объект; декодирование результата использует настоящий ShellItem. Доступный сетевой UNC-ресурс не проверен: тесты покрывают преобразование строк и безопасный отказ непредставимых namespace без обращения к сети. Linux-окна проверены через WSLg и программный llvmpipe; работа на физическом Linux GPU не подтверждена этим прогоном. На Linux нативные file/folder dialogs по-прежнему явно недоступны, что проверяется отдельным тестом всех четырёх публичных picker API.
+## Verification limits
+
+Real COM factories/configuration do not mean manual verification of interactive Show, file selection and overwrite prompts. Show/Cancel/error flow was checked through a controlled COM object; result decoding uses a real ShellItem. An accessible network UNC resource was not checked: tests cover string conversion and safe rejection of unrepresentable namespaces without network access. Linux windows were checked through WSLg and software llvmpipe; this run does not confirm operation on a physical Linux GPU. Native file/folder dialogs remain explicitly unavailable on Linux, checked by a separate test of all four public picker APIs.

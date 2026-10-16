@@ -1,10 +1,16 @@
-# Ассеты: идентичность, ссылки и файловые операции
+<a id="ассеты-идентичность-ссылки-и-файловые-операции"></a>
 
-Этот документ описывает контракт `module-engine-project::AssetWorkspace`, а не устройство конкретной панели. Проводник передаёт сервису авторский `GraphDocument` и папку открытого JSON; сервис возвращает обновлённый документ вместе с записью файловой операции. Запись нужна редактору для согласованной отмены: вернуть только JSON после переименования файла недостаточно.
+# Assets: Identity, References, and File Operations
 
-## Постоянные ID и совместимость
+[English](asset-workspace-api.md) | [Русский](ru/asset-workspace-api.md) | [Documentation](README.md)
 
-Индекс продолжает использовать существующий `asset_manifest` версии 1:
+This document describes the `module-engine-project::AssetWorkspace` contract, rather than a particular panel's design. The browser passes the authored `GraphDocument` and open JSON directory to the service; the service returns an updated document with a file-operation record. The editor needs the record for consistent undo: returning only JSON after renaming a file is insufficient.
+
+<a id="постоянные-id-и-совместимость"></a>
+
+## Persistent IDs and Compatibility
+
+The index continues to use the existing version 1 `asset_manifest`:
 
 ```json
 {
@@ -19,13 +25,13 @@
 }
 ```
 
-Новая ссылка на ресурс — `asset://a-example`. ID создаётся один раз при регистрации файла; перенос или изменение содержимого его не меняют. Хеш описывает текущие байты, путь — текущее расположение. Это разные обязанности: хеш не используется как идентичность ассета.
+A new resource reference is `asset://a-example`. The ID is created once when the file is registered; moving it or changing its contents does not change the ID. The hash describes current bytes, and the path describes the current location. These are different responsibilities: the hash is not used as asset identity.
 
-Старые ссылки `assets/models/crystal.glb` сохраняют поддержку. При переносе обновляются только поля `AssetReference`, подтверждённые активным установленным контрактом и сохранёнными pins, и явные встроенные resource contracts (mesh, material, audio cues). Это распространяется на сцены, шаблоны, индивидуальные overrides и активные property stores, включая вложенные объекты и массивы. Имена пользовательских полей `id` или `module` не исключаются: смысл задаёт тип поля. При замене удаляемого ресурса ссылку можно перевести на ID замены.
+Old `assets/models/crystal.glb` references remain supported. Moving updates only `AssetReference` fields confirmed by the active installed contract and saved pins, and explicit built-in resource contracts (mesh, material, audio cues). This applies to scenes, templates, individual overrides, and active property stores, including nested objects and arrays. User fields named `id` or `module` are not excluded: the field type defines meaning. When replacing a deleted resource, the reference can be converted to the replacement ID.
 
-Обычный `Text`, исходники программ и неизвестные, неактивные либо несовместимые архивные данные не переписываются по совпадению строки с путём. `properties.inactive` сохраняется целиком. Точное совпадение в непрозрачных данных возвращается в `AssetOperation.diagnostics`; редактор показывает предупреждение и полный отчёт. Перед повторным включением такого контракта автор проверяет эти данные явно. Это не обещание автоматически исправить произвольные пути, вычисляемые кодом.
+Ordinary `Text`, program sources, and unknown, inactive, or incompatible archived data are not rewritten merely because a string matches a path. `properties.inactive` is preserved in full. An exact match in opaque data is returned in `AssetOperation.diagnostics`; the editor displays a warning and full report. Before reenabling such a contract, the author explicitly checks this data. This is not a promise to automatically repair arbitrary paths computed by code.
 
-API разрешения:
+Resolution API:
 
 ```rust
 let manifest = AssetManifest::from_value(&document.asset_manifest)?;
@@ -35,9 +41,9 @@ content_library.set_asset_paths(paths.clone());
 script_context.asset_paths = paths;
 ```
 
-`ContentLibrary` разрешает ID перед чтением модели или самостоятельной текстуры. Неизвестный ID даёт ошибку. Изменение таблицы путей сбрасывает кеш декодированных ресурсов; установка неизменённой таблицы его сохраняет. После изменения самих байтов по прежнему пути вызывается `invalidate()`.
+`ContentLibrary` resolves IDs before reading a model or standalone texture. An unknown ID produces an error. Changing the path table clears the decoded-resource cache; setting an unchanged table preserves it. After changing bytes at the same path, call `invalidate()`.
 
-В Rust Custom путь получается через контекст:
+Rust Custom obtains a path through the context:
 
 ```rust
 fn read_asset(ctx: &ScriptContext) -> Result<Vec<u8>, String> {
@@ -54,52 +60,58 @@ fn update(ctx: &mut ScriptContext) {
 }
 ```
 
-`update` возвращает `()`, поэтому обработка `Result` остаётся в helper и `match`. Пример показывает разрешение ID и чтение; в игре ресурс следует загружать при инициализации и кешировать, а не читать заново каждый кадр. `asset_path` также принимает `asset://a-example`. Путь относительно папки игры, которая является рабочей директорией worker. Поле `ScriptContext.asset_paths` имеет `serde(default)`: старый пакет остаётся читаемым и получает пустую таблицу.
+`update` returns `()`, so `Result` handling remains in the helper and `match`. The example shows ID resolution and reading; in a game, load and cache the resource during initialization rather than reading it again every frame. `asset_path` also accepts `asset://a-example`. The path is relative to the game directory, which is the worker's working directory. The `ScriptContext.asset_paths` field has `serde(default)`: an old packet remains readable and receives an empty table.
 
-## Область владения и каталог
+<a id="область-владения-и-каталог"></a>
 
-`AssetWorkspace::new(root, protected_relative_paths)` канонизирует корень проекта. Каталог сканирует `assets/` и дополнительные файлы, уже объявленные в манифесте. Внешние зависимости моделей и HLSL включаются в индекс. Защищённые файлы/папки исключаются из проводника; операции не могут изменить их или переписать зависимость внутри защищённого backend. При общей папке игры и установленного Engine редактор передаёт, например, `assets/gpu` как защищённую область.
+## Ownership Scope and Catalog
 
-По умолчанию preflight проверяет структуру сцен. Host передаёт `workspace.with_composition(composition)` для определения типов и активности ссылок, а `with_validator(|document| ...)` проверяет кандидат до записи snapshots, корзины и изменяемых файлов. Типы нельзя восстановить из validator callback. Без composition доступны только явные встроенные render contracts; source components остаются непрозрачными. Replay истории возвращает уже записанные границы документов и файлов.
+`AssetWorkspace::new(root, protected_relative_paths)` canonicalizes the project root. The catalog scans `assets/` and additional files already declared in the manifest. External model and HLSL dependencies are included in the index. Protected files/directories are excluded from the browser; operations cannot change them or rewrite a dependency inside a protected backend. When the game and installed Engine share a directory, the editor passes, for example, `assets/gpu` as a protected area.
 
-Значения `AssetReference`, полученные только из installed defaults, тоже входят в usages с указанием источника. Это относится к `ComponentSchema` и к `ModuleDescriptor.properties` / `PropertySchema` всех четырёх scope. Если Move/Delete/Replace/Detach потребовал бы изменить immutable default, операция отклоняется до записи файлов и журнала. Stable `asset://ID` допускает Move с прежним ID. Явный допустимый null подавляет default; Detach не может незаметно вернуть зависимость через default.
+By default, preflight checks scene structure. The host passes `workspace.with_composition(composition)` to determine reference types and activity, while `with_validator(|document| ...)` validates the candidate before snapshots, trash, and modified files are written. Types cannot be reconstructed from the validator callback. Without composition, only explicit built-in render contracts are available; source components remain opaque. History replay returns previously recorded document and file boundaries.
 
-Для Object и legacy Component свойств host дополнительно передаёт `with_property_object_ids(live_ids)`: это реальные ID принятого graph Runtime, а не ID авторской Game-сцены и не ключи property store. Сам сервис не запускает фабрики мира ради сканирования. Пустое множество означает отсутствие live объектов; отсутствие snapshot при потенциально применимых scoped asset contracts даёт ошибку контекста. Editor проверяет соответствие текущего world source принятому runtime и передаёт один и тот же snapshot каталогу и файловой операции. Backend и snapshot участвуют в проверке актуальности фонового каталога.
+`AssetReference` values obtained only from installed defaults are also included in usages with their source identified. This applies to `ComponentSchema` and to `ModuleDescriptor.properties` / `PropertySchema` of all four scopes. If Move/Delete/Replace/Detach would require changing an immutable default, the operation is rejected before files and the log are written. A stable `asset://ID` allows Move with the same ID. An explicitly permitted null suppresses the default; Detach cannot silently reintroduce a dependency through a default.
 
-Результат `synchronize(&mut document)` — `Vec<AssetInfo>`: ID, путь, тип, размер, признак отсутствующего файла, ID зависимостей и диагностическое сообщение. Неподдерживаемый или повреждённый файл остаётся видимым с диагностикой. Неизвестные расширения отображаются как `Other`; сервис не обещает декодировать их содержимое.
+For Object and legacy Component properties, the host also passes `with_property_object_ids(live_ids)`: these are the actual IDs of the accepted graph Runtime, not authored Game-scene IDs or property-store keys. The service itself does not run world factories for scanning. An empty set means there are no live objects; a missing snapshot with potentially applicable scoped asset contracts produces a context error. Editor checks that the current world source matches the accepted runtime and passes the same snapshot to the catalog and file operation. Backend and snapshot participate in background catalog freshness validation.
 
-Сканирование вычисляет хеши и читает зависимости. Поэтому его запускают при открытии, импорте, явном обновлении и файловых операциях; это не работа для каждого кадра Scene или шага перетаскивания объекта. Движение объекта меняет трансформацию и не требует повторного импорта или сканирования ресурсов.
+The result of `synchronize(&mut document)` is `Vec<AssetInfo>`: ID, path, type, size, missing-file flag, dependency IDs, and a diagnostic message. Unsupported or damaged files remain visible with diagnostics. Unknown extensions are shown as `Other`; the service does not promise to decode their contents.
 
-UI выполняет `synchronize` в рабочем потоке и принимает только результат для актуального индекса. Для отображения использований всех файлов предусмотрен `usages_batch(document)`: он возвращает таблицу ID → список `AssetUsage` и сериализует документ один раз. `usages(document, id)` остаётся удобным одиночным запросом; вызывать его в цикле по плиткам не следует.
+Scanning computes hashes and reads dependencies. It therefore runs on opening, import, explicit refresh, and file operations; it is not work for every Scene frame or object-drag step. Moving an object changes its transform and does not require reimporting or rescanning resources.
 
-Внутри `assets/` сканер пропускает директории с зарезервированным префиксом `.module-engine-game-export-`: это ещё не опубликованные пакеты Player, которые могут исчезнуть до завершения сканирования. Обычные пользовательские и скрытые папки продолжают индексироваться.
+The UI performs `synchronize` in a worker thread and accepts only results for the current index. `usages_batch(document)` is provided to display usages of all files: it returns an ID → `AssetUsage` list table and serializes the document once. `usages(document, id)` remains a convenient single query; do not call it in a loop over tiles.
 
-Пути нормализуются к `/`. Абсолютные пути, выход за корень, внешние symlink/junction и циклы/повторные aliases каталогов отклоняются. Назначение файлового переноса должно быть внутри `assets/`, не в защищённой области, и ещё не существовать. Переименование только регистра букв отдельно не поддерживается.
+Inside `assets/`, the scanner skips directories with the reserved `.module-engine-game-export-` prefix: these are unpublished Player packages that may disappear before scanning finishes. Ordinary user and hidden directories continue to be indexed.
 
-## Операции и зависимости
+Paths normalize to `/`. Absolute paths, escaping the root, external symlinks/junctions, and directory cycles/repeated aliases are rejected. A file-move destination must be inside `assets/`, outside protected areas, and not yet exist. Case-only renaming is not separately supported.
 
-| Метод | Результат |
+<a id="операции-и-зависимости"></a>
+
+## Operations and Dependencies
+
+| Method | Result |
 | --- | --- |
-| `move_asset(document, id, destination)` | Переносит или переименовывает один файл, сохраняет ID, обновляет ссылки и относительные зависимости. |
-| `delete_asset(document, id, RefuseUsed)` | Удаляет только неиспользуемый ресурс; при использовании сообщает места ссылок. |
-| `delete_asset(document, id, Detach)` | Явно удаляет структурные ссылки, сохраняя объекты; исходник помещается в корзину. |
-| `delete_asset(document, id, ReplaceWith(other_id))` | Заменяет ссылки ресурсом того же вида и удаляет исходник в корзину. |
-| `create_folder(document, path)` | Создаёт одну папку внутри существующей папки ассетов; первый вызов может создать и корневую `assets/`. |
-| `adopt_import(document, fresh_paths)` | Регистрирует только новые файлы уникального импорта, включая зависимости, и создаёт запись для Undo/Redo. |
-| `usages(document, id)` | Возвращает места структурных ссылок, использования в моделях/HLSL и доступных inline includes. |
-| `list_deleted()` / `restore_deleted(document, trash_id)` | Показывает корзину и восстанавливает файл с прежним ID. |
+| `move_asset(document, id, destination)` | Moves or renames one file, preserves its ID, updates references and relative dependencies. |
+| `delete_asset(document, id, RefuseUsed)` | Deletes only an unused resource; reports reference locations if used. |
+| `delete_asset(document, id, Detach)` | Explicitly removes structural references while preserving objects; puts the source in trash. |
+| `delete_asset(document, id, ReplaceWith(other_id))` | Replaces references with a resource of the same kind and moves the source to trash. |
+| `create_folder(document, path)` | Creates one directory inside an existing asset directory; the first call can also create the `assets/` root. |
+| `adopt_import(document, fresh_paths)` | Registers only new files of a unique import, including dependencies, and creates an Undo/Redo record. |
+| `usages(document, id)` | Returns structural-reference locations, usages in models/HLSL, and available inline includes. |
+| `list_deleted()` / `restore_deleted(document, trash_id)` | Lists trash and restores a file with its previous ID. |
 
-glTF/GLB: переписываются literal URI буферов и изображений. При переносе самой модели относительные URI пересчитываются от новой папки; перенос зависимости обновляет ссылающиеся модели. GLB пересобирает JSON chunk с выравниванием и новым размером, сохраняя остальные binary chunks. Embedded `data:` не создаёт файловую зависимость. Percent escapes разбираются до проверки владения, а обновлённый URI корректно кодируется.
+glTF/GLB: literal buffer and image URIs are rewritten. Moving the model itself recalculates relative URIs from the new directory; moving a dependency updates referring models. GLB rebuilds its JSON chunk with alignment and a new size, preserving other binary chunks. Embedded `data:` does not create a file dependency. Percent escapes are parsed before ownership validation, and the updated URI is encoded correctly.
 
-HLSL: переписываются буквальные `#include "..."` и `<...>`, с сохранением остальной строки. Include, зависящий от macro, отклоняется до файловых изменений. Для `"..."` поиск начинается от папки файла, затем проверяет `assets/gpu` и корень; для `<...>` — только `assets/gpu` и корень. Inline shader source использует последние две области. Inline source может зависеть от отдельно установленного backend: недоступный в папке игры include не объявляется принадлежащим игре.
+HLSL: literal `#include "..."` and `<...>` are rewritten while preserving the rest of the line. Macro-dependent includes are rejected before file changes. For `"..."`, search starts in the file's directory, then checks `assets/gpu` and the root; for `<...>`, only `assets/gpu` and the root. Inline shader source uses the latter two areas. Inline source can depend on a separately installed backend: an include unavailable in the game directory is not declared game-owned.
 
-Поддержка перемещения не распространяется на неизвестные glTF extensions, удалённые URI, динамический выбор include или произвольные форматы зависимостей. Сервис сообщает ошибку до изменения файлов. Detach для ресурса, который нужен внутри модели или шейдера, запрещён: удаление URI/buffer/include испортило бы файл. В таком случае нужна совместимая замена либо предварительное удаление использующего ресурса.
+Move support does not extend to unknown glTF extensions, remote URIs, dynamic include selection, or arbitrary dependency formats. The service reports an error before changing files. Detach is prohibited for a resource needed inside a model or shader: deleting a URI/buffer/include would damage the file. A compatible replacement or prior removal of the consuming resource is required instead.
 
-Произвольный Rust нельзя надёжно переписать по поиску строки. Если Custom содержит буквальный старый путь или вычисляемый файловый доступ без `asset_path`, перенос/удаление отклоняется с указанием Custom. Смешанный код, который использует API ID и одновременно строит другие пути вручную, всё равно требует авторской проверки: наличие helper не превращает Rust в полностью анализируемое описание зависимостей. Сам текст программ сервис не изменяет.
+Arbitrary Rust cannot be reliably rewritten through string search. If Custom contains a literal old path or computed file access without `asset_path`, moving/deleting is rejected with Custom identified. Mixed code that uses the ID API while also constructing other paths manually still requires author review: a helper's presence does not turn Rust into a fully analyzable dependency description. The service does not modify program text itself.
 
-## Документ, файлы и Undo/Redo
+<a id="документ-файлы-и-undoredo"></a>
 
-Каждая файловая операция возвращает:
+## Document, Files, and Undo/Redo
+
+Each file operation returns:
 
 ```rust
 AssetOperation {
@@ -108,25 +120,29 @@ AssetOperation {
 }
 ```
 
-Запись хранит точные документы до/после, список изменённых путей, хеши файловых снимков и созданные папки. Снимки и описание операции находятся под `.asset-history/<operation-id>/`. Сервис проверяет пути и все изменения заранее, записывает резервные байты, применяет файлы и при ошибке восстанавливает уже затронутые пути. Если откат тоже не удался, ошибка прямо содержит сведения об этом; такое состояние нельзя объявлять успешным.
+The record stores exact before/after documents, a list of changed paths, file-snapshot hashes, and created directories. Snapshots and the operation description live under `.asset-history/<operation-id>/`. The service checks paths and all changes in advance, writes backup bytes, applies files, and restores already affected paths on error. If rollback also fails, the error explicitly contains that information; this state cannot be declared successful.
 
-Редактор привязывает `record` к одной границе общей истории. На Undo вызывается `record.undo(root, current_document)`, на Redo — `record.redo(...)`. Они проверяют соответствующий документ и реальные хеши файлов перед применением. Если файл изменён вне редактора, операция отклоняется вместо перезаписи сторонней правки. Восстановленный документ после успешного проигрывания сохраняется тем же редактором.
+The editor binds `record` to one shared-history boundary. Undo calls `record.undo(root, current_document)`; Redo calls `record.redo(...)`. They check the corresponding document and actual file hashes before application. If a file changed outside the editor, the operation is rejected rather than overwriting the external edit. After successful replay, the restored document is saved by the same editor.
 
-Создание папки не меняет JSON: её `before == after`. Поэтому обычный `SnapshotHistory::record`, который отбрасывает одинаковые документы, не подходит для такой границы. Общая история должна явно сохранять файловую запись даже при одинаковом JSON. Импорт удаляет/возвращает свои файлы, но не удаляет рекурсивно оставшиеся пустые каталоги импорта.
+Directory creation does not change JSON: its `before == after`. Ordinary `SnapshotHistory::record`, which discards equal documents, is therefore unsuitable for such a boundary. Shared history must explicitly retain a file record even with identical JSON. Import removes/restores its files but does not recursively remove remaining empty import directories.
 
-Сервис сам не сохраняет открытый игровой JSON и не управляет вопросом о несохранённых изменениях. Редактор сначала завершает сохранение текущего проекта, затем вызывает операцию и сохраняет новый документ. Если второе сохранение не удалось, он использует запись для отката файлов. Записи на диске позволяют установить, что изменилось, и восстановить байты; автоматическое восстановление после аварийного завершения посреди общего файлового/JSON-сохранения этим API не объявляется реализованным.
+The service itself does not save the open game JSON or manage the unsaved-changes prompt. The editor first finishes saving the current project, then invokes the operation and saves the new document. If the second save fails, it uses the record to roll back files. On-disk records make it possible to establish what changed and restore bytes; this API does not claim to implement automatic recovery after a crash midway through a combined file/JSON save.
 
-При замене файла сначала записывается и сбрасывается временный файл, затем он заменяет исходную запись каталога через rename. Предварительного удаления исходника нет. Если принятие свежего импорта не смогло записать снимки или `record.json`, удаляется только созданный этой попыткой маркированный журнал; вызывающий workflow отдельно удаляет свою новую папку импорта. Журналы обычных файловых операций при неудаче отката сохраняются для восстановления.
+File replacement first writes and flushes a temporary file, then replaces the original directory entry through rename. The source is not deleted in advance. If adopting a fresh import cannot write snapshots or `record.json`, only the marked log created by that attempt is removed; the calling workflow separately removes its new import directory. Logs of ordinary file operations are preserved for recovery if rollback fails.
 
-## Корзина
+<a id="корзина"></a>
 
-При удалении оригинал дополнительно сохраняется в `.asset-trash/<operation-id>/files/<old-path>` вместе с `record.json`. Восстановление через корзину возвращает файл и постоянный ID, не отменяя более поздние авторские решения о ссылках. Полный Undo удаления возвращает и исходные ссылки. Занятый путь/ID или отсутствующая необходимая зависимость блокируют восстановление.
+## Trash
 
-Корзина и файловая история расположены вне `assets/` и не попадают в обычный каталог ресурсов. Восстановление не использует рекурсивное удаление папок и не заменяет существующие пользовательские файлы.
+On deletion, the original is additionally preserved in `.asset-trash/<operation-id>/files/<old-path>` with `record.json`. Restoring through trash returns the file and persistent ID without undoing later authored reference decisions. Full Undo of deletion restores original references as well. An occupied path/ID or missing required dependency blocks restoration.
 
-## Проверки контракта
+Trash and file history are outside `assets/` and do not appear in the ordinary resource catalog. Restoration does not use recursive directory deletion or replace existing user files.
 
-Тесты `asset_workspace` проверяют сохранение ID при изменении байтов, защищённые и отсутствующие ресурсы, перенос glTF с внешними файлами, GLB binary chunks, URI/include зависимости, шаблоны и архивированные ссылки, замену ресурса, detach, корзину, файловый Undo/Redo, импорт, создание первой папки и отказ при сторонней правке. Отдельная Windows-проверка вызывает ошибку записи через read-only зависимость и проверяет восстановление оригиналов. `engine-content` проверяет загрузку через ID и сброс устаревших путей кеша; `engine-core` — совместимость сериализованного контекста и helper.
+<a id="проверки-контракта"></a>
+
+## Contract Checks
+
+`asset_workspace` tests check ID preservation after byte changes, protected and missing resources, moving glTF with external files, GLB binary chunks, URI/include dependencies, templates and archived references, resource replacement, detach, trash, file Undo/Redo, import, first-directory creation, and rejection after external edits. A separate Windows check triggers a write error through a read-only dependency and checks restoration of originals. `engine-content` checks loading through IDs and invalidation of stale cached paths; `engine-core` checks serialized-context and helper compatibility.
 
 ```powershell
 cargo test -p module-engine-project asset_workspace

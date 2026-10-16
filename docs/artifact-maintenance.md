@@ -1,5 +1,7 @@
 # Reproducible artifact maintenance
 
+[English](artifact-maintenance.md) | [Русский](ru/artifact-maintenance.md) | [Documentation](README.md)
+
 Run `scripts/clean-artifacts.ps1` manually when disk usage warrants maintenance.
 It defaults to a dry run. It is never called by ordinary application startup,
 project open/save, or every Cargo build.

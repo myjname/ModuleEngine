@@ -1,51 +1,62 @@
-# Scene, Assets и отзывчивое редактирование
+<a id="scene-assets-и-отзывчивое-редактирование"></a>
 
-Этап добавляет общий авторский контекст **Scene / Hierarchy / Inspector / Assets**. **Game** использует отдельную копию проекта для Play. Прежний демонстрационный runtime остаётся в Engine.
+# Scene, Assets, and responsive editing
 
-![Проверенное нативное окно Scene и Assets](media/editor-scene-assets.png)
+[English](release-scene-assets.md) | [Русский](ru/release-scene-assets.md) | [Documentation](README.md)
 
-## Поведение
+This stage adds a shared authoring context for **Scene / Hierarchy / Inspector / Assets**. **Game** uses a separate project copy for Play. The previous demonstration runtime remains in Engine.
 
-- Выбор объекта по реальным треугольникам модели, включая отдельные glTF primitives; выбранный объект общий для авторских окон.
-- Move/Rotate/Scale, World/Local, Snap, свободная камера, один завершённый жест — одна запись Undo, Escape отменяет текущий жест.
-- Assets: папки, поиск, фильтр, импорт, фоновые превью, перетаскивание моделей и текстур, постоянные ID.
-- Переименование, перенос и удаление одного файла с обработкой известных ссылок; использование ресурса проверяется до удаления. Корзина сохраняет оригиналы.
-- Перед файловой операцией требуется сохранение; Undo/Redo возвращает файлы и документ вместе. Изменённые извне файлы не перезаписываются историей.
-- Старые личные раскладки мигрируют; расположение окон и камеры сохраняются отдельно от игры.
-- Открытый заранее Game получает актуальную авторскую сцену перед Play. Pause сохраняет игровую копию; Stop возвращает авторское состояние.
+![Verified native Scene and Assets window](media/editor-scene-assets.png)
 
-Назначение файлов, правила API и действия пользователя описаны в [Scene и Assets](scene-assets.md), [контракте ресурсов](asset-workspace-api.md) и [истории](history-assets.md).
+<a id="поведение"></a>
 
-## Исправление задержки
+## Behavior
 
-Раньше числовое изменение Transform сбрасывало GameHost. Следующий кадр снова создавал Vulkan-исполнитель, подготавливал Custom Rust и декодировал контент. Теперь авторский предпросмотр обновляет проверенную сцену, сохраняя renderer, декодированные модели и скомпилированные слоты Custom. Сканирование/хеширование Assets выполняется при открытии, Refresh и файловых операциях; Transform не запускает сканирование или пересчёт мест использования.
+- Object selection uses the model's actual triangles, including separate glTF primitives; selection is shared across authoring windows.
+- Move/Rotate/Scale, World/Local, Snap, a free camera; one completed gesture creates one Undo entry, and Escape cancels the current gesture.
+- Assets: folders, search, filter, import, background previews, model and texture drag-and-drop, persistent IDs.
+- Rename, move, and delete one file with handling of known references; asset usage is checked before deletion. The trash retains originals.
+- Saving is required before a file operation; Undo/Redo restores files and the document together. History does not overwrite externally changed files.
+- Old personal layouts migrate; window placement and cameras are saved separately from the game.
+- A Game window opened earlier receives the current authored scene before Play. Pause preserves the game copy; Stop restores authored state.
 
-Ресурсы и структура исполнения имеют отдельные проверки: смена контракта может потребовать пересборки host; неисправный кандидат не заменяет текущий. Рендер всё ещё синхронно возвращает кадр на CPU для egui, поэтому устранение пересоздания не является обещанием любой частоты кадров.
+File purposes, API rules, and user actions are described in [Scene and Assets](scene-assets.md), the [asset contract](asset-workspace-api.md), and [history](history-assets.md).
 
-## Воспроизводимая проверка
+<a id="исправление-задержки"></a>
+
+## Fixing the delay
+
+Previously, a numeric Transform change reset GameHost. The next frame recreated the Vulkan executor, prepared Custom Rust, and decoded content. Now the authoring preview updates the validated scene while retaining the renderer, decoded models, and compiled Custom slots. Assets scanning/hashing runs on open, Refresh, and file operations; Transform does not trigger scanning or usage recalculation.
+
+Assets and execution structure have separate checks: changing a contract may require rebuilding the host; a faulty candidate does not replace the current one. Rendering still synchronously returns a frame to the CPU for egui, so eliminating recreation is not a promise of any particular frame rate.
+
+<a id="воспроизводимая-проверка"></a>
+
+## Reproducible verification
 
 ~~~powershell
 .\outputs\ModuleEngine.exe --scene-assets-check game-project.json outputs\scene-assets-verification
 ~~~
 
-Команда создаёт отдельный каталог проверки и не сохраняет исходный игровой JSON. Она проверяет импорт, ID, файловые Undo/Redo, защиту используемого ресурса, отвязку, корзину, Save As и Full/Team/Player. Замер использует настоящие события egui и 120 кадров перетаскивания с Vulkan, на одном импортированном объекте и сцене арен, для Objects и ECS. Отчёт отличает обработку кадра от холодной подготовки, compositor/vsync и фактического вывода на монитор.
+The command creates a separate verification directory and does not save the source game JSON. It checks import, IDs, file Undo/Redo, protection of used assets, unlinking, trash, Save As, and Full/Team/Player. The measurement uses actual egui events and 120 drag frames with Vulkan, on one imported object and the arena scene, for Objects and ECS. The report distinguishes frame processing from cold preparation, compositor/vsync, and actual monitor output.
 
-Проверено на этом ПК, Vulkan / NVIDIA GeForce RTX 4080 SUPER, авторский viewport 944×563:
+Verified on this PC, Vulkan / NVIDIA GeForce RTX 4080 SUPER, authoring viewport 944×563:
 
-| Контент | Мир | Медиана | p95 | Максимум |
+| Content | World | Median | p95 | Maximum |
 | --- | --- | --- | --- | --- |
-| Одна импортированная модель | Objects | 3,52 мс | 5,16 мс | 7,34 мс |
-| Одна импортированная модель | ECS | 4,10 мс | 6,12 мс | 6,93 мс |
-| Арены, 29 активных объектов сцены | Objects | 4,65 мс | 5,92 мс | 6,68 мс |
-| Арены, 29 активных объектов сцены | ECS | 4,42 мс | 5,64 мс | 6,51 мс |
+| One imported model | Objects | 3.52 ms | 5.16 ms | 7.34 ms |
+| One imported model | ECS | 4.10 ms | 6.12 ms | 6.93 ms |
+| Arenas, 29 active scene objects | Objects | 4.65 ms | 5.92 ms | 6.68 ms |
+| Arenas, 29 active scene objects | ECS | 4.42 ms | 5.64 ms | 6.51 ms |
 
-В каждом случае подтверждены сохранённые кеш модели и compiled Custom slot, 122 применённых обновления Transform (включая начало/завершение), одна запись Undo и рабочий Undo/Redo. Замер не включает остальные окна редактора и вывод на монитор; он не равен измеренной частоте кадров всего приложения.
+Each case confirmed a retained model cache and compiled Custom slot, 122 applied Transform updates (including start/end), one Undo entry, and working Undo/Redo. The measurement excludes other editor windows and monitor output; it is not a measured frame rate for the whole application.
 
-Все 230 unit-тестов прошли. `cargo clippy --workspace --all-targets -- -D warnings` и проверка rustdoc прошли. CLI-проверка подтвердила доступ к Engine в Full, отсутствие этого доступа в Team и реальный рендер ID-модели в Player из готовых workers/SPIR-V без вызова компилятора. Отдельный тест проверяет правки сцены при уже открытом Game, Play/Pause/Stop и явное обновление кеша ресурсов. Исходный `game-project.json` остался побайтово прежним. Полные численные результаты: [scene-assets-report.json](media/scene-assets-report.json).
+All 230 unit tests passed. `cargo clippy --workspace --all-targets -- -D warnings` and the rustdoc check passed. The CLI check confirmed Engine access in Full, no such access in Team, and actual rendering of an ID-referenced model in Player from ready-made workers/SPIR-V without invoking a compiler. A separate test checks scene edits with Game already open, Play/Pause/Stop, and explicit asset-cache refresh. The source `game-project.json` remained byte-for-byte unchanged. Full numerical results: [scene-assets-report.json](media/scene-assets-report.json).
 
-## Границы этапа
+<a id="границы-этапа"></a>
 
-Работа с одним выбранным объектом; групповые манипуляции отложены. Навигация и создание папок доступны; операции переименования/переноса относятся к одному файлу. Непредставимое сочетание вращения/масштаба с неравномерно масштабированным родителем отклоняется вместо скрытого искажения. Превью модели показывает геометрию нейтральным CPU renderer, а не её окончательный Vulkan-материал. Аудиофайлы показывают метаданные.
+## Stage boundaries
 
-История текущего сеанса хранит файловые границы. Корзина и снимки на диске сохраняются между запусками; автоматическое восстановление незавершённой операции после аварии не реализовано. Контрольная версия или merge с отсутствующими/изменёнными ресурсами отклоняется до изменения документа: сначала восстановите файлы через Undo или корзину.
+Work is limited to one selected object; group manipulation is deferred. Navigation and folder creation are available; rename/move operations apply to one file. An unrepresentable rotation/scale combination with a non-uniformly scaled parent is rejected instead of silently distorting it. The model preview shows geometry with a neutral CPU renderer rather than its final Vulkan material. Audio files display metadata.
 
+Current-session history retains file boundaries. Trash and on-disk snapshots persist between launches; automatic recovery of an unfinished operation after a crash is not implemented. A checkpoint or merge with missing/changed assets is rejected before changing the document: restore files through Undo or the trash first.

@@ -1,5 +1,7 @@
 # Gameplay storage decision
 
+[English](ecs-storage-decision.md) | [Русский](ru/ecs-storage-decision.md) | [Documentation](README.md)
+
 Status: implemented and checked in stage 3. `GameState.world` owns gameplay; the old entity map remains only as a serialized DTO representation. See [the API and lifetime contract](ecs-world.md) and the stage evidence log.
 
 ## Requirements

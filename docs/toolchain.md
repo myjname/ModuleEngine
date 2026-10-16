@@ -1,5 +1,7 @@
 # Pinned Windows tools
 
+[English](toolchain.md) | [Русский](ru/toolchain.md) | [Documentation](README.md)
+
 `toolchain-manifest.json` owns the Rust version and host target. Run
 `./scripts/bootstrap.ps1 -Json` for a read-only doctor. Its overall `ok` requires
 the pinned Rust compiler and Cargo, working rustfmt/cargo-fmt and Clippy commands
