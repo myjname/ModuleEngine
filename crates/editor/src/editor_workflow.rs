@@ -1817,6 +1817,422 @@ mod workflow_tests {
         assert!(fixture.root.join("assets/models").is_dir());
     }
 
+    fn preservation_cases() -> Vec<(&'static str, serde_json::Value, Vec<u8>)> {
+        vec![
+            ("literal.key", serde_json::Value::Null, vec![]),
+            (
+                "0",
+                serde_json::json!([null, false, {"literal.key": 7}]),
+                vec![0, 255, 1, 0],
+            ),
+            ("", serde_json::json!({}), b"author\r\nbytes\n".to_vec()),
+            ("a/b", serde_json::json!([]), vec![0, 255, 1, 0]),
+            ("a~b", serde_json::json!(""), vec![]),
+            (
+                "имя-😀",
+                serde_json::json!({"0": null, "nested": {"key": true}}),
+                b"author\r\nbytes\n".to_vec(),
+            ),
+        ]
+    }
+
+    fn preservation_archive(key: &str, value: serde_json::Value) -> serde_json::Value {
+        let mut payload = serde_json::Map::new();
+        payload.insert(key.into(), value);
+        payload.insert("foreign-id".into(), serde_json::json!("foreign-stable-id"));
+        payload.insert("nested".into(), serde_json::json!({"literal": {"key": 11}}));
+        serde_json::Value::Object(payload)
+    }
+
+    fn preservation_asset_fixture(
+        archive: serde_json::Value,
+        bytes: &[u8],
+    ) -> (Fixture, Editor, String, String) {
+        let (fixture, mut editor) = Fixture::new(false);
+        fs::create_dir_all(fixture.root.join("assets")).unwrap();
+        fs::write(fixture.root.join("assets/original.bin"), bytes).unwrap();
+        fs::write(
+            fixture.root.join("assets/untouched.bin"),
+            b"unrelated author bytes",
+        )
+        .unwrap();
+        editor
+            .document
+            .legacy_archive
+            .insert("foreign.namespace".into(), archive.clone());
+        editor
+            .document
+            .properties
+            .inactive
+            .global
+            .insert("foreign.namespace".into(), archive);
+        let workspace = AssetWorkspace::new(&fixture.root, Vec::<String>::new()).unwrap();
+        let infos = workspace.synchronize(&mut editor.document).unwrap();
+        let id = infos
+            .iter()
+            .find(|info| info.path == "assets/original.bin")
+            .unwrap()
+            .id
+            .clone();
+        let untouched = infos
+            .iter()
+            .find(|info| info.path == "assets/untouched.bin")
+            .unwrap()
+            .id
+            .clone();
+        editor.changed(false);
+        assert!(editor.save_workflow(), "{}", editor.status);
+        (fixture, editor, id, untouched)
+    }
+
+    #[test]
+    fn preservation_save_as_matrix_keeps_source_and_opaque_drafts_on_cancel_conflict_and_copy() {
+        for (key, value, bytes) in preservation_cases() {
+            for mode in ["cancel", "conflict", "copy"] {
+                let label = format!("key={key:?}, mode={mode}");
+                let (fixture, mut editor) = Fixture::new(true);
+                let ctx = egui::Context::default();
+                let archive = preservation_archive(key, value.clone());
+                editor
+                    .document
+                    .legacy_archive
+                    .insert("foreign.namespace".into(), archive.clone());
+                editor
+                    .document
+                    .properties
+                    .inactive
+                    .global
+                    .insert("foreign.namespace".into(), archive);
+                let mut candidate = stage_save_as_json_draft(&fixture, &mut editor);
+                fs::write(fixture.root.join("assets/preservation.bin"), &bytes).unwrap();
+                let mut manifest = AssetManifest::from_value(&candidate.asset_manifest).unwrap();
+                manifest
+                    .register(
+                        "preservation-stable-id",
+                        "assets/preservation.bin",
+                        &fixture.root,
+                    )
+                    .unwrap();
+                candidate.asset_manifest = serde_json::to_value(manifest).unwrap();
+                editor.json_draft = serde_json::to_string_pretty(&candidate).unwrap();
+                let destination = fixture.root.join("copy-😀").join("project.json");
+                if mode == "conflict" {
+                    fs::create_dir_all(destination.parent().unwrap().join("assets")).unwrap();
+                    fs::write(
+                        destination
+                            .parent()
+                            .unwrap()
+                            .join("assets/save-as-note.txt"),
+                        b"existing destination resource",
+                    )
+                    .unwrap();
+                    fs::write(destination.parent().unwrap().join("keep.bin"), [8, 0, 255]).unwrap();
+                }
+                let before = file_command_state(&editor);
+                let files = fixture_files(&fixture.root);
+                let recent_path = editor.workflow.recent_path.clone().unwrap();
+                assert!(
+                    !recent_path.starts_with(&fixture.root),
+                    "Recent must remain in isolated personal settings"
+                );
+                let recent = fs::read(&recent_path).unwrap();
+                editor.workflow.picker_result =
+                    Some(Ok((mode != "cancel").then_some(destination.clone())));
+                editor.dispatch_command(Command::SaveAs, &ctx);
+                assert_file_command_state(&editor, &before, &format!("{label}: dispatch"));
+                drain_file_job(&mut editor, &ctx);
+                for (relative, hash) in &files {
+                    assert_eq!(
+                        module_engine_project::hash_file(&fixture.root.join(relative)).unwrap(),
+                        *hash,
+                        "{label}: source/target changed: {}",
+                        relative.display()
+                    );
+                }
+                if mode == "copy" {
+                    assert!(
+                        !editor.workflow.show_report,
+                        "{label}: {}",
+                        editor.workflow.report
+                    );
+                    assert_eq!(project::read(&destination).unwrap(), candidate, "{label}");
+                    assert_eq!(editor.document, candidate, "{label}");
+                    assert_eq!(editor.workflow.saved, candidate, "{label}");
+                    assert_eq!(Path::new(&editor.path), destination.canonicalize().unwrap());
+                    assert_eq!(
+                        editor.workflow.recent.paths[0],
+                        destination.canonicalize().unwrap()
+                    );
+                    assert_eq!(
+                        fs::read(crate::distribution::project_binding_path(&destination).unwrap())
+                            .unwrap(),
+                        fs::read(crate::distribution::project_binding_path(&fixture.path).unwrap())
+                            .unwrap(),
+                        "{label}: copied Engine binding"
+                    );
+                    assert_eq!(
+                        fs::read(
+                            destination
+                                .parent()
+                                .unwrap()
+                                .join("assets/preservation.bin")
+                        )
+                        .unwrap(),
+                        bytes,
+                        "{label}"
+                    );
+                    let copied =
+                        AssetManifest::from_value(&editor.document.asset_manifest).unwrap();
+                    assert_eq!(
+                        copied.assets["preservation-stable-id"].path,
+                        "assets/preservation.bin"
+                    );
+                    copied.verify(destination.parent().unwrap()).unwrap();
+                    assert!(!editor.json_dirty && !editor.has_unsaved_work());
+                } else {
+                    assert_file_command_state(&editor, &before, &format!("{label}: completion"));
+                    assert_eq!(
+                        fixture_files(&fixture.root),
+                        files,
+                        "{label}: unaccounted files"
+                    );
+                    assert_eq!(
+                        fs::read(&recent_path).unwrap(),
+                        recent,
+                        "{label}: Recent changed"
+                    );
+                    assert_eq!(editor.workflow.show_report, mode == "conflict", "{label}");
+                    assert!(!destination.exists(), "{label}: candidate published");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preservation_asset_replay_failed_json_publish_rolls_back_undo_and_redo() {
+        for operation in ["rename", "delete"] {
+            for forward in [false, true] {
+                let label = format!("{operation}, forward={forward}");
+                let archive =
+                    preservation_archive("literal.key", serde_json::json!([null, {"0": false}]));
+                let bytes = [0, 255, 1, 0];
+                let (fixture, mut editor, id, _) = preservation_asset_fixture(archive, &bytes);
+                let ctx = egui::Context::default();
+                let original = editor.document.clone();
+                let action = if operation == "rename" {
+                    BrowserAction::Rename {
+                        id,
+                        name: "renamed.bin".into(),
+                    }
+                } else {
+                    BrowserAction::Delete {
+                        id,
+                        replacement: None,
+                        detach: false,
+                    }
+                };
+                editor.request_asset_action(action, &ctx);
+                complete_asset_job(&mut editor, &ctx);
+                let accepted = editor.document.clone();
+                if forward {
+                    editor.undo();
+                    assert_eq!(editor.document, original, "{label}: setup Undo");
+                }
+                let expected = if forward { &accepted } else { &original };
+                let valid_path_state = file_command_state(&editor);
+                let blocked = fixture.root.join("blocked-project.json");
+                fs::create_dir(&blocked).unwrap();
+                editor.path = blocked.to_string_lossy().into_owned();
+                let before = file_command_state(&editor);
+                let files = fixture_files(&fixture.root);
+                let recent_path = editor.workflow.recent_path.clone().unwrap();
+                let recent = fs::read(&recent_path).unwrap();
+                if forward {
+                    editor.redo();
+                } else {
+                    editor.undo();
+                }
+                assert!(
+                    editor.status.starts_with("Undo/Redo файлов не завершён:"),
+                    "{label}: {}",
+                    editor.status
+                );
+                assert_file_command_state(&editor, &before, &label);
+                let mut remaining = fixture_files(&fixture.root);
+                for (relative, hash) in &files {
+                    assert_eq!(
+                        remaining.remove(relative).as_ref(),
+                        Some(hash),
+                        "{label}: failed replay changed {}",
+                        relative.display()
+                    );
+                }
+                // The writer retains its staged JSON after failed replacement.
+                // It is recovery data, not permission to mutate any original.
+                assert_eq!(
+                    remaining.len(),
+                    1,
+                    "{label}: unexpected recovery: {remaining:?}"
+                );
+                let recovery = remaining.keys().next().unwrap();
+                assert_eq!(recovery.components().count(), 1);
+                assert!(
+                    recovery
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("blocked-project.tmp-")
+                );
+                assert_eq!(
+                    project::read(&fixture.root.join(recovery)).unwrap(),
+                    *expected,
+                    "{label}: recovery candidate"
+                );
+                assert_eq!(
+                    fs::read(&recent_path).unwrap(),
+                    recent,
+                    "{label}: Recent changed"
+                );
+                editor.path = fixture.path.to_string_lossy().into_owned();
+                assert_file_command_state(
+                    &editor,
+                    &valid_path_state,
+                    &format!("{label}: path restored"),
+                );
+                if forward {
+                    editor.redo();
+                } else {
+                    editor.undo();
+                }
+                assert_eq!(
+                    editor.document, *expected,
+                    "{label}: retry must remain usable"
+                );
+                assert_eq!(
+                    project::read(&fixture.path).unwrap(),
+                    *expected,
+                    "{label}: retry persistence"
+                );
+                if !forward {
+                    assert_eq!(
+                        fs::read(fixture.root.join("assets/original.bin")).unwrap(),
+                        bytes,
+                        "{label}: restored bytes"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preservation_asset_branch_keeps_ids_bytes_and_opaque_payload_after_move_delete_undo_redo() {
+        for (key, value, bytes) in preservation_cases() {
+            let archive = preservation_archive(key, value);
+            let (fixture, mut editor, id, untouched) =
+                preservation_asset_fixture(archive.clone(), &bytes);
+            let ctx = egui::Context::default();
+            let original = editor.document.clone();
+            let binding_path = crate::distribution::project_binding_path(&fixture.path).unwrap();
+            let binding = fs::read(&binding_path).unwrap();
+            editor.request_asset_action(
+                BrowserAction::Rename {
+                    id: id.clone(),
+                    name: "renamed.bin".into(),
+                },
+                &ctx,
+            );
+            complete_asset_job(&mut editor, &ctx);
+            let rename_id = editor.history.current_id();
+            assert_eq!(
+                AssetManifest::from_value(&editor.document.asset_manifest)
+                    .unwrap()
+                    .assets[&id]
+                    .path,
+                "assets/renamed.bin"
+            );
+            assert_eq!(
+                fs::read(fixture.root.join("assets/renamed.bin")).unwrap(),
+                bytes
+            );
+            editor.undo();
+            assert_eq!(editor.document, original, "{key:?}: rename Undo");
+            assert!(editor.history.can_redo());
+            editor.request_asset_action(
+                BrowserAction::Delete {
+                    id: id.clone(),
+                    replacement: None,
+                    detach: false,
+                },
+                &ctx,
+            );
+            complete_asset_job(&mut editor, &ctx);
+            let deleted = editor.document.clone();
+            let delete_id = editor.history.current_id();
+            assert!(delete_id > rename_id, "history identity must not be reused");
+            assert!(!editor.history.can_redo());
+            assert!(
+                !editor.workflow.asset_history.contains_key(&rename_id),
+                "discarded branch retained a filesystem record"
+            );
+            let deleted_manifest = AssetManifest::from_value(&deleted.asset_manifest).unwrap();
+            assert!(!deleted_manifest.assets.contains_key(&id));
+            assert_eq!(
+                deleted_manifest.assets[&untouched].path,
+                "assets/untouched.bin"
+            );
+            let before_unavailable_redo = file_command_state(&editor);
+            let files = fixture_files(&fixture.root);
+            editor.redo();
+            assert_file_command_state(&editor, &before_unavailable_redo, "discarded branch Redo");
+            assert_eq!(fixture_files(&fixture.root), files);
+            for (forward, expected) in [(false, &original), (true, &deleted), (false, &original)] {
+                if forward {
+                    editor.redo();
+                } else {
+                    editor.undo();
+                }
+                assert_eq!(editor.document, *expected, "{key:?}: forward={forward}");
+                assert_eq!(
+                    project::read(&fixture.path).unwrap(),
+                    *expected,
+                    "{key:?}: persisted boundary"
+                );
+                assert_eq!(
+                    editor.document.legacy_archive["foreign.namespace"], archive,
+                    "{key:?}: exact archive"
+                );
+                assert_eq!(
+                    editor.document.properties.inactive.global["foreign.namespace"], archive,
+                    "{key:?}: inactive payload"
+                );
+                assert_eq!(
+                    fs::read(fixture.root.join("assets/untouched.bin")).unwrap(),
+                    b"unrelated author bytes"
+                );
+                assert!(
+                    !fixture.root.join("assets/renamed.bin").exists(),
+                    "discarded branch was replayed"
+                );
+                if !forward {
+                    assert_eq!(
+                        fs::read(fixture.root.join("assets/original.bin")).unwrap(),
+                        bytes
+                    );
+                    assert_eq!(
+                        AssetManifest::from_value(&editor.document.asset_manifest)
+                            .unwrap()
+                            .assets[&id]
+                            .path,
+                        "assets/original.bin"
+                    );
+                } else {
+                    assert!(!fixture.root.join("assets/original.bin").exists());
+                }
+                assert_eq!(fs::read(&binding_path).unwrap(), binding);
+            }
+        }
+    }
+
     fn key(key: Key, modifiers: Modifiers) -> Event {
         Event::Key {
             key,
