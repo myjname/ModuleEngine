@@ -999,30 +999,7 @@ impl Editor {
                     self.status = error;
                     return false;
                 }
-                if document.game != self.document.game
-                    || document.custom_sources != self.document.custom_sources
-                {
-                    self.game_workbench.stop();
-                    if document.game.is_some() {
-                        self.playing = false;
-                    }
-                }
-                self.document = document;
-                if self.can_author_engine() {
-                    self.policy_baseline = self.document.clone();
-                }
-                self.graph_path.clear();
-                self.graph_canvas.selected = None;
-                self.graph_canvas.pending = None;
-                self.code_canvas.selected = None;
-                self.program = None;
-                self.command_program = None;
-                self.json_dirty = false;
-                self.code_positions.clear();
-                self.changed(true);
-                self.parse_custom();
-                self.restore_code_positions();
-                self.compile_connected_scripts();
+                self.apply_validated_json(document);
                 self.status = "Файл применён. Проверка графа обновлена.".into();
                 true
             }
@@ -1031,6 +1008,35 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// Install a validated candidate after explicit Apply or successful Save As.
+    /// Preparing or cancelling a file dialog must never call this state boundary.
+    fn apply_validated_json(&mut self, document: GraphDocument) {
+        if document.game != self.document.game
+            || document.custom_sources != self.document.custom_sources
+        {
+            self.game_workbench.stop();
+            if document.game.is_some() {
+                self.playing = false;
+            }
+        }
+        self.document = document;
+        if self.can_author_engine() {
+            self.policy_baseline = self.document.clone();
+        }
+        self.graph_path.clear();
+        self.graph_canvas.selected = None;
+        self.graph_canvas.pending = None;
+        self.code_canvas.selected = None;
+        self.program = None;
+        self.command_program = None;
+        self.json_dirty = false;
+        self.code_positions.clear();
+        self.changed(true);
+        self.parse_custom();
+        self.restore_code_positions();
+        self.compile_connected_scripts();
     }
 
     fn save(&mut self) -> bool {

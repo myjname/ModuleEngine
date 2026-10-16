@@ -125,6 +125,10 @@ pub struct Workflow {
     menu_rects: BTreeMap<String, egui::Rect>,
     capture_menu: Option<String>,
     asset_history: BTreeMap<u64, AssetOperationRecord>,
+    #[cfg(test)]
+    picker_result: Option<Result<Option<PathBuf>, String>>,
+    #[cfg(test)]
+    picker_requests: Vec<(DialogPurpose, PathBuf)>,
 }
 impl Workflow {
     pub fn new(document: GraphDocument) -> Self {
@@ -148,6 +152,10 @@ impl Workflow {
                 None
             },
             asset_history: BTreeMap::new(),
+            #[cfg(test)]
+            picker_result: None,
+            #[cfg(test)]
+            picker_requests: vec![],
         }
     }
     pub fn blocks_document_edits(&self) -> bool {
@@ -228,6 +236,21 @@ impl Editor {
             return Err(self.status.clone());
         }
         self.validate_candidate(&self.document, self.can_author_engine())
+    }
+    /// Stage pending JSON for Save As without crossing the authoring-state
+    /// boundary. A cancelled picker or failed publication must retain the draft.
+    fn file_operation_candidate(&self) -> Result<GraphDocument, String> {
+        if self.game_workbench.has_graph_draft() {
+            return Err("Примените или отмените черновик Gameplay Systems перед сохранением. Он не входит в сохранённый проект.".into());
+        }
+        let candidate = if self.json_dirty {
+            serde_json::from_str(&self.json_draft)
+                .map_err(|error| format!("JSON не применён: {error}"))?
+        } else {
+            self.document.clone()
+        };
+        self.validate_candidate(&candidate, self.can_author_engine())?;
+        Ok(candidate)
     }
     fn save_workflow(&mut self) -> bool {
         if let Err(error) = self.prepare_file_operation() {
@@ -311,6 +334,20 @@ impl Editor {
     }
     fn start_dialog(&mut self, purpose: DialogPurpose, ctx: &egui::Context) {
         let initial = PathBuf::from(&self.path);
+        #[cfg(test)]
+        {
+            // Exercise real menu dispatch/worker completion without a native
+            // modal window. Native COM/Show acceptance is a separate boundary.
+            self.workflow
+                .picker_requests
+                .push((purpose, initial.clone()));
+            if let Some(result) = self.workflow.picker_result.take() {
+                self.spawn_job("Выбор файла / папки…", ctx, move || {
+                    result.map(|path| Outcome::Dialog(purpose, path))
+                });
+                return;
+            }
+        }
         self.spawn_job("Выбор файла / папки…", ctx, move || {
             let directory = initial.parent().unwrap_or(Path::new("."));
             let path = match purpose {
@@ -340,6 +377,17 @@ impl Editor {
                 "Операция отменена; текущий проект и его правки остаются открытыми".into();
             return;
         };
+        let save_candidate = if matches!(purpose, DialogPurpose::SaveAs) {
+            match self.file_operation_candidate() {
+                Ok(candidate) => Some(candidate),
+                Err(error) => {
+                    self.report_error(error);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if matches!(purpose, DialogPurpose::SaveAs)
             && path
                 .canonicalize()
@@ -347,9 +395,19 @@ impl Editor {
                 .zip(Path::new(&self.path).canonicalize().ok())
                 .is_some_and(|(a, b)| same_path(&a, &b))
         {
-            if !self.save_workflow() {
-                self.report_error(self.status.clone());
+            let candidate = save_candidate.expect("Save As candidate");
+            if let Err(error) = project::save(&path, &candidate) {
+                self.report_error(error);
+                return;
             }
+            if self.json_dirty || candidate != self.document {
+                self.apply_validated_json(candidate);
+            }
+            self.flush_history();
+            self.workflow.saved = self.document.clone();
+            self.dirty = false;
+            self.status = format!("Сохранено: {}", self.path);
+            self.remember_project();
             return;
         }
         match purpose {
@@ -364,12 +422,13 @@ impl Editor {
                     return;
                 };
                 let source = PathBuf::from(&self.path);
-                let document =
-                    if matches!(purpose, DialogPurpose::New(_)) && self.workflow.new_uses_saved {
-                        self.workflow.saved.clone()
-                    } else {
-                        self.document.clone()
-                    };
+                let document = if matches!(purpose, DialogPurpose::SaveAs) {
+                    save_candidate.expect("Save As candidate")
+                } else if matches!(purpose, DialogPurpose::New(_)) && self.workflow.new_uses_saved {
+                    self.workflow.saved.clone()
+                } else {
+                    self.document.clone()
+                };
                 self.workflow.new_uses_saved = false;
                 let engine_choice = self.workflow.new_engine_choice;
                 self.spawn_job(
@@ -831,8 +890,8 @@ impl Editor {
                     self.workflow.show_report = true;
                 }
             }
-            Command::SaveAs => match self.prepare_file_operation() {
-                Ok(()) => self.start_dialog(DialogPurpose::SaveAs, ctx),
+            Command::SaveAs => match self.file_operation_candidate() {
+                Ok(_) => self.start_dialog(DialogPurpose::SaveAs, ctx),
                 Err(e) => self.report_error(e),
             },
             Command::Import => self.request_asset_action(
@@ -1547,6 +1606,7 @@ mod workflow_tests {
                 .as_nanos();
             let root = base.join(format!("editor-workflow-{}-{stamp}", std::process::id()));
             fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
             let path = root.join("project.json");
             let mut document = demo_document(WorldKind::Objects);
             if game {
@@ -1871,6 +1931,388 @@ mod workflow_tests {
         assert_eq!(editor.document, working);
         assert_eq!(editor.workflow.saved, saved);
         assert_eq!(crate::project::read(&fixture.path).unwrap(), saved);
+    }
+
+    #[test]
+    fn save_as_cancel_picker_error_and_publish_failure_preserve_dirty_json_and_play() {
+        for mode in ["cancel", "picker-error", "copy-error", "same-path-error"] {
+            let (fixture, mut editor) = Fixture::new(true);
+            let ctx = egui::Context::default();
+            let candidate = stage_save_as_json_draft(&fixture, &mut editor);
+            let result = match mode {
+                "cancel" => Ok(None),
+                "picker-error" => Err("Injected picker configuration error".into()),
+                _ => {
+                    let blocked = fixture.root.join(format!("{mode}.json"));
+                    fs::create_dir(&blocked).unwrap();
+                    if mode == "same-path-error" {
+                        // A directory at the current JSON destination supplies
+                        // a deterministic write error on both Windows/Linux.
+                        editor.path = blocked.to_string_lossy().into_owned();
+                    }
+                    Ok(Some(blocked))
+                }
+            };
+            let state = file_command_state(&editor);
+            let files = fixture_files(&fixture.root);
+            let recent = fs::read(editor.workflow.recent_path.as_ref().unwrap()).unwrap();
+            editor.workflow.picker_result = Some(result);
+            editor.dispatch_command(Command::SaveAs, &ctx);
+            assert_file_command_state(&editor, &state, &format!("{mode}: dispatch"));
+            drain_file_job(&mut editor, &ctx);
+            assert_file_command_state(&editor, &state, &format!("{mode}: completion"));
+            let mut remaining = fixture_files(&fixture.root);
+            for (relative, original) in &files {
+                assert_eq!(
+                    remaining.remove(relative).as_ref(),
+                    Some(original),
+                    "{mode}: original changed: {}",
+                    relative.display()
+                );
+            }
+            if mode == "same-path-error" {
+                // The existing project writer deliberately retains its staged
+                // JSON when replacing the destination fails. Account for this
+                // exact recovery artifact; every original file remains checked.
+                assert_eq!(
+                    remaining.len(),
+                    1,
+                    "unexpected recovery files: {remaining:?}"
+                );
+                let recovery = remaining.keys().next().unwrap();
+                assert_eq!(recovery.components().count(), 1);
+                assert!(
+                    recovery
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("same-path-error.tmp-")
+                );
+                assert!(
+                    project::read(&fixture.root.join(recovery)).unwrap() == candidate,
+                    "recovery file differs from staged candidate"
+                );
+            } else {
+                assert!(
+                    remaining.is_empty(),
+                    "{mode}: unexpected new files: {remaining:?}"
+                );
+            }
+            assert_eq!(
+                fs::read(editor.workflow.recent_path.as_ref().unwrap()).unwrap(),
+                recent
+            );
+            assert!(editor.workflow.job.is_none());
+            assert_eq!(editor.workflow.show_report, mode != "cancel");
+            assert!(matches!(
+                editor.workflow.picker_requests.as_slice(),
+                [(DialogPurpose::SaveAs, _)]
+            ));
+        }
+    }
+
+    #[test]
+    fn save_as_same_path_applies_json_only_after_save_and_preserves_history() {
+        let (fixture, mut editor) = Fixture::new(true);
+        let ctx = egui::Context::default();
+        let candidate = stage_save_as_json_draft(&fixture, &mut editor);
+        let state = file_command_state(&editor);
+        let history = history_state(&editor);
+        let source_binding = crate::distribution::project_binding_path(&fixture.path).unwrap();
+        let binding = fs::read(&source_binding).unwrap();
+        editor.workflow.picker_result = Some(Ok(Some(fixture.path.clone())));
+        editor.dispatch_command(Command::SaveAs, &ctx);
+        assert_file_command_state(&editor, &state, "same-path dispatch");
+        drain_file_job(&mut editor, &ctx);
+        assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+        assert!(
+            project::read(&fixture.path).unwrap() == candidate,
+            "saved candidate differs"
+        );
+        assert!(editor.document == candidate, "adopted candidate differs");
+        assert!(editor.workflow.saved == candidate, "saved boundary differs");
+        assert!(!editor.json_dirty && !editor.dirty);
+        assert!(!editor.playing && !editor.game_workbench.is_play_session());
+        let after_history = history_state(&editor);
+        assert!(
+            &after_history[..history.len()] == history.as_slice(),
+            "existing history was rewritten"
+        );
+        assert_eq!(
+            after_history.len(),
+            history.len() + 1,
+            "same-path Save As must keep Undo history"
+        );
+        assert_eq!(fs::read(source_binding).unwrap(), binding);
+        assert_eq!(
+            fs::read(fixture.root.join("assets/save-as-note.txt")).unwrap(),
+            b"author resource"
+        );
+    }
+
+    #[test]
+    fn save_as_copy_publishes_json_candidate_binding_and_resources_before_adoption() {
+        let (fixture, mut editor) = Fixture::new(true);
+        let ctx = egui::Context::default();
+        let candidate = stage_save_as_json_draft(&fixture, &mut editor);
+        let state = file_command_state(&editor);
+        let source_json = module_engine_project::hash_file(&fixture.path).unwrap();
+        let source_binding = crate::distribution::project_binding_path(&fixture.path).unwrap();
+        let binding = fs::read(&source_binding).unwrap();
+        let destination = fixture.root.join("Копия-😀").join("игра.json");
+        editor.workflow.picker_result = Some(Ok(Some(destination.clone())));
+        editor.dispatch_command(Command::SaveAs, &ctx);
+        assert_file_command_state(&editor, &state, "copy dispatch");
+        assert!(!destination.exists());
+        drain_file_job(&mut editor, &ctx);
+        assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+        let destination = destination.canonicalize().unwrap();
+        assert_eq!(Path::new(&editor.path), destination);
+        assert!(
+            project::read(&destination).unwrap() == candidate,
+            "saved copy candidate differs"
+        );
+        assert!(editor.document == candidate, "adopted copy differs");
+        assert!(
+            editor.workflow.saved == candidate,
+            "copy saved boundary differs"
+        );
+        assert!(!editor.json_dirty && !editor.dirty);
+        assert_eq!(
+            editor.project_asset_root().canonicalize().unwrap(),
+            destination.parent().unwrap()
+        );
+        assert_eq!(
+            module_engine_project::hash_file(&fixture.path).unwrap(),
+            source_json
+        );
+        assert_eq!(fs::read(source_binding).unwrap(), binding);
+        assert_eq!(
+            fs::read(crate::distribution::project_binding_path(&destination).unwrap()).unwrap(),
+            binding
+        );
+        assert_eq!(
+            fs::read(
+                destination
+                    .parent()
+                    .unwrap()
+                    .join("assets/save-as-note.txt")
+            )
+            .unwrap(),
+            b"author resource"
+        );
+        AssetManifest::from_value(&candidate.asset_manifest)
+            .unwrap()
+            .verify(destination.parent().unwrap())
+            .unwrap();
+        assert_eq!(editor.workflow.recent.paths[0], destination);
+        let adopted = file_command_state(&editor);
+        editor.workflow.picker_result = Some(Ok(None));
+        editor.dispatch_command(Command::SaveAs, &ctx);
+        drain_file_job(&mut editor, &ctx);
+        assert_file_command_state(&editor, &adopted, "post-copy cancelled Save As");
+        assert_eq!(
+            editor.workflow.picker_requests.last().unwrap().1,
+            destination
+        );
+    }
+
+    #[test]
+    fn save_as_invalid_json_rejects_before_picker_without_applying_or_saving() {
+        let (fixture, mut editor) = Fixture::new(true);
+        let ctx = egui::Context::default();
+        stage_save_as_json_draft(&fixture, &mut editor);
+        editor.json_draft = "{ incomplete JSON".into();
+        let state = file_command_state(&editor);
+        let files = fixture_files(&fixture.root);
+        editor.workflow.picker_result = Some(Ok(None));
+        editor.dispatch_command(Command::SaveAs, &ctx);
+        assert_file_command_state(&editor, &state, "invalid JSON Save As");
+        assert_eq!(fixture_files(&fixture.root), files);
+        assert!(editor.workflow.picker_requests.is_empty());
+        assert!(editor.workflow.picker_result.is_some());
+        assert!(editor.workflow.job.is_none() && editor.workflow.show_report);
+    }
+
+    #[test]
+    fn new_save_as_recent_repeated_dialogs_use_current_unicode_project_path() {
+        let (fixture, mut editor) = Fixture::new(true);
+        let ctx = egui::Context::default();
+        let cwd = std::env::current_dir().unwrap();
+        let original_files = fixture_files(&fixture.root);
+        let new_folder = fixture.root.join("Новая-😀");
+        editor.workflow.picker_result = Some(Ok(Some(new_folder.clone())));
+        editor.dispatch_command(Command::NewEmpty, &ctx);
+        drain_file_job(&mut editor, &ctx);
+        assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+        let new_path = new_folder.join("project.json").canonicalize().unwrap();
+        assert_eq!(Path::new(&editor.path), new_path);
+        assert_eq!(editor.workflow.recent.paths[0], new_path);
+        check_workflow_dialog_folder(&new_path);
+
+        fs::create_dir_all(new_folder.join("assets")).unwrap();
+        fs::write(new_folder.join("assets/note.txt"), b"new project resource").unwrap();
+        let mut manifest = AssetManifest::from_value(&editor.document.asset_manifest).unwrap();
+        manifest
+            .register("chain-note", "assets/note.txt", &new_folder)
+            .unwrap();
+        editor.document.asset_manifest = serde_json::to_value(manifest).unwrap();
+        editor.changed(false);
+        let copy = fixture.root.join("Копия-😀").join("копия.json");
+        editor.workflow.picker_result = Some(Ok(Some(copy.clone())));
+        editor.dispatch_command(Command::SaveAs, &ctx);
+        drain_file_job(&mut editor, &ctx);
+        assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+        let copy = copy.canonicalize().unwrap();
+        assert_eq!(Path::new(&editor.path), copy);
+        assert_eq!(editor.workflow.recent.paths[0], copy);
+        assert_eq!(editor.workflow.picker_requests.last().unwrap().1, new_path);
+        assert_eq!(
+            fs::read(copy.parent().unwrap().join("assets/note.txt")).unwrap(),
+            b"new project resource"
+        );
+        check_workflow_dialog_folder(&copy);
+
+        // Recent Projects dispatches the same guarded OpenPath action, without
+        // choosing a second path through a native picker.
+        assert!(editor.workflow.recent.paths.contains(&new_path));
+        editor.request_action(Action::OpenPath(new_path.clone()), &ctx);
+        assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+        assert_eq!(Path::new(&editor.path), new_path);
+        assert_eq!(editor.workflow.recent.paths[0], new_path);
+        for command in [
+            Command::Open,
+            Command::SaveAs,
+            Command::NewEmpty,
+            Command::ExportSource,
+        ] {
+            let before = file_command_state(&editor);
+            editor.workflow.picker_result = Some(Ok(None));
+            editor.dispatch_command(command, &ctx);
+            drain_file_job(&mut editor, &ctx);
+            assert!(!editor.workflow.show_report, "{}", editor.workflow.report);
+            assert_file_command_state(&editor, &before, "post-Recent cancelled picker");
+            let (purpose, initial) = editor.workflow.picker_requests.last().unwrap();
+            assert_eq!(initial, &new_path);
+            assert!(matches!(
+                (command, purpose),
+                (Command::Open, DialogPurpose::Open)
+                    | (Command::SaveAs, DialogPurpose::SaveAs)
+                    | (Command::NewEmpty, DialogPurpose::New(_))
+                    | (
+                        Command::ExportSource,
+                        DialogPurpose::Export(ExportKind::Source)
+                    )
+            ));
+            check_workflow_dialog_folder(initial);
+        }
+        for (relative, expected) in original_files {
+            assert_eq!(
+                module_engine_project::hash_file(&fixture.root.join(&relative)).unwrap(),
+                expected,
+                "original changed: {}",
+                relative.display()
+            );
+        }
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+    }
+
+    fn check_workflow_dialog_folder(project: &Path) {
+        let folder = project.parent().unwrap();
+        assert!(folder.is_dir());
+        #[cfg(windows)]
+        crate::native_dialogs::test_configure_initial_folder(folder).unwrap();
+        // This configures actual production COM dialog factories on Windows;
+        // no Show/user input or interactive native acceptance is claimed.
+    }
+
+    fn stage_save_as_json_draft(fixture: &Fixture, editor: &mut Editor) -> GraphDocument {
+        fs::create_dir_all(fixture.root.join("assets")).unwrap();
+        fs::write(
+            fixture.root.join("assets/save-as-note.txt"),
+            b"author resource",
+        )
+        .unwrap();
+        let mut manifest = AssetManifest::from_value(&editor.document.asset_manifest).unwrap();
+        manifest
+            .register("save-as-note", "assets/save-as-note.txt", &fixture.root)
+            .unwrap();
+        editor.document.asset_manifest = serde_json::to_value(manifest).unwrap();
+        edit_name(editor);
+        editor.flush_history();
+        let mut candidate = editor.document.clone();
+        candidate.name = "Pending JSON candidate".into();
+        let game = candidate.game.as_mut().unwrap();
+        game.scenes.get_mut(&game.entry_scene.clone()).unwrap().name =
+            "Changed only in JSON draft".into();
+        editor
+            .validate_candidate(&candidate, editor.can_author_engine())
+            .unwrap();
+        editor.json_draft = serde_json::to_string_pretty(&candidate).unwrap();
+        editor.json_dirty = true;
+        editor.playing = true;
+        // Exercise the public Play lifecycle state without constructing a Host,
+        // renderer, compiled Custom or subprocess for this file-command test.
+        editor.game_workbench.tick(0., true).unwrap();
+        assert!(editor.game_workbench.is_play_session());
+        candidate
+    }
+
+    fn history_state(editor: &Editor) -> Vec<(u64, String, GraphDocument)> {
+        editor
+            .history
+            .entries()
+            .iter()
+            .map(|entry| (entry.id, entry.label.clone(), entry.document.clone()))
+            .collect()
+    }
+    fn file_command_state(editor: &Editor) -> serde_json::Value {
+        serde_json::json!({
+            "document":editor.document,"path":editor.path,"json_draft":editor.json_draft,
+            "json_dirty":editor.json_dirty,"dirty":editor.dirty,"history":history_state(editor),
+            "history_cursor":editor.history.cursor(),"history_dirty":editor.history_dirty,
+            "saved":editor.workflow.saved,"policy":editor.policy_baseline,
+            "playing":editor.playing,"play_session":editor.game_workbench.is_play_session(),
+            "recent":editor.workflow.recent,"time":editor.time,
+        })
+    }
+    fn assert_file_command_state(editor: &Editor, expected: &serde_json::Value, stage: &str) {
+        let actual = file_command_state(editor);
+        for (field, value) in expected.as_object().unwrap() {
+            assert!(actual.get(field) == Some(value), "{stage}: changed {field}");
+        }
+    }
+    fn fixture_files(root: &Path) -> BTreeMap<PathBuf, String> {
+        fn visit(root: &Path, folder: &Path, result: &mut BTreeMap<PathBuf, String>) {
+            for entry in fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, result);
+                } else {
+                    result.insert(
+                        path.strip_prefix(root).unwrap().into(),
+                        module_engine_project::hash_file(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut result = BTreeMap::new();
+        visit(root, root, &mut result);
+        result
+    }
+    fn drain_file_job(editor: &mut Editor, ctx: &egui::Context) {
+        let started = Instant::now();
+        while editor.workflow.job.is_some() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(15),
+                "file command worker timed out"
+            );
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                editor.workflow_frame(ui.ctx())
+            })
+            .drop_without_applying_deltas();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]
