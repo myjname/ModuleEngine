@@ -22,7 +22,7 @@ use thiserror::Error;
 mod persistent;
 pub use persistent::StateDeclaration;
 mod cache_context;
-mod cargo_build;
+pub mod cargo_build;
 mod dep_info;
 mod freshness;
 mod native_tools;

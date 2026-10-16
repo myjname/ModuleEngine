@@ -838,6 +838,7 @@ const NATIVE_FILES: &[&str] = &[
     "crates/project-tools/src/asset_fields.rs",
     "crates/project-tools/src/engine_migration.rs",
     "crates/player/Cargo.toml",
+    "crates/player/build.rs",
     "crates/player/src/composition.rs",
     "crates/player/src/lib.rs",
     "crates/player/src/main.rs",

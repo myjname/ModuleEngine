@@ -11,7 +11,7 @@ use std::{
 };
 
 pub use module_engine_player::package::PlayerManifest;
-use module_engine_player::package::{CARGO_PLAYER_EXECUTABLE, PLAYER_EXECUTABLE, native_platform};
+use module_engine_player::package::{PLAYER_EXECUTABLE, native_platform};
 
 pub(crate) fn selected_features(
     document: &GraphDocument,
@@ -171,11 +171,17 @@ fn build_native_player_variant(
         ));
     }
     let build_root = native_cache_root(backend, "player-build");
-    fs::create_dir_all(&build_root).map_err(|e| e.to_string())?;
+    let compiler = ScriptCompiler::new(backend.into(), build_root.clone());
+    let target = native_cache_root(backend, "player-native-target");
+    build_native_player_snapshot(&compiler, backend, &target, &features, &build_root, &key)
+}
+
+fn native_player_build_lease(build_root: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(build_root).map_err(|e| e.to_string())?;
     // One shared dependency target; serialize build + immutable snapshot creation
     // across exporting editor/CLI processes. Windows closes this lease on crash.
     #[cfg(windows)]
-    let _build_lease = {
+    let lease = {
         use std::os::windows::fs::OpenOptionsExt;
         let started = std::time::Instant::now();
         loop {
@@ -201,7 +207,7 @@ fn build_native_player_variant(
     // Cargo serializes compilation, but its lock ends before we hash/copy the
     // result. Hold our own lease through immutable snapshot publication too.
     #[cfg(unix)]
-    let _build_lease = {
+    let lease = {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -222,68 +228,27 @@ fn build_native_player_variant(
             }
         }
     };
-    let compiler = ScriptCompiler::new(backend.into(), build_root.clone());
-    let target = native_cache_root(backend, "player-native-target");
-    let mut command = std::process::Command::new(
-        compiler
-            .cargo_binary
-            .as_deref()
-            .unwrap_or_else(|| Path::new("cargo")),
-    );
-    command
-        .current_dir(backend)
-        .args([
-            "build",
-            "--offline",
-            "--locked",
-            "--release",
-            "-p",
-            "module-engine-player",
-            "--bin",
-            "module-engine-player",
-            "--no-default-features",
-            "--features",
-        ])
-        .arg(features.iter().cloned().collect::<Vec<_>>().join(","))
-        .arg("--target-dir")
-        .arg(&target);
-    if let Some(path) = compiler.cargo_home {
-        command.env("CARGO_HOME", path);
-    }
-    if let Some(path) = compiler.rustc_binary {
-        command.env("RUSTC", path);
-    }
-    if let Some(path) = compiler.rustup_home {
-        command.env("RUSTUP_HOME", path);
-    }
-    if let Some(toolchain) = compiler.rustup_toolchain {
-        command.env("RUSTUP_TOOLCHAIN", toolchain);
-    }
-    command.env("CARGO_INCREMENTAL", "0");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command
-        .output()
-        .map_err(|e| format!("Player Cargo launch: {e}"))?;
-    let log = String::from_utf8_lossy(&output.stderr);
-    fs::create_dir_all(&build_root).map_err(|e| e.to_string())?;
-    fs::write(
-        build_root.join(format!("{key}.log")),
-        output.stderr.as_slice(),
-    )
-    .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(format!("Selected Player build failed: {log}"));
-    }
-    let executable = target.join("release").join(CARGO_PLAYER_EXECUTABLE);
-    if !executable.is_file() {
-        return Err("Cargo did not produce the selected Player executable".into());
-    }
+    Ok(lease)
+}
+
+fn build_native_player_snapshot(
+    compiler: &ScriptCompiler,
+    backend: &Path,
+    target: &Path,
+    features: &BTreeSet<String>,
+    build_root: &Path,
+    key: &str,
+) -> Result<PathBuf, String> {
+    let _build_lease = native_player_build_lease(build_root)?;
+    let executable = build_native_player_product(
+        compiler,
+        backend,
+        target,
+        features,
+        &build_root.join(format!("{key}.log")),
+    )?;
     let snapshot = build_root
-        .join(&key)
+        .join(key)
         .join(hash_file(&executable)?)
         .join(PLAYER_EXECUTABLE);
     if !snapshot.is_file() {
@@ -294,6 +259,164 @@ fn build_native_player_variant(
         return Err("Native Player snapshot integrity mismatch".into());
     }
     Ok(snapshot)
+}
+
+fn native_player_command(
+    compiler: &ScriptCompiler,
+    binary: &Path,
+    backend: &Path,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(binary);
+    command.current_dir(backend);
+    if let Some(path) = &compiler.cargo_home {
+        command.env("CARGO_HOME", path);
+    }
+    if let Some(path) = &compiler.rustc_binary {
+        command.env("RUSTC", path);
+    }
+    if let Some(path) = &compiler.rustup_home {
+        command.env("RUSTUP_HOME", path);
+    }
+    if let Some(toolchain) = &compiler.rustup_toolchain {
+        command.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    command.env("CARGO_INCREMENTAL", "0");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
+/// Cargo paths and HOST/TARGET proof are shared with Custom. Keep the caller's
+/// build lease alive until its immutable snapshot has been verified.
+fn build_native_player_product(
+    compiler: &ScriptCompiler,
+    backend: &Path,
+    target: &Path,
+    features: &BTreeSet<String>,
+    log_path: &Path,
+) -> Result<PathBuf, String> {
+    use module_engine_script::cargo_build::{Collector, Selector, native_host};
+    let cargo = compiler
+        .cargo_binary
+        .as_deref()
+        .unwrap_or_else(|| Path::new("cargo"));
+    let rustc = compiler
+        .rustc_binary
+        .as_deref()
+        .unwrap_or_else(|| Path::new("rustc"));
+    let version = native_player_command(compiler, rustc, backend)
+        .arg("-vV")
+        .output()
+        .map_err(|error| format!("Player rustc probe: {error}"))?;
+    if !version.status.success() {
+        return Err(format!(
+            "Player rustc probe failed: {}",
+            String::from_utf8_lossy(&version.stderr)
+        ));
+    }
+    let host = native_host(&String::from_utf8_lossy(&version.stdout))
+        .map_err(|error| error.to_string())?;
+    let metadata = native_player_command(compiler, cargo, backend)
+        .args([
+            "metadata",
+            "--offline",
+            "--locked",
+            "--no-deps",
+            "--format-version=1",
+        ])
+        .output()
+        .map_err(|error| format!("Player Cargo metadata: {error}"))?;
+    if !metadata.status.success() {
+        return Err(format!(
+            "Player Cargo metadata failed: {}",
+            String::from_utf8_lossy(&metadata.stderr)
+        ));
+    }
+    let selector = Selector::workspace_binary(
+        &String::from_utf8_lossy(&metadata.stdout),
+        &backend.join("crates/player/Cargo.toml"),
+        "module-engine-player",
+        "module-engine-player",
+    )
+    .map_err(|error| error.to_string())?;
+    let mut collector = Collector::executable_only(selector);
+    let mut command = native_player_command(compiler, cargo, backend);
+    command
+        .args([
+            "build",
+            "--offline",
+            "--locked",
+            "--release",
+            "--message-format=json",
+            "-p",
+            "module-engine-player",
+            "--bin",
+            "module-engine-player",
+            "--no-default-features",
+            "--features",
+        ])
+        .arg(features.iter().cloned().collect::<Vec<_>>().join(","))
+        .arg("--target-dir")
+        .arg(target);
+    use std::io::Read;
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Player Cargo launch: {error}"))?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let diagnostics = std::thread::spawn(move || -> Result<Vec<u8>, std::io::Error> {
+        let mut retained = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = stderr.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let keep = count.min((1024 * 1024_usize).saturating_sub(retained.len()));
+            retained.extend_from_slice(&buffer[..keep]);
+        }
+        Ok(retained)
+    });
+    let read_result = (|| -> std::io::Result<()> {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = stdout.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(());
+            }
+            collector.feed(&buffer[..count]);
+        }
+    })();
+    if read_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("Player Cargo wait: {error}"));
+    let stderr = diagnostics
+        .join()
+        .map_err(|_| "Player Cargo diagnostics reader failed".to_owned())?
+        .map_err(|error| format!("Player Cargo diagnostics: {error}"))?;
+    read_result.map_err(|error| format!("Player Cargo output: {error}"))?;
+    let output = collector.finish();
+    let log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&stderr),
+        output.diagnostics()
+    );
+    fs::write(log_path, &log).map_err(|error| error.to_string())?;
+    if !status?.success() {
+        return Err(format!("Selected Player build failed: {log}"));
+    }
+    output
+        .executable(&host, target)
+        .map_err(|error| format!("Native Player product: {error}"))
 }
 
 fn native_cache_root(backend: &Path, directory: &str) -> PathBuf {
@@ -1120,6 +1243,294 @@ mod tests {
                 .join(".work/player-native-target")
                 .join(native_platform())
         );
+    }
+
+    #[test]
+    #[ignore = "native Cargo product acceptance: run explicitly with restored tools and no competing builds"]
+    fn native_player_target_modes_use_actual_artifacts() {
+        const CASE: &str = "MODULE_ENGINE_P4_TARGET_CASE";
+        const NAME: &str = "game_package::tests::native_player_target_modes_use_actual_artifacts";
+        let compiler = ScriptCompiler::new(backend_root(), std::env::temp_dir());
+        let rustc = compiler
+            .rustc_binary
+            .as_deref()
+            .unwrap_or_else(|| Path::new("rustc"));
+        let version = native_player_command(&compiler, rustc, &backend_root())
+            .arg("-vV")
+            .output()
+            .unwrap();
+        assert!(version.status.success());
+        let host = module_engine_script::cargo_build::native_host(&String::from_utf8_lossy(
+            &version.stdout,
+        ))
+        .unwrap();
+        let Ok(mode) = std::env::var(CASE) else {
+            for mode in ["default", "environment", "configuration", "foreign"] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        NAME,
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CASE, mode)
+                    .env_remove("CARGO_BUILD_TARGET");
+                match mode {
+                    "environment" => {
+                        child.env("CARGO_BUILD_TARGET", &host);
+                    }
+                    "foreign" => {
+                        child.env("CARGO_BUILD_TARGET", "wasm32-unknown-unknown");
+                    }
+                    _ => {}
+                }
+                let output = child.output().unwrap();
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+                eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+                assert!(
+                    output.status.success(),
+                    "native Player target case {mode} failed"
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
+            return;
+        };
+        let guard =
+            module_engine_script::TestArtifactGuard::new(&std::env::temp_dir(), "p4-native")
+                .unwrap();
+        let root = guard.path();
+        fs::create_dir_all(root.join("crates/player/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=[\"crates/player\"]\nresolver=\"3\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"module-engine-player\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("crates/player/Cargo.toml"), "[package]\nname=\"module-engine-player\"\nversion=\"0.0.0\"\nedition=\"2024\"\n[features]\nui=[]\n").unwrap();
+        fs::write(
+            root.join("crates/player/build.rs"),
+            include_str!("../../player/build.rs"),
+        )
+        .unwrap();
+        let source = root.join("crates/player/src/main.rs");
+        fs::write(&source, "fn main(){println!(\"product-one\");}\n").unwrap();
+        if mode == "configuration" {
+            fs::create_dir(root.join(".cargo")).unwrap();
+            fs::write(
+                root.join(".cargo/config.toml"),
+                format!("[build]\ntarget={host:?}\n"),
+            )
+            .unwrap();
+        }
+        let target = root.join("t");
+        let stale = target
+            .join("release")
+            .join(module_engine_player::package::CARGO_PLAYER_EXECUTABLE);
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        let poison = b"stale default output must not be selected or executed";
+        if mode != "default" {
+            fs::write(&stale, poison).unwrap();
+        }
+        let features = BTreeSet::from(["ui".into()]);
+        let build = || {
+            build_native_player_product(
+                &compiler,
+                root,
+                &target,
+                &features,
+                &root.join("build.log"),
+            )
+        };
+        if mode == "foreign" {
+            let error = build().unwrap_err();
+            assert!(
+                error.contains("target") || error.contains("build failed"),
+                "{error}"
+            );
+            assert_eq!(fs::read(&stale).unwrap(), poison);
+            return;
+        }
+        let first = build().unwrap();
+        let expected = if mode == "default" {
+            target.clone()
+        } else {
+            target.join(&host)
+        }
+        .join("release")
+        .join(module_engine_player::package::CARGO_PLAYER_EXECUTABLE);
+        assert_eq!(first, expected.canonicalize().unwrap());
+        assert_eq!(
+            std::process::Command::new(&first).output().unwrap().stdout,
+            b"product-one\n"
+        );
+        fs::write(
+            &source,
+            "fn main(){println!(\"product-two-from-warm-native-target\");}\n",
+        )
+        .unwrap();
+        let second = build().unwrap();
+        assert_eq!(second, expected.canonicalize().unwrap());
+        assert_eq!(
+            std::process::Command::new(&second).output().unwrap().stdout,
+            b"product-two-from-warm-native-target\n"
+        );
+        let second_hash = hash_file(&second).unwrap();
+        let cargo = compiler
+            .cargo_binary
+            .as_deref()
+            .unwrap_or_else(|| Path::new("cargo"));
+        let unchanged = native_player_command(&compiler, cargo, root)
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "--release",
+                "--message-format=json",
+                "-p",
+                "module-engine-player",
+                "--bin",
+                "module-engine-player",
+                "--no-default-features",
+                "--features",
+                "ui",
+                "--target-dir",
+            ])
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(unchanged.status.success());
+        let messages: Vec<serde_json::Value> = String::from_utf8_lossy(&unchanged.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert!(messages.iter().any(|message| {
+            message["reason"] == "compiler-artifact"
+                && message["target"]["name"] == "module-engine-player"
+                && message["profile"]["test"] == false
+                && message["fresh"] == true
+                && message["executable"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path).canonicalize().unwrap() == second)
+        }));
+        let fresh = build().unwrap();
+        assert_eq!(fresh, second);
+        assert_eq!(hash_file(&fresh).unwrap(), second_hash);
+        assert_eq!(
+            std::process::Command::new(&fresh).output().unwrap().stdout,
+            b"product-two-from-warm-native-target\n"
+        );
+        if mode != "default" {
+            assert_eq!(fs::read(&stale).unwrap(), poison);
+        }
+        println!(
+            "Player {mode}: cold/warm/unchanged Cargo products (actual fresh=true) validated at {}",
+            second.display()
+        );
+    }
+
+    #[test]
+    #[ignore = "native Cargo snapshot acceptance: run explicitly with restored tools and no competing builds"]
+    fn concurrent_native_player_variants_keep_immutable_snapshots() {
+        let compiler = ScriptCompiler::new(backend_root(), std::env::temp_dir());
+        let guard =
+            module_engine_script::TestArtifactGuard::new(&std::env::temp_dir(), "p4-snapshots")
+                .unwrap();
+        let root = guard.path();
+        fs::create_dir_all(root.join("crates/player/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=[\"crates/player\"]\nresolver=\"3\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"module-engine-player\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("crates/player/Cargo.toml"), "[package]\nname=\"module-engine-player\"\nversion=\"0.0.0\"\nedition=\"2024\"\n[features]\nui=[]\nalternate=[]\n").unwrap();
+        fs::write(
+            root.join("crates/player/build.rs"),
+            include_str!("../../player/build.rs"),
+        )
+        .unwrap();
+        fs::write(root.join("crates/player/src/main.rs"), "fn main(){println!(\"{}\",if cfg!(feature=\"alternate\"){\"alternate\"}else{\"plain\"});}\n").unwrap();
+        let build_root = root.join("snapshots");
+        let target = root.join("t");
+        let lease = native_player_build_lease(&build_root).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let build_root = &build_root;
+            scope.spawn(move || {
+                entered_tx.send(()).unwrap();
+                let _contender = native_player_build_lease(build_root).unwrap();
+                acquired_tx.send(()).unwrap();
+            });
+            entered_rx.recv().unwrap();
+            // No Cargo work precedes this acquisition: this directly tests the lease.
+            assert!(matches!(
+                acquired_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            drop(lease);
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        });
+        let lease = native_player_build_lease(&build_root).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for alternate in [false, true] {
+                let started = started_tx.clone();
+                let finished = finished_tx.clone();
+                let compiler = &compiler;
+                let target = &target;
+                let build_root = &build_root;
+                scope.spawn(move || {
+                    let mut features = BTreeSet::from(["ui".into()]);
+                    let key = if alternate {
+                        features.insert("alternate".into());
+                        "alternate"
+                    } else {
+                        "plain"
+                    };
+                    started.send(()).unwrap();
+                    let snapshot = build_native_player_snapshot(
+                        compiler, root, target, &features, build_root, key,
+                    )
+                    .unwrap();
+                    finished.send((key, snapshot)).unwrap();
+                });
+            }
+            started_rx.recv().unwrap();
+            started_rx.recv().unwrap();
+            // Both requests have entered while another export owns the lease.
+            assert!(matches!(
+                finished_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            drop(lease);
+        });
+        let products: Vec<_> = finished_rx.try_iter().collect();
+        assert_eq!(products.len(), 2);
+        assert_ne!(products[0].1, products[1].1);
+        for (key, snapshot) in products {
+            assert!(snapshot.starts_with(build_root.join(key)));
+            assert_eq!(
+                std::process::Command::new(snapshot)
+                    .output()
+                    .unwrap()
+                    .stdout,
+                format!("{key}\n").as_bytes()
+            );
+        }
     }
 
     #[cfg(not(windows))]

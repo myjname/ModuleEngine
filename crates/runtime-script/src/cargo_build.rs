@@ -19,13 +19,58 @@ const HOST_KEY: &str = "MODULE_ENGINE_WORKER_BUILD_HOST";
 const TARGET_KEY: &str = "MODULE_ENGINE_WORKER_BUILD_TARGET";
 
 #[derive(Clone, Debug)]
-pub(crate) struct Selector {
+pub struct Selector {
     package: String,
     manifest: PathBuf,
     name: String,
 }
 
 impl Selector {
+    /// Select one workspace binary by its exact manifest, package and target.
+    /// Unlike a generated Custom package, a virtual workspace has no resolve root.
+    pub fn workspace_binary(
+        text: &str,
+        manifest: &Path,
+        package_name: &str,
+        binary_name: &str,
+    ) -> Result<Self, ScriptError> {
+        let value: Value = serde_json::from_str(text)
+            .map_err(|error| ScriptError::Compile(format!("Invalid Cargo metadata: {error}")))?;
+        let manifest = manifest.canonicalize().map_err(setup)?;
+        let packages: Vec<_> = value["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|package| {
+                package["name"].as_str() == Some(package_name)
+                    && package["manifest_path"].as_str().is_some_and(|path| {
+                        Path::new(path).canonicalize().ok().as_ref() == Some(&manifest)
+                    })
+                    && package["targets"].as_array().is_some_and(|targets| {
+                        targets.iter().any(|target| {
+                            target["name"].as_str() == Some(binary_name)
+                                && target["kind"]
+                                    .as_array()
+                                    .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+                        })
+                    })
+            })
+            .collect();
+        if packages.len() != 1 {
+            return Err(ScriptError::Compile(
+                "Cargo metadata did not identify exactly one selected native package/binary".into(),
+            ));
+        }
+        let package = packages[0]["id"]
+            .as_str()
+            .ok_or_else(|| ScriptError::Compile("Cargo package identity is missing".into()))?;
+        Ok(Self {
+            package: package.into(),
+            manifest,
+            name: binary_name.into(),
+        })
+    }
+
     pub(crate) fn from_metadata(
         text: &str,
         manifest: &Path,
@@ -60,7 +105,7 @@ impl Selector {
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct BuildOutput {
+pub struct BuildOutput {
     executables: BTreeSet<PathBuf>,
     pub(crate) products: BTreeSet<PathBuf>,
     native: BTreeSet<(String, String)>,
@@ -72,11 +117,12 @@ pub(crate) struct BuildOutput {
 }
 
 impl BuildOutput {
-    pub(crate) fn executable(
-        &self,
-        host: &str,
-        target_root: &Path,
-    ) -> Result<PathBuf, ScriptError> {
+    /// Rendered compiler diagnostics, bounded independently of the JSON stream.
+    pub fn diagnostics(&self) -> &str {
+        &self.diagnostics
+    }
+
+    pub fn executable(&self, host: &str, target_root: &Path) -> Result<PathBuf, ScriptError> {
         if let Some(error) = &self.error {
             return Err(ScriptError::Compile(error.clone()));
         }
@@ -115,11 +161,12 @@ impl BuildOutput {
     }
 }
 
-pub(crate) struct Collector {
+pub struct Collector {
     selector: Selector,
     line: Vec<u8>,
     dropping_line: bool,
     output: BuildOutput,
+    collect_dependency_units: bool,
 }
 
 impl Collector {
@@ -129,12 +176,22 @@ impl Collector {
             line: vec![],
             dropping_line: false,
             output: BuildOutput::default(),
+            collect_dependency_units: true,
+        }
+    }
+
+    /// Reuse the same product/native checks without retaining dependency facts
+    /// for a large Player build. Custom freshness still collects those facts.
+    pub fn executable_only(selector: Selector) -> Self {
+        Self {
+            collect_dependency_units: false,
+            ..Self::new(selector)
         }
     }
 
     /// Drain indefinitely, but retain at most one bounded line and a bounded
     /// set of root products and dependency unit facts.
-    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+    pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if byte == b'\n' {
                 if !self.dropping_line {
@@ -156,7 +213,7 @@ impl Collector {
         }
     }
 
-    pub(crate) fn finish(mut self) -> BuildOutput {
+    pub fn finish(mut self) -> BuildOutput {
         if !self.dropping_line && !self.line.is_empty() {
             self.parse_line();
         }
@@ -303,7 +360,9 @@ impl Collector {
             }
             return;
         }
-        self.facts(&value);
+        if self.collect_dependency_units {
+            self.facts(&value);
+        }
         if value["package_id"].as_str() != Some(&self.selector.package) {
             return;
         }
@@ -421,7 +480,7 @@ fn setup(error: std::io::Error) -> ScriptError {
     ScriptError::Setup(error.to_string())
 }
 
-pub(crate) fn native_host(verbose: &str) -> Result<String, ScriptError> {
+pub fn native_host(verbose: &str) -> Result<String, ScriptError> {
     let hosts: Vec<_> = verbose
         .lines()
         .filter_map(|line| line.strip_prefix("host: "))
@@ -539,7 +598,7 @@ mod tests {
 
     fn artifact(selector: &Selector, executable: &Path) -> Value {
         json!({"reason":"compiler-artifact", "package_id":selector.package,
-            "manifest_path":selector.manifest, "target":{"name":"worker", "kind":["bin"]},
+            "manifest_path":selector.manifest, "target":{"name":selector.name, "kind":["bin"]},
             "profile":{"test":false}, "executable":executable, "filenames":[executable]})
     }
 
@@ -557,6 +616,68 @@ mod tests {
         feed(
             collector,
             json!({"reason":"build-finished", "success":true}),
+        );
+    }
+
+    #[test]
+    fn workspace_selector_uses_manifest_and_binary_without_virtual_workspace_root() {
+        let (guard, _) = fixture();
+        let manifest = guard.path().join("Cargo.toml");
+        let package = json!({"id":"selected-player", "name":"module-engine-player", "manifest_path":manifest,
+            "targets":[{"name":"module-engine-player","kind":["bin"]}]});
+        let mut metadata = json!({"resolve":null,"packages":[package]});
+        let select = |value: &Value| {
+            Selector::workspace_binary(
+                &value.to_string(),
+                &manifest,
+                "module-engine-player",
+                "module-engine-player",
+            )
+        };
+        assert_eq!(select(&metadata).unwrap().package, "selected-player");
+        metadata["packages"][0]["targets"][0]["kind"] = json!(["lib"]);
+        assert!(select(&metadata).is_err());
+        metadata["packages"][0]["targets"][0]["kind"] = json!(["bin"]);
+        let duplicate = metadata["packages"][0].clone();
+        metadata["packages"].as_array_mut().unwrap().push(duplicate);
+        assert!(select(&metadata).is_err());
+    }
+
+    #[test]
+    fn executable_only_collector_ignores_large_dependency_closure_and_stale_default_path() {
+        let (guard, selector) = fixture();
+        let target = guard.path().join("target");
+        let stale = target.join("release/old-default");
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, b"stale default output must never be selected").unwrap();
+        let actual = target.join("explicit-native/release/actual");
+        fs::create_dir_all(actual.parent().unwrap()).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), &actual).unwrap();
+        let mut collector = Collector::executable_only(selector.clone());
+        for index in 0..400 {
+            let mut dependency = artifact(&selector, &stale);
+            dependency["package_id"] = format!("dependency-{index}").into();
+            feed(&mut collector, dependency);
+        }
+        feed(&mut collector, artifact(&selector, &actual));
+        proof(&mut collector, "native", "native");
+        let output = collector.finish();
+        assert!(output.units.is_empty());
+        assert_eq!(
+            output.executable("native", &target).unwrap(),
+            actual.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fs::read(&stale).unwrap(),
+            b"stale default output must never be selected"
+        );
+        fs::write(&actual, [0_u8; 64]).unwrap();
+        assert!(
+            output
+                .executable("native", &target)
+                .unwrap_err()
+                .to_string()
+                .contains("not a native executable")
         );
     }
 
