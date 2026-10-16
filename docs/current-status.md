@@ -37,7 +37,7 @@
 
 - Windows: корневой [verify.ps1](../verify.ps1); необязательная ветка `-NativeBenchmarks` требует рабочего стола и изолированного замера.
 - Linux: корневой [verify.sh](../verify.sh), условия native toolchain/DXC/Vulkan — в [Linux guide](linux-support.md). Скрипт включает offscreen проверки и не закрывает desktop/export acceptance.
-- [Реестр и stdlib launcher](verification.md) добавляют явные `quick`, `contracts`, `native`, `package`; `--plan`/`--list` читают конфигурацию без Cargo. Native tests запускаются напрямую из CargoJSON-selected executable с normal loader environment. Windows-only проверки на Linux отмечаются `skipped`. `package` проверяет минимальные Cargo product/snapshot fixtures, а не полный Full/Team/Player export.
+- [Реестр и stdlib launcher](verification.md) добавляют явные `quick`, `contracts`, `native`, `native-tools`, `package`; `--plan`/`--list` читают конфигурацию без Cargo. Native tests запускаются напрямую из CargoJSON-selected executable с normal loader environment. Windows-only проверки на Linux отмечаются `skipped`. `package` проверяет минимальные Cargo product/snapshot fixtures, а не полный Full/Team/Player export.
 - Объём legacy-вызовов без аргументов сохранён; Windows `-NativeBenchmarks` выбирает actual normal Editor из CargoJSON и по-прежнему не требует Python. Новый launcher требует уже установленный Python 3.9+ без сторонних зависимостей. Performance остаётся отдельным opt-in legacy/адресным маршрутом с прежними ограничениями.
 
 Launcher и его unit fixtures реализованы отдельно от Rust. Unit-проверки и планирование не являются новой приёмкой engine/native/package; реальные профили требуют своих отчётов на текущем snapshot. Правила работы и сохранности данных: [AGENTS.md](../AGENTS.md).
@@ -54,3 +54,14 @@ Launcher и его unit fixtures реализованы отдельно от Ru
 исходник восстановлен побайтно, адресный тест затем прошёл. Это тестовое усиление,
 без изменения production-поведения или Cargo dependencies; прежние performance
 и delivery ограничения сохраняются.
+
+[GitHub CI](ci.md) запускает Windows/Linux contracts и выбранные native/package
+маршруты; в публичном `myjname/ModuleEngine` для `main` требуется `CI required`,
+включая администратора. Новые версии оцениваются по фактическому CI своего SHA,
+не по старому зелёному запуску. Негативный служебный PR подтвердил блокировку merge.
+
+[Независимое ревью](review.md) обязательно для существенных изменений по AGENTS.
+Другой агент/человек проверяет diff, цель, реальные пути и evidence. Stdlib
+`review_snapshot.py` связывает заключение с HEAD и байтами tracked/untracked source;
+его успешная сверка сама не является approval. [Шаблон](review-template.md)
+сохраняет замечания, исправления, повторную проверку и непроверенные границы.
