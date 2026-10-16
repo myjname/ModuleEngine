@@ -619,12 +619,11 @@ fn resolve_gcc(
         }
     }
     for argument in &command.arguments {
-        if let Some(name) = argument.strip_prefix("-l") {
-            if !resolved_names.contains(&format!("lib{name}.so"))
-                && !resolved_names.contains(&format!("lib{name}.a"))
-            {
-                return Err(format!("Native link library {name} was not resolved"));
-            }
+        if let Some(name) = argument.strip_prefix("-l")
+            && !resolved_names.contains(&format!("lib{name}.so"))
+            && !resolved_names.contains(&format!("lib{name}.a"))
+        {
+            return Err(format!("Native link library {name} was not resolved"));
         }
     }
     let mut visited = BTreeSet::new();
