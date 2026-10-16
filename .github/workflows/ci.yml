@@ -38,7 +38,7 @@ jobs:
       - id: routes
         env:
           CI_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        run: python scripts/ci_plan.py --base "$CI_BASE"
+        run: python scripts/ci_plan.py --base invalid-negative-acceptance
 
   checks:
     name: Contracts and selected routes (${{ matrix.os }})
