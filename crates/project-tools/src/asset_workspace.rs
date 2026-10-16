@@ -1949,6 +1949,15 @@ mod tests {
         defaults: Value,
         field_path: &str,
     ) -> AssetWorkspace {
+        schema_default_workspace_with_optional(workspace, doc, defaults, field_path, false)
+    }
+    fn schema_default_workspace_with_optional(
+        workspace: AssetWorkspace,
+        doc: &mut GraphDocument,
+        defaults: Value,
+        field_path: &str,
+        optional: bool,
+    ) -> AssetWorkspace {
         use module_engine_core::{ComponentSchema, PropertySchema, PropertyScope, PropertyType};
         let field = PropertySchema {
             id: format!("audit.defaults.{field_path}"),
@@ -1958,7 +1967,7 @@ mod tests {
             },
             value_type: PropertyType::AssetReference {
                 kinds: vec!["png".into()],
-                optional: false,
+                optional,
             },
             default: module_engine_core::component_field(&defaults, field_path)
                 .unwrap()
@@ -2162,6 +2171,137 @@ mod tests {
             doc
         );
         crate::history::remove_test_directory(&root);
+    }
+
+    #[test]
+    fn explicit_optional_null_suppresses_schema_default_during_move_and_delete() {
+        for source in ["local", "prefab", "leaf-override", "aggregate-override"] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let game = doc.game.as_mut().unwrap();
+            let object_index = usize::from(source == "prefab");
+            if source == "prefab" {
+                game.prefabs
+                    .get_mut("asset-template")
+                    .unwrap()
+                    .components
+                    .insert("audit.defaults".into(), json!({"slots":[{"path":null}]}));
+            } else {
+                let object = &mut game.scenes.get_mut("arena").unwrap().objects[object_index];
+                object.components.insert(
+                    "audit.defaults".into(),
+                    if source == "local" {
+                        json!({"slots":[{"path":null}]})
+                    } else {
+                        json!({})
+                    },
+                );
+                if source == "leaf-override" {
+                    object
+                        .overrides
+                        .insert("audit.defaults.slots.0.path".into(), Value::Null);
+                } else if source == "aggregate-override" {
+                    object
+                        .overrides
+                        .insert("audit.defaults.slots.0".into(), json!({"path":null}));
+                }
+            }
+            let workspace = schema_default_workspace_with_optional(
+                workspace,
+                &mut doc,
+                json!({"slots":[{"path":"assets/textures/a.png"}]}),
+                "slots.0.path",
+                true,
+            );
+            let assert_resolved_null = |candidate: &GraphDocument| {
+                workspace.validate_candidate(candidate).unwrap();
+                let composition = workspace.composition.as_ref().unwrap();
+                let activity = composition.activity(candidate).unwrap();
+                let manifest = AssetManifest::from_value(&candidate.asset_manifest).unwrap();
+                let paths = manifest.asset_paths();
+                let game = candidate.game.as_ref().unwrap();
+                let entities = game
+                    .resolve_scene_with_context(
+                        "arena",
+                        &composition.systems,
+                        &module_engine_core::ComponentValidationContext {
+                            scenes: &game.scenes,
+                            modules: &activity.modules,
+                            asset_paths: Some(&paths),
+                            active_components: Some(&activity.components),
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    module_engine_core::component_field(
+                        &entities[object_index].components["audit.defaults"],
+                        "slots.0.path",
+                    ),
+                    Some(&Value::Null),
+                    "{source}"
+                );
+                manifest.verify(&root).unwrap();
+            };
+            assert_resolved_null(&doc);
+            assert!(
+                workspace.usages(&doc, &asset).unwrap().is_empty(),
+                "{source}"
+            );
+            let schema_before = workspace
+                .composition
+                .as_ref()
+                .unwrap()
+                .systems
+                .components()
+                .schema("audit.defaults")
+                .unwrap()
+                .clone();
+            let moved = workspace
+                .move_asset(&doc, &asset, "assets/textures/moved.png")
+                .unwrap();
+            assert_resolved_null(&moved.document);
+            assert!(
+                workspace
+                    .usages(&moved.document, &asset)
+                    .unwrap()
+                    .is_empty(),
+                "{source}"
+            );
+            assert!(!root.join("assets/textures/a.png").exists());
+            assert_eq!(
+                fs::read(root.join("assets/textures/moved.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            let deleted = workspace
+                .delete_asset(&moved.document, &asset, DeletePolicy::RefuseUsed)
+                .unwrap();
+            assert_resolved_null(&deleted.document);
+            assert!(!root.join("assets/textures/moved.png").exists());
+            for candidate in [&moved.document, &deleted.document] {
+                assert_eq!(candidate.game, doc.game);
+                assert_eq!(candidate.engine_lock, doc.engine_lock);
+                assert_eq!(candidate.engine_profile, doc.engine_profile);
+                assert_eq!(candidate.module_versions, doc.module_versions);
+            }
+            assert_eq!(
+                workspace
+                    .composition
+                    .as_ref()
+                    .unwrap()
+                    .systems
+                    .components()
+                    .schema("audit.defaults")
+                    .unwrap(),
+                &schema_before
+            );
+            let restored = deleted.record.undo(&root, &deleted.document).unwrap();
+            assert_eq!(restored, moved.document);
+            assert_resolved_null(&restored);
+            assert_eq!(moved.record.undo(&root, &restored).unwrap(), doc);
+            crate::history::remove_test_directory(&root);
+        }
     }
 
     #[test]
