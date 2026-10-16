@@ -47,7 +47,7 @@ python3 scripts/verify.py --profile native --plan
 | Профиль | Объём | Чего он не подтверждает |
 | --- | --- | --- |
 | `quick` | `cargo fmt --all -- --check`, все lib tests пакетов `module-engine-core` и `module-engine-project`. | Не workspace, Editor, Vulkan runtime, secondary Custom builds или ignored acceptance. Холодная компиляция всё равно может быть долгой. |
-| `contracts` | Quick плюс существующие `cargo_build::tests::`, четыре Inspector-регрессии и три проверки свойств с 99 сценариями Apply/save/reopen. | Не всё UI, native dialogs или полный authoring suite. |
+| `contracts` | Quick плюс `cargo_build::tests::`, четыре Inspector-регрессии, 99 сценариев свойств Inspector, четыре прежних Save As tests и 28 сценариев сохранности workflow. | Не всё UI, native dialogs или полный authoring suite. |
 | `native` | Пять явных ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context и Windows executable spellings. | Не desktop benchmark, screen latency, Full export или строгие 60 FPS. Windows-only test на Linux отмечается `skipped`, а не пройденным. |
 | `native-tools` | Три native linker/cache/executable-spelling проверки из `native`, без GameUI и GPU. | Не полный `native`; на Linux Windows-only test отмечается `skipped`. Используется Windows CI. |
 | `package` | Две ignored проверки `game_package`: native target modes и concurrent immutable snapshots. Они собирают минимальные Cargo fixtures и исполняют их продукты. | **Не реальный Full/Team/Player game export, relocation или полная приёмка поставки.** Эти CLI-проверки остаются адресным/legacy маршрутом. |
@@ -105,12 +105,40 @@ payload и соседний namespace `foo.bar` должны сохранить�
 операции Assets. При новом дефекте добавляйте его минимальный случай и расширяйте
 соответствующее свойство, сохраняя существующие проверки typed references/defaults.
 
+## Сохранность Save As и файловой истории
+
+Три exact tests `app::editor_workflow::workflow_tests::preservation_*` в
+[editor_workflow.rs](../crates/editor/src/editor_workflow.rs) используют настоящие
+команды, worker, save/read и файловую историю. Матрица конечная, без fuzzing и
+новых зависимостей:
+
+- 18 случаев: шесть точных ключей/значений и бинарных payload через Cancel,
+  занятый ресурс назначения и успешный Save As. Проверяются исходные байты,
+  dirty JSON, Play/history/Recent, opaque payload, stable asset ID и Engine binding.
+- Четыре случая Rename/Delete × Undo/Redo: отказ публикации JSON обязан откатить
+  файлы и сохранить историю. Единственный допустимый staged recovery JSON
+  сверяется с кандидатом; повтор после восстановления пути обязан пройти.
+- Шесть случаев ветвления истории: Rename → Undo → Delete не позволяет вернуть
+  отброшенную ветку через Redo. Сохраняются стабильные ID, unknown/null payload,
+  бинарные байты, соседний ресурс и исходный binding.
+
+Ожидания — оригинальный документ, сохранённые bytes/hash и strict reopen,
+а не повторение алгоритма rollback. Успешный Save As служит положительным контролем.
+Четыре существующих `workflow_tests::save_as_*` также входят в `contracts`:
+picker error, same-path publication failure, copy и invalid JSON.
+
+Это не crash/power-loss recovery, все возможные I/O отказы или GUI dialogs.
+Конфликт ресурса проверяет отказ до публикации, не откат её частичного завершения.
+Реальный отказ записи отдельно проверяется в Undo/Redo. На WSL/DrvFS Full fixtures
+медленнее; потолок двух больших матриц — 300 секунд, без изменения product watchdogs.
+
 ## Выбор по изменению
 
 | Что меняется | Начальный маршрут | Дополнительное доказательство |
 | --- | --- | --- |
 | Только нейтральный Core или Project data/history | `quick` | Адресная регрессия изменённого контракта. |
 | Inspector, schemas/defaults, prefab, authored JSON | `contracts` | Для нового UI-поведения — его отдельный сценарий; четыре прежние регрессии не проверяют все окна. |
+| Save As, Assets и файловая Undo/Redo history | `contracts` | Адресный сценарий нового отказа; bounded матрицы не заменяют остальные export/authoring контракты. |
 | Custom compiler, toolchain, store, lifecycle/slow ticks | `contracts`, затем `native` | Измерения без конкурирующих native/GPU/build операций; desktop/cold-start проверяются отдельно при изменении этих требований. |
 | Выбор Cargo products или Player packaging | `contracts`, затем `package` | Для изменённого export/delivery — отдельная Full/Team/Player приёмка реальной игры. |
 
