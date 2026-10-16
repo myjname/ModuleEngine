@@ -1,10 +1,16 @@
-# Состояние Rust Custom и самостоятельные workers
+<a id="состояние-rust-custom-и-самостоятельные-workers"></a>
 
-Назначение: таймеры, счётчики и текущие действия Custom должны жить между кадрами, а замена кода не должна случайно сбрасывать игру. Состояние принадлежит host. Worker получает его копию и возвращает следующую копию вместе с командами и событиями. Выполнение Rust и принятие результата — разные операции.
+# Rust Custom State and Standalone Workers
 
-## Объявление и пример
+[English](custom-state.md) | [Русский](ru/custom-state.md) | [Documentation](README.md)
 
-В начале исходника, до первого Rust item или attribute, задаётся одна декларация-комментарий с JSON в одной строке. Перед ней допустимы пустые строки, обычные однострочные комментарии и shebang; текст внутри тела Rust или строкового литерала не считается декларацией. Inner attributes можно поставить после декларации:
+Purpose: Custom timers, counters, and ongoing actions must live between frames, and code replacement must not accidentally reset the game. State belongs to the host. The worker receives a copy and returns the next copy with commands and events. Executing Rust and accepting the result are separate operations.
+
+<a id="объявление-и-пример"></a>
+
+## Declaration and Example
+
+At the start of the source, before the first Rust item or attribute, one declaration comment specifies JSON on a single line. Blank lines, ordinary single-line comments, and a shebang are allowed before it; text inside a Rust body or string literal is not a declaration. Inner attributes can follow the declaration:
 
 ```rust
 // module-engine-state: {"schema":"attack.v1","initial":{"cooldown":0.0,"swings":0}}
@@ -21,51 +27,59 @@ fn update(ctx: &mut ScriptContext) {
 }
 ```
 
-`schema` — непустое имя и версия, до 256 байт. `initial` — объект с начальными значениями. Без декларации состояние равно `null`: старые программы продолжают работать. Каждая программа Custom имеет своё состояние. `ctx.state_schema` содержит объявленную версию. `ctx.input` и `ctx.events` — сериализованные контракты подключённого игрового модуля; host передаёт ввод и события, а `ctx.emit_event(value)` добавляет новые события для последующей проверки host.
+`schema` is a nonempty name and version, up to 256 bytes. `initial` is an object with initial values. Without a declaration, state is `null`: old programs continue working. Each Custom program has its own state. `ctx.state_schema` contains the declared version. `ctx.input` and `ctx.events` are serialized contracts of the connected game module; the host supplies input and events, while `ctx.emit_event(value)` adds new events for subsequent host validation.
 
-Структура `initial` задаёт фиксированные ключи объектов и типы JSON-значений. Числа одного JSON-типа могут менять значение, строки могут менять текст. Новые поля, удаление поля или замена числа строкой отклоняются. Массивы могут менять длину: непустой начальный массив задаёт структуру элемента первым элементом. Пустой массив означает непрозрачный список; совместимость его содержимого контролирует автор версии `schema`. `null` остаётся `null`. Максимум состояния и каждого входного/выходного пакета — 1 МиБ; команд и новых событий — не более 4096.
+The `initial` structure defines fixed object keys and JSON value types. Numbers of the same JSON type can change value, and strings can change text. New fields, field deletion, or replacing a number with a string are rejected. Arrays can change length: a nonempty initial array defines element structure through its first element. An empty array means an opaque list; the author of the `schema` version controls its content compatibility. `null` remains `null`. The maximum state and each input/output packet is 1 MiB; commands and new events are limited to 4096.
 
-## Применение и миграция
+<a id="применение-и-миграция"></a>
 
-Окно **Custom / Rust** выбирает исполнитель по выбранному источнику. Игровой `source_id` из Gameplay Systems использует экземпляры Game; legacy Custom внешнего графа использует отдельный preview-исполнитель. Статус активной версии, ошибки, сброс и миграция в этом окне относятся к выбранному исполнителю. Для игрового источника показывается число экземпляров с текущим и предыдущим скомпилированным текстом: один источник может быть подключён к нескольким узлам с независимым состоянием.
+## Application and Migration
 
-Открывать окно Game перед применением игрового Rust не требуется: Rust-окно запускает обычную фоновую подготовку Game, включая остановленную игру. До готовности исполнителя и во время текущей компиляции **«Применить Rust»** недоступна, рядом показана причина. После завершения можно применить следующую версию. Если начальная подготовка отклонена из-за ошибочного исходника, его исправление разрешает новую попытку. Для game-only источников редактор не запускает дополнительную скрытую компиляцию legacy preview при наборе текста.
+The **Custom / Rust** window chooses the executor by the selected source. A game `source_id` from Gameplay Systems uses Game instances; legacy Custom in the external graph uses a separate preview executor. Active-version status, errors, reset, and migration in this window apply to the selected executor. For a game source, the counts of instances with the current and previous compiled text are shown: one source can connect to multiple nodes with independent state.
 
-Несовместимый кандидат связан с конкретным скомпилированным текстом. Если после отказа изменить исходник, сброс и миграция старого кандидата недоступны: сначала нужно применить текущий Rust. Это предотвращает установку версии, которая отличается от открытого текста. В обычном Game UI используются те же операции и проверки, что в Rust-окне.
+Opening the Game window before applying game Rust is unnecessary: the Rust window starts normal background Game preparation, including for a stopped game. Until the executor is ready and during ongoing compilation, **Apply Rust** (`Применить Rust`) is unavailable, with the reason shown beside it. After completion, the next version can be applied. If initial preparation is rejected because of erroneous source, correcting it permits a new attempt. For game-only sources, the editor does not start an additional hidden legacy preview compilation while typing.
 
-В нативном редакторе живой GameHost принадлежит постоянному игровому потоку. Окна Game, Custom / Rust и Diagnostics читают последние завершённые снимки: они не ожидают игрового tick и не блокируют mutex активного Custom. Снимок содержит исходник и состояние каждого экземпляра, поэтому подпись «текущая версия» появляется после принятия кода исполнителем. После компиляции статус меняется на ожидание применения между тактами; отправка команды сама по себе не означает успешное применение.
+An incompatible candidate is bound to specific compiled text. If the source changes after rejection, reset and migration of the old candidate become unavailable: the current Rust must be applied first. This prevents installing a version that differs from the open text. The normal Game UI uses the same operations and checks as the Rust window.
 
-Применение, сброс и миграция передаются игровому потоку с номером запроса и эпохой сессии. Restart меняет эпоху: кандидат, компиляция которого началась до Restart, не может позже заменить код новой сессии. После Stop или замены Game старые ответы не устанавливаются в новый исполнитель. Сброс и миграция также повторно проверяют исходник отвергнутого кандидата. При несовместимости прежняя версия продолжает работать, а причина отказа и номер запроса видны в Rust-окне. Синхронный GameHost остаётся доступен для CLI и детерминированных проверок; устройство фонового исполнения описано в [GameWorker](game-worker.md).
+In the native editor, the live GameHost belongs to the persistent game thread. Game, Custom / Rust, and Diagnostics windows read the latest completed snapshots: they do not wait for a game tick or lock the active Custom mutex. A snapshot contains each instance's source and state, so the “current version” label appears after the executor accepts the code. After compilation, status changes to waiting for application between ticks; sending a command alone does not mean application succeeded.
 
-Совместимость требует одинакового `schema` и одинаковой структуры начального JSON. Изменение начального значения `cooldown` с 0 на 1 сохраняет текущий таймер. Переименование поля или смена `schema` считается несовместимым. Кандидат может успешно компилироваться, но не заменять активную программу: предыдущая версия продолжает работать до явного выбора сброса или миграции.
+Application, reset, and migration are sent to the game thread with a request number and session epoch. Restart changes the epoch: a candidate whose compilation started before Restart cannot later replace the new session's code. After Stop or Game replacement, old responses are not installed in a new executor. Reset and migration also recheck the rejected candidate's source. On incompatibility, the previous version continues working, and the rejection reason and request number are visible in the Rust window. Synchronous GameHost remains available for CLI and deterministic checks; background execution is described in [GameWorker](game-worker.md).
 
-Host использует следующий порядок:
+Compatibility requires the same `schema` and the same initial JSON structure. Changing the initial `cooldown` value from 0 to 1 preserves the current timer. Renaming a field or changing `schema` is incompatible. A candidate can compile successfully without replacing the active program: the previous version continues working until reset or migration is explicitly selected.
 
-1. `compiler.compile_kind(source, kind)` собирает кандидата в фоне.
-2. `candidate.inherit_state_from(&active)` переносит совместимое состояние. При ошибке сохраняются прежний executable и состояние.
-3. Для намеренного несовместимого изменения: `candidate.reset_state()` либо `candidate.migrate_state(transformed_json)`; после этого host явно устанавливает кандидата. Миграция валидирует новый JSON, без автоматического угадывания полей.
-4. `active.tick(&context, timeout)` возвращает `ScriptTick {commands, speed, state, events, ...}`. Эта операция не сохраняет состояние.
-5. Host валидирует все команды мира, рендера и события до изменения подсистем. После успешного применения вызывает `active.commit_tick(&tick)`.
-6. Если проверка или применение отклонены, `active.reject_tick(&tick)` сохраняет прежнее состояние, останавливает worker и делает старый ответ неприменимым.
+The host uses this order:
 
-Ответ связан с конкретной программой и ревизией состояния. Повторный commit, commit после reset или commit от другого Custom отклоняется. Stop/new Play должен сбросить состояние через `reset_state()`. `stop_worker()` останавливает процесс, сохраняя принятый JSON. Совместимое hot apply запускает новый worker, перенося только объявленное состояние; глобальные переменные не переносятся.
+1. `compiler.compile_kind(source, kind)` builds the candidate in the background.
+2. `candidate.inherit_state_from(&active)` transfers compatible state. On error, the previous executable and state are preserved.
+3. For an intentional incompatible change: `candidate.reset_state()` or `candidate.migrate_state(transformed_json)`; the host then explicitly installs the candidate. Migration validates the new JSON without automatically guessing fields.
+4. `active.tick(&context, timeout)` returns `ScriptTick {commands, speed, state, events, ...}`. This operation does not save state.
+5. The host validates all world/render commands and events before changing subsystems. After successful application, it calls `active.commit_tick(&tick)`.
+6. If validation or application is rejected, `active.reject_tick(&tick)` preserves previous state, stops the worker, and makes the old response inapplicable.
 
-## Протокол и ограничения
+A response is bound to a specific program and state revision. Repeated commit, commit after reset, or commit from another Custom is rejected. Stop/new Play must reset state through `reset_state()`. `stop_worker()` stops the process while preserving accepted JSON. Compatible hot apply starts a new worker, transferring only declared state; globals are not transferred.
 
-Редакторский `Scripts` хранит результаты legacy preview до принятия общего пакета мира/рендера. `update` сам не сохраняет состояние; `commit_updates()` сохраняет состояния всех подготовленных источников после успеха, `reject_updates()` отклоняет их после ошибки. Незавершённый результат не перезаписывается вторым вызовом. Gameplay использует отдельные экземпляры для узлов своего графа.
+<a id="протокол-и-ограничения"></a>
 
-При успешной фоновой компиляции `poll` переносит совместимое состояние. Несовместимый скомпилированный кандидат остаётся доступен отдельно, предыдущая программа продолжает работать, а диагностика объясняет необходимость сброса/миграции. `apply_rejected_with_reset(id)` — явное применение новых defaults; `apply_rejected_with_migration(id, json)` — API для явно подготовленного преобразования. UI должен сравнить `rejected_source(id)` с текущим исходником перед применением. Новая компиляция удаляет старый отвергнутый кандидат. `reset_game_states()` используется для новой Play-сессии, но не при обычной правке кода.
+## Protocol and Limitations
 
-Host поддерживает один worker на живой экземпляр Custom. Два SystemNode с одинаковым source_id получают отдельные fork_instance и состояния; обычные клоны одного CompiledScript разделяют этот экземпляр. Вход и ответ — строки JSON с `request_id`; ответ имеет служебный маркер. Очереди ограничены, записи в pipe выполняются вне вызывающего потока. Timeout, panic, EOF, лишний объём или неверный ID останавливают worker. Следующий tick запускает его заново с последним принятым состоянием. При освобождении последнего клона экземпляра дочерний процесс завершается.
+The editor's `Scripts` stores legacy preview results until the shared world/render packet is accepted. `update` itself does not save state; `commit_updates()` saves all prepared sources' states after success, and `reject_updates()` rejects them after an error. A pending result is not overwritten by a second call. Gameplay uses separate instances for nodes of its graph.
 
-Диагностика stderr ограничена 8 КиБ; stdout, не являющийся ответом, ограничен 1 МиБ на запрос. Host не сохраняет каждую строку вывода. Обычный Rust имеет доступ к ОС: запись файла или иной внешний эффект не откатывается транзакцией. Для воспроизводимой игровой логики используйте объявленное состояние и команды.
+On successful background compilation, `poll` transfers compatible state. An incompatible compiled candidate remains available separately, the previous program continues working, and diagnostics explain the need for reset/migration. `apply_rejected_with_reset(id)` explicitly applies new defaults; `apply_rejected_with_migration(id, json)` is the API for an explicitly prepared transformation. The UI must compare `rejected_source(id)` with the current source before application. New compilation removes the old rejected candidate. `reset_game_states()` is used for a new Play session, but not ordinary code edits.
 
-## Экспорт без компилятора
+The host maintains one worker per live Custom instance. Two SystemNodes with the same source_id receive separate fork_instance instances and states; ordinary clones of one CompiledScript share that instance. Input and response are JSON lines with `request_id`; the response has a service marker. Queues are bounded, and pipe writes happen outside the calling thread. Timeout, panic, EOF, excess volume, or an invalid ID stops the worker. The next tick restarts it with the last accepted state. Releasing the last clone of an instance terminates the child process.
 
-`compiled.export_precompiled(package/scripts/id)` записывает `worker.exe` и `script.json`. Манифест включает версию протокола, режим точки входа, исходник для идентификации, декларацию состояния и закреплённые версии зависимостей. Пути executable относительные; traversal и выход за папку манифеста отклоняются при загрузке.
+stderr diagnostics are limited to 8 KiB; stdout that is not a response is limited to 1 MiB per request. The host does not save every output line. Ordinary Rust has OS access: writing a file or another external effect is not rolled back by the transaction. For reproducible game logic, use declared state and commands.
 
-Player использует `CompiledScript::load_precompiled(&manifest, &package_root)`. Он не открывает Cargo.toml, SDK или Rust compiler и не выполняет сборку. Worker ищет относительные игровые ресурсы в переданном корне пакета. Пакет можно перенести в другую папку. Начальное состояние Player берётся из декларации, а не из текущей Play-сессии редактора. Сохранение игрового прогресса между запусками — отдельный контракт.
+<a id="экспорт-без-компилятора"></a>
 
-## Проверка
+## Export Without a Compiler
 
-Тесты runtime-script проверяют реальные скомпилированные программы, повторное использование PID, накопление и откат JSON-состояния, hot apply, несовместимость, явный reset/migration, timeout/panic, неподходящий формат ответа и перенос precompiled-пакета с чтением собственного ассета. Для полного игрового результата host также обязан проверять транзакцию мира/рендера и событий: успех выполнения worker сам по себе не означает принятие команд.
+`compiled.export_precompiled(package/scripts/id)` writes `worker.exe` and `script.json`. The manifest includes the protocol version, entry-point mode, source for identification, state declaration, and pinned dependency versions. Executable paths are relative; traversal and escaping the manifest directory are rejected during loading.
+
+Player uses `CompiledScript::load_precompiled(&manifest, &package_root)`. It does not open Cargo.toml, SDK, or Rust compiler and does not build. The worker searches for relative game resources in the supplied package root. The package can be moved to another directory. Player's initial state comes from the declaration, not the editor's current Play session. Saving game progress between launches is a separate contract.
+
+<a id="проверка"></a>
+
+## Verification
+
+runtime-script tests check real compiled programs, PID reuse, accumulation and rollback of JSON state, hot apply, incompatibility, explicit reset/migration, timeout/panic, invalid response format, and moving a precompiled package that reads its own asset. For a full game result, the host must also validate the world/render and event transaction: successful worker execution alone does not mean commands were accepted.

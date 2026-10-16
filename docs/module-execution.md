@@ -1,5 +1,7 @@
 # Executable systems and the authored schedule
 
+[English](module-execution.md) | [Русский](ru/module-execution.md) | [Documentation](README.md)
+
 The original render graph describes the selected world, extraction and renderer.
 The optional `GraphDocument.game.execution` describes simulation. Its stages and
 nodes execute in saved order; the executor never guesses an order from module

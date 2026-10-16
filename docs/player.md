@@ -1,87 +1,103 @@
-# Самостоятельная игра и проверки
+<a id="самостоятельная-игра-и-проверки"></a>
 
-Рабочая папка проекта: `E:\ModuleEngine`. Авторский пример хранится в `game-project-v4.json` после [явной миграции в копию](engine-profiles.md); исходный `game-project.json` и прежний `project.json` сохраняется отдельно.
+# Standalone Game and Verification
 
-## Запуск
+[English](player.md) | [Русский](ru/player.md) | [Documentation](README.md)
 
-Исполнение игры работает в [постоянном фоновом GameWorker](game-worker.md). Окно отображает завершённые снимки, обрабатывает ввод и не ждёт медленный Rust Custom. При перегрузке отдельно показываются стоимость tick и отставание симуляции; скорость самой игры зависит от её кода.
+Project working directory: `E:\ModuleEngine`. The authored example is stored in `game-project-v4.json` after [explicit migration into a copy](engine-profiles.md); the original `game-project.json` and previous `project.json` are preserved separately.
+
+<a id="запуск"></a>
+
+## Launch
+
+Game execution runs in a [persistent background GameWorker](game-worker.md). The window displays completed snapshots, processes input, and does not wait for slow Rust Custom. Under overload, tick cost and simulation lag are shown separately; the speed of the game itself depends on its code.
 
 ```powershell
 .\outputs\ModuleEngine.exe game-project-v4.json
-# Окно редактора: выберите Game / Scene. Engine → Gameplay Systems редактирует исполнение.
+# Editor window: select Game / Scene. Engine → Gameplay Systems edits execution.
 .\outputs\ModuleEngine.exe --play game-project-v4.json
-# Игровое окно без редакторских панелей.
+# Game window without editor panels.
 ```
 
-WASD перемещает игрока. ЛКМ наносит удар в направлении точки под курсором на горизонтальной плоскости. R перезапускает игру; Esc закрывает Player. E демонстрирует действие Rust Custom: меняет цвет игрока и отправляет звуковое событие. Уклонение выполняется движением, отдельного рывка пока нет.
+WASD moves the player. Left mouse button attacks toward the point under the cursor on the horizontal plane. R restarts the game; Esc closes Player. E demonstrates a Rust Custom action: changing the player color and sending an audio event. Dodging uses movement; there is no separate dash yet.
 
-Первая сцена содержит двадцать монстров. Победите их и войдите в зелёный проход на дальней стороне арены. Вторая сцена содержит босса; красная область показывает подготовку атаки. Объекты сцены, компоненты и параметры поведения редактируются как обычные данные.
+The first scene contains twenty monsters. Defeat them and enter the green passage at the far side of the arena. The second scene contains the boss; the red area shows attack preparation. Scene objects, components, and behavior parameters are edited as ordinary data.
 
-## Как читать удар
+<a id="как-читать-удар"></a>
 
-Если автор настроил подготовку удара (`melee.windup`), голубой предпросмотр скрывается уже во время неё: направление атаки зафиксировано при нажатии. В обычном примере у игрока подготовка равна нулю.
+## Reading an Attack
 
-Когда курсор находится над активным игровым окном и взмах ещё не активен, бледно-голубой сектор и стрелка показывают область следующего удара и его направление. Золотые кольца выделяют противников, которые сейчас проходят тот же тест попадания, что использует боевая система. ЛКМ запускает удар: голубой предварительный сектор скрывается, а золотая активная область, след взмаха и кольца целей используют зафиксированную область этого удара. После взмаха голубой сектор снова следует за курсором. Атаки врагов и предупреждения об их подготовке красные.
+If the author configures attack preparation (`melee.windup`), the cyan preview is hidden during it: the attack direction is fixed when pressed. The normal example has zero player windup.
 
-Подтверждённое попадание на 0,16 секунды высветляет модель цели и показывает искры со всплывающим числом урона. Полученный игроком урон показан красным, нанесённый противникам — золотым. Искры и число остаются видны и после удаления убитого врага.
+When the cursor is over the active game window and a swing is not yet active, a pale cyan sector and arrow show the next attack's area and direction. Gold rings highlight enemies currently passing the same hit test used by the combat system. Left mouse button starts an attack: the cyan preview sector hides, while the gold active area, swing trail, and target rings use the fixed area of this attack. After the swing, the cyan sector follows the cursor again. Enemy attacks and windup warnings are red.
 
-У цели должны быть корректные компоненты `actor` и `health` со значением `current > 0`: объект без здоровья не становится целью только из-за наличия `actor`. Радиус противника увеличивает радиальную досягаемость удара, а угол проверяется по его центру. Поэтому кольцо может выделить цель, центр которой немного выходит за дугу сектора. Подсветка относится к текущей позиции и не отменяет перезарядку. Направление начавшегося взмаха фиксируется: последующее движение курсора не поворачивает этот удар. Кольца во время взмаха показывают цели в его области, а уже получивший урон противник не получает его повторно: каждый противник получает урон один раз за взмах.
+A confirmed hit brightens the target model for 0,16 seconds and shows sparks with a floating damage number. Damage received by the player is red; damage dealt to enemies is gold. Sparks and the number remain visible after a killed enemy is removed.
 
-Обратная связь одинакова в редакторском Play и Player. Данные попадания для искр и числа хранятся 0,35 секунды игрового времени, на Pause их время замирает. Stop, Restart и загрузка сцены очищают эти временные данные; при победе или поражении боевые наложения скрываются. Вспышка меняет только снимок для рендера, сохраняя цвета и материалы объектов. Секторы и следы рисуются поверх изображения сцены, а не как анимация оружия или частицы с учётом глубины. Они помогают видеть область, направление и результат удара.
+A target must have valid `actor` and `health` components with `current > 0`: an object without health does not become a target merely because it has `actor`. Enemy radius extends the attack's radial reach, while the angle is checked against its center. A ring can therefore highlight a target whose center lies slightly beyond the sector arc. Highlighting refers to the current position and does not cancel cooldown. The direction of a started swing is fixed: later cursor movement does not rotate that attack. Rings during a swing show targets in its area, and an enemy already damaged does not take damage again: each enemy takes damage once per swing.
 
-## Экспорт
+Feedback is identical in editor Play and Player. Hit data for sparks and numbers is stored for 0,35 seconds of game time; its time freezes on Pause. Stop, Restart, and scene loading clear this temporary data; combat overlays hide on victory or defeat. The flash changes only the rendering snapshot, preserving object colors and materials. Sectors and trails are drawn over the scene image rather than as weapon animation or depth-aware particles. They help show attack area, direction, and result.
+
+<a id="экспорт"></a>
+
+## Export
 
 ```powershell
 .\outputs\ModuleEngine.exe --export-game game-project-v4.json outputs\my-game
 .\outputs\my-game\Player.exe
 ```
 
-Player собирается отдельным пакетом с выбранными native features; редакторский exe в него не копируется. `player.json` v2 закрепляет точный набор features и SDK API. См. [профили и совместимость](engine-profiles.md).
+Player builds as a separate package with selected native features; the editor exe is not copied into it. `player.json` v2 pins the exact feature set and SDK API. See [profiles and compatibility](engine-profiles.md).
 
-Player и Team используют одну подготовку рабочего графа. Перед выбором native features и зависимостей экспорт проверяет авторский профиль и pins, затем оставляет узлы, ведущие к выходам, рекурсивно обрабатывает вложенные графы и оставляет используемые Rust/HLSL sources. Запланированные игровые системы сохраняются независимо от наличия графического выхода. Подключённый, но выключенный проход также сохраняется: игра может включить его разрешённой настройкой. Неиспользуемый архивный HLSL не заставляет поставку искать его include-файлы.
+Player and Team share working-graph preparation. Before selecting native features and dependencies, export validates the authored profile and pins, then retains nodes leading to outputs, recursively processes nested graphs, and retains used Rust/HLSL sources. Scheduled game systems are retained regardless of graphical output. A connected but disabled pass is also retained: the game may enable it through a permitted setting. Unused archived HLSL does not force the distribution to look for its include files.
 
-Профиль Engine, exact locks и явно выбранные enabled modules при этом не переписываются. Поэтому явно включённый Vulkan может оставаться native capability при активном software-рендере; сам по себе этот capability не запускает Vulkan-компиляцию графа software-рендера. Пакет проверяется с фактически выбранным набором native features до сборки; runtime не исправляет неполную поставку при загрузке.
+The Engine profile, exact locks, and explicitly selected enabled modules are not rewritten. Explicitly enabled Vulkan may therefore remain a native capability with an active software renderer; that capability alone does not trigger Vulkan compilation of the software-renderer graph. The package is checked with the actual selected native feature set before building; runtime does not repair an incomplete distribution during loading.
 
-Папка назначения должна быть новой или пустой. Экспорт создаёт Player.exe, project.json, player.json с контрольными суммами, зависимости моделей/материалов/звуков и `.spirv` для выбранных графов. Rust workers находятся в scripts/<source-id>. После копирования папки на другую Windows-машину запуск не использует исходный рабочий каталог, SDK или компиляторы.
+The destination directory must be new or empty. Export creates Player.exe, project.json, player.json with checksums, model/material/audio dependencies, and `.spirv` for the selected graphs. Rust workers are in scripts/<source-id>. After copying the folder to another Windows machine, launching does not use the original working directory, SDK, or compilers.
 
-Сборка подготавливается в собственной временной папке рядом с назначением. Копирование, компиляция Rust/HLSL, проверка пакета и пробный рендер должны завершиться до публикации. При ошибке временная папка удаляется, а выбранная пустая папка остаётся пригодной для повторной попытки. Публикация в Windows не заменяет файл или непустую папку, появившиеся в назначении за время сборки. Если очистка временной папки тоже не удалась, ошибка сообщает её путь; удалять чужое содержимое назначения экспорт не пытается.
+The build is prepared in its own temporary directory beside the destination. Copying, Rust/HLSL compilation, package verification, and a trial render must finish before publication. On error, the temporary directory is removed, and the selected empty directory remains usable for another attempt. Publication on Windows does not replace a file or nonempty directory that appeared at the destination during the build. If temporary-directory cleanup also fails, the error reports its path; export does not attempt to delete other content at the destination.
 
-Ресурсы игры берутся относительно выбранного JSON-проекта; исходники GPU и HLSL include roots — из выбранного backend-пакета, а Rust/Core SDK — из его compile root. Поэтому проект с собственными моделями в другой папке не заимствует одноимённые ресурсы из папки движка. Перед копированием файлов пакета проверяются нормализованные пути, конфликты регистра имён Windows и совпадение байтов ассета с GPU-файлом по одинаковому пути. `Player.exe`, `project.json`, `player.json`, `README.txt`, `.spirv` и папки выбранных Rust workers зарезервированы: объявление ассета по этим путям отклоняется, без молчаливой перезаписи.
+Game resources are resolved relative to the selected JSON project; GPU sources and HLSL include roots come from the selected backend package, and the Rust/Core SDK from its compile root. A project with its own models in another directory therefore does not borrow same-named resources from the engine directory. Before copying package files, normalized paths, Windows case conflicts, and matching bytes for an asset and GPU file sharing a path are checked. `Player.exe`, `project.json`, `player.json`, `README.txt`, `.spirv`, and selected Rust worker directories are reserved: declaring an asset at these paths is rejected without silent overwriting.
 
-Существующая Team-поставка остаётся редактором для команды. Игровая поставка Player — отдельный режим запуска и отдельный экспорт. Full/Team ограничения Engine сохраняются; порядок игровых систем относится к Engine, сцены и разрешённая игровая логика — к Project.
+The existing Team distribution remains a team editor. The Player game distribution is a separate launch mode and separate export. Full/Team Engine restrictions are preserved; game-system order belongs to Engine, while scenes and permitted game logic belong to Project.
 
-## Воспроизводимая проверка
+<a id="воспроизводимая-проверка"></a>
+
+## Reproducible Verification
 
 ```powershell
 .\outputs\ModuleEngine.exe --game-check game-project-v4.json outputs\game-verification
 .\outputs\my-game\Player.exe --verify-package outputs\my-game outputs\player-verification
 ```
 
-Проверяются Object/ECS состояния/события/изображения, откат отказавшего Custom, смерть и Restart, переход и победа. Автопрохождение использует отдельную сохранённую проверочную копию с повышенным здоровьем игрока; поведение врагов, удары и переходы исполняются настоящими системами. Оно проверяет маршрут исполнения, а не баланс сложности поставляемой игры.
+Checks cover Object/ECS states/events/images, rollback of rejected Custom, death and Restart, transition, and victory. Automatic completion uses a separate saved verification copy with increased player health; enemy behavior, attacks, and transitions run through real systems. It checks the execution route, not the difficulty balance of the shipped game.
 
-Замер GameHost включает симуляцию, Rust IPC, коллизии, звук и Vulkan/readback. Запуск прогрет, затем измеряются 120 кадров 1920×1080. Отчёт содержит GPU, нагрузку, среднее, median, p95 и max; оконное представление измеряется отдельно. Отключение неактивного audio-модуля исключает загрузку его звуков, но авторский архив остаётся.
+The GameHost measurement includes simulation, Rust IPC, collisions, audio, and Vulkan/readback. The run is warmed up, then 120 frames at 1920×1080 are measured. The report contains GPU, load, mean, median, p95, and max; window presentation is measured separately. Disabling an inactive audio module excludes loading its sounds, but the authored archive remains.
 
-## Изменение Rust во время Play
+<a id="изменение-rust-во-время-play"></a>
 
-В Custom / Rust выберите game-controller, измените update и нажмите «Применить Rust»; компиляция выполняется в фоне. Состояние объявлено первой строкой исходника. При смене схемы приложение сохраняет предыдущий код и предлагает явный reset/migration. Переключение текст/граф показывает поддержанные операции и сохраняет остальные конструкции текстом.
+## Changing Rust During Play
 
-Защита JSON-пакетов и таймауты ограничивают ошибки процесса, но worker имеет обычные права пользователя. Используйте принадлежащий проекту код. Контракт и примеры описаны в [Custom state](custom-state.md).
+In Custom / Rust, select game-controller, edit update, and click Apply Rust (`Применить Rust`); compilation runs in the background. State is declared on the first source line. When the schema changes, the application preserves previous code and offers explicit reset/migration. Switching text/graph shows supported operations and preserves other constructs as text.
 
-## Измерение настоящего окна Player
+JSON-packet protection and timeouts limit process errors, but the worker has normal user permissions. Use code owned by the project. The contract and examples are described in [Custom state](custom-state.md).
+
+<a id="измерение-настоящего-окна-player"></a>
+
+## Measuring the Real Player Window
 
 ```powershell
 .\outputs\ModuleEngine.exe --player-benchmark game-project-v4.json outputs\native-window-verification
 .\outputs\my-game\Player.exe --benchmark outputs\my-game-native-window-verification
 ```
 
-Замер использует тот же Player, GPU-рендер 1920×1080, RGBA→egui conversion, передачу изображения в GUI renderer (по умолчанию WGPU/DX12 в Windows, WGPU/Vulkan в Linux), игровой UI и оконный цикл. Он не увеличивает здоровье и не заменяет сцены или поведение. Ввод обычный, без синтетического прохождения: двадцать противников продолжают действовать. После 30 прогретых UI-кадров собираются как минимум 120 callback и 120 различных завершённых игровых кадров. Затем окно закрывается; отчёт сохраняется в `native-frame-report.json`.
+The measurement uses the same Player, GPU rendering at 1920×1080, RGBA→egui conversion, image transfer to the GUI renderer (WGPU/DX12 on Windows and WGPU/Vulkan on Linux by default), game UI, and window loop. It does not increase health or replace scenes or behavior. Input is ordinary, without synthetic completion: twenty enemies continue acting. After 30 warmup UI frames, at least 120 callbacks and 120 distinct completed game frames are collected. The window then closes; the report is saved to `native-frame-report.json`.
 
-В схеме отчёта 3 callback start-to-start измеряет оконный цикл: conversion, egui tessellation, GUI texture upload/draw, swap/vsync и планирование ОС. Симуляция, Rust IPC и Vulkan/readback выполняются на отдельном worker. `mean_fps` считается по различным `Frame` и времени их завершения; `ui_mean_fps` — по callback окна. Повтор старого изображения не увеличивает игровой FPS. Отдельно записаны интервалы завершения увиденных worker-кадров, интервалы их первого наблюдения UI и возраст снимка; пропущенные между наблюдениями кадры не считаются измеренными. Все проходы egui включаются в затраты UI/HUD. Поля стоимости step/render содержат последние завершённые значения, наблюдаемые на UI-кадрах, поэтому их распределение нельзя считать независимой выборкой worker-кадров.
+In report schema 3, callback start-to-start measures the window loop: conversion, egui tessellation, GUI texture upload/draw, swap/vsync, and OS scheduling. Simulation, Rust IPC, and Vulkan/readback run on a separate worker. `mean_fps` uses distinct `Frame` values and their completion times; `ui_mean_fps` uses window callbacks. Repeating an old image does not increase game FPS. Completion intervals of observed worker frames, intervals of their first UI observation, and snapshot age are recorded separately; frames skipped between observations are not counted as measured. All egui passes are included in UI/HUD costs. Step/render cost fields contain the latest completed values observed on UI frames, so their distributions cannot be treated as an independent sample of worker frames.
 
-Дополнительно `eframe::Frame.info().cpu_usage` измеряет CPU-работу UI и нативного представления за предыдущий кадр, исключая ожидание vsync. Отдельные цифры conversion/enqueue описывают подготовку текстуры; фактическая загрузка GUI-текстуры выполняется позже framework и включён в framework CPU и общий период. Это измерение оконного цикла, не времени появления фотонов на мониторе и не отдельный GPU timestamp GUI renderer.
+Additionally, `eframe::Frame.info().cpu_usage` measures CPU work of the UI and native presentation for the previous frame, excluding vsync waiting. Separate conversion/enqueue figures describe texture preparation; the framework performs the actual GUI texture upload later, and it is included in framework CPU and the overall period. This measures the window loop, not the time photons appear on the monitor or a separate GPU timestamp of the GUI renderer.
 
-Окно запрашивает клиентскую область 1920×1080 физических пикселей с учётом DPI. Отчёт содержит фактическую область framebuffer и canvas, GPU игрового Vulkan-рендерера и GUI backend, монитор/частоту, CPU identifier, модели, количество живых врагов и статус/здоровье игрока. Если оконный менеджер уменьшил окно, это видно в `physical_resolution_met`; размер offscreen-рендера остаётся 1920×1080.
+The window requests a client area of 1920×1080 physical pixels accounting for DPI. The report contains actual framebuffer and canvas area, game Vulkan renderer GPU and GUI backend, monitor/refresh rate, CPU identifier, models, living-enemy count, and player status/health. If the window manager reduced the window, `physical_resolution_met` shows this; offscreen render size stays 1920×1080.
 
-`target_met=true` требует полного замера, физических 1920×1080, двадцати живых врагов и Playing на всех измеренных кадрах, отсутствия ошибок, среднего и p95 как оконного, так и игрового периода не выше 16.667 мс. Частота монитора, vsync и планирование ОС могут ограничить результат даже при быстром GameHost. Если неподвижный игрок погиб, замер не заявляет прохождение критерия игровой нагрузки. Закрытие окна или зависание не превращаются в успешный результат; 45-секундный watchdog сохраняет неполный отчёт. Неизвестная видимость окна помечается отдельно и не доказывает фактическое отображение на экране.
+`target_met=true` requires a complete measurement, physical 1920×1080, twenty living enemies and Playing in every measured frame, no errors, and mean and p95 for both window and game periods no greater than 16.667 ms. Monitor refresh rate, vsync, and OS scheduling may limit the result even with a fast GameHost. If the stationary player dies, the measurement does not claim to meet the game-load criterion. Closing or hanging the window does not turn into success; a 45-second watchdog saves an incomplete report. Unknown window visibility is marked separately and does not prove actual display on screen.
 
-В Player фокус Restart или игрового viewport не отключает WASD. В редакторе ввод остаётся доступен после клика по игровому viewport, а при фокусе текстового редактора не двигает персонажа. ЛКМ считается атакой на нажатии, а не отпускании кнопки.
+In Player, focus on Restart or the game viewport does not disable WASD. In the editor, input remains available after clicking the game viewport, and text-editor focus does not move the character. Left mouse button counts as an attack on press, not release.

@@ -1,32 +1,40 @@
-# Vulkan и Custom HLSL
+<a id="vulkan-и-custom-hlsl"></a>
 
-Renderer исполняет raster и compute проходы на Vulkan. В редакторе HLSL компилируется DXC в SPIR-V; renderer создаёт pipelines, изображения и барьеры. При экспорте Player шейдеры компилируются заранее. Два встроенных пути различаются реальной последовательностью GPU-работы.
+# Vulkan and Custom HLSL
 
-| Проход | Вход/результат |
+[English](gpu-hlsl.md) | [Русский](ru/gpu-hlsl.md) | [Documentation](README.md)
+
+The renderer executes raster and compute passes on Vulkan. In the editor, DXC compiles HLSL to SPIR-V; the renderer creates pipelines, images and barriers. Player export precompiles shaders. The two built-in routes differ in their actual sequence of GPU work.
+
+| Pass | Input/result |
 | --- | --- |
 | gpu.forward | Scene3D → HDR color, world normals, linear camera depth. |
 | gpu.gbuffer | Scene3D → linear albedo, normals, depth. |
 | gpu.deferred | G-buffer → HDR lighting. |
 | gpu.depth_normal | Scene3D → normals/depth. |
-| gpu.ssao | HDR + normals/depth → HDR с ambient occlusion. |
-| gpu.tonemap | HDR → linear LDR; режимы ACES/Reinhard, exposure. |
-| gpu.fxaa | Linear LDR → Linear LDR, spatial AA текущего кадра. |
+| gpu.ssao | HDR + normals/depth → HDR with ambient occlusion. |
+| gpu.tonemap | HDR → linear LDR; ACES/Reinhard modes, exposure. |
+| gpu.fxaa | Linear LDR → Linear LDR, spatial AA of the current frame. |
 | gpu.color_encode | Linear LDR → rgba8unorm/srgb_display. |
-| gpu.custom | Собственный raster/compute проход с params.manifest и source_id. |
+| gpu.custom | Custom raster/compute pass with params.manifest and source_id. |
 
-## Редактирование в Engine
+<a id="редактирование-в-engine"></a>
 
-Выберите «GPU Forward» или «GPU Deferred», затем откройте вложенный граф renderer двойным щелчком. Выберите проход: инспектор показывает его параметры и контракты ресурсов. «Заменить на редактируемый Custom HLSL» копирует поставляемый текст шейдера и manifest в проект, сохраняя ID прохода и его внешние связи.
+## Editing in Engine
 
-Во вкладке «HLSL» редактируйте текст и нажмите «Применить HLSL». Неверный кандидат остаётся в проекте с диагностикой; предыдущая рабочая конфигурация сохраняется. Изменять ресурсы, bindings и точки входа нужно согласованно с manifest.
+Select GPU Forward or GPU Deferred, then double-click to open the renderer's nested graph. Select a pass: the inspector shows its parameters and resource contracts. Replace with editable Custom HLSL copies the shipped shader text and manifest into the project, preserving the pass ID and external connections.
 
-Самостоятельные шаблоны находятся в assets/gpu/custom_compute.hlsl, custom_raster.hlsl и custom_fullscreen.hlsl. Они доступны как обычные исходники.
+Edit the text in the HLSL tab and press Apply HLSL. An invalid candidate remains in the project with diagnostics; the previous working configuration is preserved. Changes to resources, bindings and entry points must agree with the manifest.
 
-![Вложенный граф GPU-проходов](media/editor-render-v02.png)
+Standalone templates are in assets/gpu/custom_compute.hlsl, custom_raster.hlsl and custom_fullscreen.hlsl. They are available as ordinary sources.
 
-## Manifest прохода
+![Nested GPU-pass graph](media/editor-render-v02.png)
 
-Пример params для HDR compute-фильтра:
+<a id="manifest-прохода"></a>
+
+## Pass manifest
+
+Example params for an HDR compute filter:
 
 ~~~json
 {
@@ -51,53 +59,56 @@ Renderer исполняет raster и compute проходы на Vulkan. В р�
 }
 ~~~
 
-source_id указывает на shader_sources. stage — compute или raster. Для raster raster_mode выбирает scene/fullscreen; entry задаёт fragment entry, vertex_entry — необязательную пользовательскую vertex entry. scene raster принимает ровно один Scene3D, fullscreen/compute его не принимают.
+source_id points to shader_sources. stage is compute or raster. For raster, raster_mode selects scene/fullscreen; entry specifies the fragment entry, and vertex_entry an optional user vertex entry. Scene raster accepts exactly one Scene3D; fullscreen/compute do not accept it.
 
-ResourceSpec содержит name, format, semantic, extent, samples, access. Форматы изображений: rgba32float, r32float, rgba8unorm. semantics встроенных проходов: hdr_linear, ldr_linear, albedo_linear, world_normals, camera_linear_depth, srgb_display; сцена имеет format:scene/semantic:scene3d. Входные изображения используют sampled_read, выход raster — color_write, compute — storage_write. Совместимость требует совпадения формата, semantic, extent и samples.
+ResourceSpec contains name, format, semantic, extent, samples, access. Image formats: rgba32float, r32float, rgba8unorm. Built-in pass semantics: hdr_linear, ldr_linear, albedo_linear, world_normals, camera_linear_depth, srgb_display; a scene has format:scene/semantic:scene3d. Input images use sampled_read, raster outputs color_write, compute outputs storage_write. Compatibility requires matching format, semantic, extent and samples.
 
-Неизвестные поля manifest/ResourceSpec отклоняются. params прохода допускает только объявленные параметры, enabled:bool и служебные source_id/manifest у Custom. До 16 scalar-параметров; порядок parameters определяет размещение значений в push constants. Встроенный tonemap отдельно поддерживает строковый mode.
+Unknown manifest/ResourceSpec fields are rejected. Pass params allow only declared parameters, enabled:bool and Custom's supporting source_id/manifest. Up to 16 scalar parameters; parameters order determines value placement in push constants. Built-in tonemap separately supports a string mode.
 
 ## HLSL ABI
 
-Descriptor set 0: сначала входные bindings в порядке inputs, затем выходные compute bindings в порядке outputs. Texture2D<float> и Texture2D<float4> читаются через Load; sampler/buffer bindings в этом manifest пока отсутствуют. У storage image требуется точный атрибут vk::image_format, например rgba32f. Reflection проверяет скомпилированные image type, bindings, storage format и LocalSize.
+Descriptor set 0: input bindings first in inputs order, then compute output bindings in outputs order. Texture2D<float> and Texture2D<float4> are read through Load; sampler/buffer bindings are not yet present in this manifest. A storage image requires an exact vk::image_format attribute, for example rgba32f. Reflection checks compiled image types, bindings, storage format and LocalSize.
 
-Push constants — 128 байт: четыре float4 камеры и четыре float4 параметров. Используйте поставляемое объявление [[vk::push_constant]] ConstantBuffer<Config>; параметры занимают values, например первый scalar — values[0].x.
+Push constants are 128 bytes: four camera float4s and four parameter float4s. Use the shipped [[vk::push_constant]] ConstantBuffer<Config> declaration; parameters occupy values, for example the first scalar is values[0].x.
 
-Compute workgroup должен совпадать с numthreads в SPIR-V, z=1, произведение размеров — от 1 до 256. Проверяйте границы изображения до Store. Для scene vertex ABI: position float3, normal float3, color float4, ids float2, UV float2, atlasRect float4, locations 0–5, stride 72 байта. Первые 48 байт сохраняют прежнее расположение данных: существующий Custom шейдер может использовать только locations 0–3. Пример vertex/fragment пары находится в custom_raster.hlsl.
+Compute workgroup must match numthreads in SPIR-V, z=1, and the product of dimensions must be from 1 to 256. Check image bounds before Store. Scene vertex ABI: position float3, normal float3, color float4, ids float2, UV float2, atlasRect float4, locations 0–5, stride 72 bytes. The first 48 bytes preserve the previous data layout: an existing Custom shader can use only locations 0–3. An example vertex/fragment pair is in custom_raster.hlsl.
 
-Опциональное поле manifest `scene_materials: true` разрешено только для scene raster. Оно добавляет sampled image binding после явно перечисленных image inputs — base-color атлас из материалов `SceneSnapshot`. В Forward/G-buffer это binding 0. UV находится в location 4, atlasRect — в location 5; rect содержит начало и размер текстуры в пикселях. Fragment шейдер переносит UV с перспективной интерполяцией и rect с `nointerpolation`, затем использует `Texture2D.Load`. Встроенные шейдеры явно декодируют sRGB в линейный цвет. Преобразование встроенного прохода в Custom сохраняет этот manifest и material ABI. Depth/normal и обычный Custom не получают атлас без явного включения. Подробности импорта: [content.md](content.md).
+The optional manifest field `scene_materials: true` is allowed only for scene raster. It adds a sampled image binding after explicitly listed image inputs: the base-color atlas from `SceneSnapshot` materials. In Forward/G-buffer this is binding 0. UV is at location 4 and atlasRect at location 5; rect contains the texture's origin and size in pixels. The fragment shader carries UV with perspective interpolation and rect with `nointerpolation`, then uses `Texture2D.Load`. Built-in shaders explicitly decode sRGB to linear color. Converting a built-in pass to Custom preserves this manifest and material ABI. Depth/normal and ordinary Custom receive no atlas without explicit opt-in. Import details: [content.md](content.md).
 
-Inline HLSL ищет буквальные #include в assets/gpu выбранного пакета, затем в корне этого пакета. Для вложенного quoted include первым ищется каталог содержащего файла; angle include использует assets/gpu→root. JSON из отдельного Full/Team пакета использует его marker/resource root. Самостоятельный JSON без marker не делает свой каталог новым compiler root; source_id не является путём. Экспорт рекурсивно собирает эти зависимости. Содержимое разрешённых include читается перед выбором pipeline и входит в fingerprint: изменение header инвалидирует compile/pipeline cache даже при неизменном inline тексте. Это проверено изменением реальных GPU-пикселей. Макрос вместо имени include отклоняется при сборе зависимостей, чтобы экспорт не терял неизвестные файлы.
+Inline HLSL searches for literal #include in assets/gpu of the selected package, then at that package's root. A nested quoted include first searches the containing file's directory; an angle include uses assets/gpu→root. JSON from a separate Full/Team package uses its marker/resource root. Standalone JSON without a marker does not make its directory a new compiler root; source_id is not a path. Export gathers these dependencies recursively. Resolved include contents are read before pipeline selection and included in the fingerprint: changing a header invalidates the compile/pipeline cache even when inline text is unchanged. This was verified by changes in real GPU pixels. A macro in place of an include name is rejected during dependency collection so export cannot lose unknown files.
 
-Готовые ACES/Reinhard и FXAA/off можно открыть автору Project как разрешённые варианты; Team не изменяет граф/HLSL. DLAA/SMAA пока отсутствуют.
+Ready ACES/Reinhard and FXAA/off can be exposed to the Project author as allowed variants; Team does not change the graph/HLSL. DLAA/SMAA are not yet available.
 
-## Заранее скомпилированный Player и кеши
+<a id="заранее-скомпилированный-player-и-кеши"></a>
 
-`precompile_graph_at(graph, sources, source_root, destination)` компилирует и проверяет все стадии выбранного графа, включая vertex, и пишет `destination/.spirv`. При наличии `.spirv` renderer использует только эти артефакты: DXC не запускается и отката к инструментам автора нет. Отсутствующий/повреждённый shader приводит к диагностике и требует повторного экспорта. Include-файлы сохраняются в пакете, потому что их содержимое проверяется тем же fingerprint. Для других разрешённых графов экспортёр вызывает precompile отдельно в тот же каталог.
+## Precompiled Player and caches
 
-В редакторе устойчивый `.work/shader-cache` повторно использует SPIR-V по исходнику, entry/profile и содержимому include closure. Полный артефакт публикуется переименованием временного файла; незавершённый результат не должен читаться параллельным компилятором.
+`precompile_graph_at(graph, sources, source_root, destination)` compiles and validates every stage of the selected graph, including vertex, and writes `destination/.spirv`. When `.spirv` is present, the renderer uses only these artifacts: DXC is not launched and there is no fallback to authoring tools. A missing/corrupt shader produces diagnostics and requires re-export. Include files remain in the package because their contents are checked against the same fingerprint. For other allowed graphs, the exporter calls precompile separately into the same directory.
 
-Backend сохраняет изображения проходов, vertex buffer и readback buffer между кадрами одинаковой конфигурации/размера. GPU material atlas загружается при изменении набора декодированных текстур и используется повторно. `set_detailed_stats(false)` применяется Player: на CPU возвращается только RGBA8 вместо дополнительного чтения depth, normals и цветовых ID. В таком режиме ownership/coverage counts не измеряются; ноль в этих полях не означает невидимую сцену. Submitted counts остаются доступны.
+In the editor, the persistent `.work/shader-cache` reuses SPIR-V by source, entry/profile and include-closure contents. A complete artifact is published by renaming a temporary file; an unfinished result must not be read by a concurrent compiler.
 
-Идентичность ресурсов включает ID проходов и их выходов, а не только набор pipelines: удаление AO и добавление такого же прохода с другим ID требует нового набора изображений. Иначе повторно использованный `ao.color` не соответствует новому `pass_id.color`. GPU-план проверяется отдельно от кеша изображений; контракты настроек проверяются по metadata без повторного чтения шейдеров. Для неизменённого кадра план переиспользуется, а внешние includes проверяются с интервалом 250 мс; явная подготовка всегда читает актуальные includes.
+The backend retains pass images, vertex buffer and readback buffer between frames with the same configuration/size. The GPU material atlas is uploaded when the decoded texture set changes and is reused. Player uses `set_detailed_stats(false)`: only RGBA8 returns to the CPU, without additional depth, normals and color-ID reads. Ownership/coverage counts are not measured in this mode; zero in these fields does not mean an invisible scene. Submitted counts remain available.
 
-Неверный внешний include сохраняет предыдущий рабочий GPU-план и возвращает диагностику; окно сохраняет последний успешный кадр. Повторные кадры используют сохранённую ошибку, а после интервала проверяются bytes зависимостей. Неизменившийся неудачный набор не запускает DXC снова; исправление или восстановление файла разрешает следующую попытку без редактирования inline HLSL. Такой же контроль зависимостей позволяет повторить отклонённую фоновую подготовку Game/Scene. Явная `prepare` выполняет свежую попытку независимо от этого ограничения.
+Resource identity includes pass and output IDs, not just the pipeline set: removing AO and adding an identical pass with another ID requires a new image set. Otherwise a reused `ao.color` does not match the new `pass_id.color`. The GPU plan is checked separately from the image cache; settings contracts are checked against metadata without rereading shaders. For an unchanged frame, the plan is reused and external includes are checked at 250 ms intervals; explicit preparation always reads current includes.
 
-Временные HLSL/SPIR-V файлы удаляются и при отказе компиляции. Перед публикацией SPIR-V повторно проверяется revision зависимостей; сохранение include во время компиляции отклоняет устаревший результат. Перед добавлением нового pipeline проверяется тот же fingerprint прохода, чтобы смешанные стадии не записались под прежним ключом.
+An invalid external include preserves the previous working GPU plan and returns diagnostics; the window retains the last successful frame. Repeated frames use the saved error, and dependency bytes are checked after the interval. An unchanged failing set does not launch DXC again; fixing or restoring a file allows the next attempt without editing inline HLSL. The same dependency monitoring allows retrying rejected background Game/Scene preparation. Explicit `prepare` makes a fresh attempt regardless of this limit.
 
-Readback buffer предпочитает память `HOST_VISIBLE | HOST_COHERENT | HOST_CACHED`. Просто первая host-visible память дискретной видеокарты может оказаться медленно читаемым CPU BAR mapping. Если cached coherent тип недоступен, backend использует прежний compatible host-visible coherent тип. Барьер transfer→host и завершение очереди сохраняются.
+Temporary HLSL/SPIR-V files are deleted even when compilation fails. Dependency revision is rechecked before SPIR-V publication; saving an include during compilation rejects the stale result. The same pass fingerprint is checked before adding a new pipeline so mixed stages cannot be recorded under the previous key.
 
-Renderer отдельно измеряется командой `cargo run --locked --release -p module-engine-vulkan --example gpu_benchmark`: 20 импортированных текстурированных моделей, полная стандартная цепочка Forward/SSAO/tonemap/FXAA/encoding, 1920×1080, 10 кадров прогрева и 120 измеряемых кадров. На RTX 4080 SUPER после исправления readback memory получено в среднем 3.11 ms, p95 3.98 ms. Это диагностический замер renderer с CPU readback, без игровых подсистем и вывода egui; критерию готового Player соответствует отдельный полный замер. JSON пишется в `.work/gpu-benchmark.json`.
+The readback buffer prefers `HOST_VISIBLE | HOST_COHERENT | HOST_CACHED` memory. Simply taking the first host-visible memory on a discrete GPU may yield a CPU BAR mapping that is slow to read. If a cached coherent type is unavailable, the backend uses the previous compatible host-visible coherent type. The transfer→host barrier and queue completion remain.
 
-## Ограничения и требования
+The renderer is measured separately with `cargo run --locked --release -p module-engine-vulkan --example gpu_benchmark`: 20 imported textured models, the complete standard Forward/SSAO/tonemap/FXAA/encoding chain, 1920×1080, 10 warm-up frames and 120 measured frames. On RTX 4080 SUPER after the readback-memory fix, the mean was 3.11 ms, p95 3.98 ms. This is a diagnostic renderer measurement with CPU readback, without game subsystems or egui output; a separate complete measurement corresponds to the finished Player criterion. JSON is written to `.work/gpu-benchmark.json`.
 
-Нужен Vulkan 1.3, dynamicRendering, очередь с graphics+compute, host-visible coherent память и device-local изображения. Форматы RGBA32_SFLOAT/R32_SFLOAT/RGBA8_UNORM должны поддерживать используемые color attachment/sample/storage/transfer операции; D32_SFLOAT — depth attachment/transfer src. Наличие vulkan-1.dll не доказывает возможности адаптера: их проверяет реальное создание backend.
+<a id="ограничения-и-требования"></a>
 
-Buffer/Image получают RAII-владельца сразу после создания первого Vulkan handle. Отказ выбора/выделения памяти, binding или image view освобождает уже созданные части. Native regression вводит ошибки на промежуточных стадиях, проверяет баланс handles/device memory и последующий успешный GPU-кадр; она не требует намеренно исчерпывать видеопамять.
+## Limitations and requirements
 
-Изображения viewport однослойные, samples=1; максимум 4096 по каждой оси и 4 млн пикселей. MSAA/resolve и temporal AA отложены. Native swapchain отсутствует: кадр читается синхронно для egui.
+Requires Vulkan 1.3, dynamicRendering, a graphics+compute queue, host-visible coherent memory and device-local images. RGBA32_SFLOAT/R32_SFLOAT/RGBA8_UNORM formats must support the color attachment/sample/storage/transfer operations in use; D32_SFLOAT must support depth attachment/transfer src. Presence of vulkan-1.dll does not prove adapter capabilities: actual backend creation checks them.
 
-Clear/copy команды адресуют pass_id.output_name и выполняются после producer в порядке отправки. Неверный ресурс, несовместимый copy или запись после первого consumer отклоняются. enabled override переносимого Rust имеет приоритет над params.enabled; выключение допустимо только при совместимом одиночном image bypass.
+Buffer/Image receive an RAII owner immediately after the first Vulkan handle is created. Failure in memory selection/allocation, binding or image view creation releases already created parts. The native regression injects failures at intermediate stages, checks handle/device-memory balance and a subsequent successful GPU frame; it does not require deliberately exhausting video memory.
 
-Для встроенной геометрии renderer читает видимые ID и измеряет ownership. У произвольного custom scene шейдера доступны submitted triangles и coverage; нулевые ownership counts означают отсутствие такого измерения, а не доказательство отсутствия видимой геометрии.
+Viewport images have one layer, samples=1; maximum 4096 on each axis and 4 million pixels. MSAA/resolve and temporal AA are deferred. There is no native swapchain: the frame is read synchronously for egui.
 
+Clear/copy commands address pass_id.output_name and execute after the producer in submission order. An invalid resource, incompatible copy or write after the first consumer is rejected. A portable Rust enabled override takes priority over params.enabled; disabling is allowed only with a compatible single-image bypass.
+
+For built-in geometry, the renderer reads visible IDs and measures ownership. An arbitrary custom scene shader has submitted triangles and coverage available; zero ownership counts mean this measurement is absent, not proof that visible geometry is absent.

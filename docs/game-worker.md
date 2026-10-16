@@ -1,40 +1,52 @@
-# Исполнение Game вне UI
+<a id="исполнение-game-вне-ui"></a>
 
-Нативные Editor и Player передают `GameHost` постоянному фоновому исполнителю `GameWorker`. Он владеет симуляцией, экземплярами Rust Custom, игровым аудио, рендером и подготовкой изменений. UI получает последний завершённый `Arc<GameSnapshot>` и отправляет команды. Проверочные CLI-сценарии сохраняют синхронный `GameHost`, чтобы воспроизводить заданное число действий; отдельный `--game-worker-check` проверяет именно асинхронный путь.
+# Running Game outside the UI
 
-## Зачем это нужно
+[English](game-worker.md) | [Русский](ru/game-worker.md) | [Documentation](README.md)
 
-До переноса один UI-кадр мог выполнить до 15 догоняющих фиксированных обновлений. В диагностике Custom с задержкой 80 мс занимал суммарно около 1,28 секунды: в это время окно не обрабатывало события. Простое ограничение догоняния сократило бы зависание, но оставило бы каждый медленный вызов на потоке окна.
+Native Editor and Player pass `GameHost` to a persistent background executor, `GameWorker`. It owns the simulation, Rust Custom instances, game audio, rendering and change preparation. The UI receives the latest completed `Arc<GameSnapshot>` and sends commands. Verification CLI scenarios retain a synchronous `GameHost` to reproduce a specified number of actions; a separate `--game-worker-check` tests the asynchronous route itself.
 
-Теперь UI не выполняет `step`, Vulkan readback и запросы состояния Custom. Методы `latest`, `submit_input`, `try_command` используют только короткие `try_lock` собственных почтовых ящиков. Если они заняты, чтение возвращает предыдущий снимок, а отправка возвращает исходную команду для повторной попытки. Ожидания завершения tick или блокировки ScriptSlot в этих методах нет.
+<a id="зачем-это-нужно"></a>
 
-Медленный алгоритм всё ещё замедляет игру. Симуляция и игровой рендер принадлежат одному исполнителю: при долгом tick окно показывает последний готовый кадр. Это сохраняет отзывчивость редактора, но не превращает алгоритм длительностью 80 мс в симуляцию 60 Гц. Стоимость tick и накопленное отставание показываются отдельно.
+## Why this is needed
 
-## Обновления и ввод
+Before the move, one UI frame could perform up to 15 catch-up fixed updates. In diagnostics, Custom with an 80 ms delay took about 1.28 seconds in total: the window processed no events during that time. Simply limiting catch-up would have shortened the freeze but left every slow call on the window thread.
 
-Фиксированный шаг остаётся 1/60 секунды. За один оборот исполнитель выполняет не более одного tick, затем снова проверяет команды. Необработанное время сохраняется в accumulator с пределом 0,25 секунды; бесконечной очереди догоняющих tick нет. Пауза не накапливает время для последующего рывка.
+The UI now performs no `step`, Vulkan readback or Custom state requests. The `latest`, `submit_input`, `try_command` methods use only brief `try_lock` calls on their own mailboxes. If these are busy, reads return the previous snapshot, and sends return the original command for retry. These methods do not wait for a tick to finish or for a ScriptSlot lock.
 
-Удерживаемые движение и направление прицеливания заменяются последним вводом. Нажатия Attack/Interact/Restart имеют последовательные номера и отдельную ограниченную очередь. Принятое нажатие подтверждается только после завершённой операции; повторный показ снимка не повторяет атаку. Restart явно отменяет старую очередь действий. UI хранит неотправленные действия и повторяет попытку, не ожидая освобождения очереди.
+A slow algorithm still slows down the game. Simulation and game rendering belong to one executor: during a long tick, the window displays the latest completed frame. This keeps the editor responsive but does not turn an 80 ms algorithm into a 60 Hz simulation. Tick cost and accumulated lag are displayed separately.
 
-Команды управления имеют request ID, ответы и ограниченную историю. Совпадающие повторные запросы не применяются второй раз. Размер viewport является настройкой последнего значения. Графические изменения подготавливаются отдельно; пока кандидат не принят, работает прежний рендер. Снимок содержит камеру, принятый документ, диагностические сообщения и состояние подготовки.
+<a id="обновления-и-ввод"></a>
 
-## Play, Stop и Custom
+## Updates and input
 
-Pause меняет состояние исполнителя после текущей операции. UI продолжает работать во время её завершения. Stop отсоединяет текущего исполнителя и возвращает авторскую сцену; будущие снимки старого исполнителя больше не принимаются. Закрытие и замена GameWorker только сигнализируют остановку и не вызывают `join` на UI. Освобождение его Host, GPU и дочерних процессов выполняет владеющий поток.
+The fixed step remains 1/60 second. The executor performs at most one tick per iteration, then checks commands again. Unprocessed time is retained in an accumulator capped at 0.25 seconds; there is no infinite queue of catch-up ticks. Pause does not accumulate time for a later jump.
 
-После возврата из оконного цикла `main` вызывает `finish_after_ui`: сначала сигнализирует всем ещё живым владельцам, затем дожидается их завершения вне UI. Так процесс приложения не выходит раньше уничтожения persistent Rust-процессов. Во время работы редактора удаление исполнителя остаётся неблокирующим.
+Held movement and aim direction are replaced by the latest input. Attack/Interact/Restart presses have sequence numbers and a separate bounded queue. An accepted press is acknowledged only after the operation finishes; redisplaying a snapshot does not repeat an attack. Restart explicitly cancels the old action queue. The UI retains unsent actions and retries without waiting for queue space.
 
-Подготовка Host, компиляция Custom и авторский preview зарегистрированы как отменяемые фоновые задачи. После владельцев игры завершение приложения отменяет и дожидается этих задач, затем очищает их артефакты. На Windows Cargo и Custom принадлежат отдельным Job Object: отмена завершает принадлежащее приложению дерево процессов напрямую и ждёт его выхода перед освобождением файлов. Закрытие последнего handle при аварийном выходе владельца также завершает его дочерние процессы. Запуск `taskkill` для этого не используется. Это управление временем жизни процессов, не защитная песочница для пользовательского кода.
+Control commands have request IDs, responses and a bounded history. Matching repeated requests are not applied twice. Viewport size is a latest-value setting. Graphics changes are prepared separately; the previous renderer runs until the candidate is accepted. A snapshot contains the camera, accepted document, diagnostics and preparation state.
 
-Restart использует общий `GameHost::restart`: пересоздаёт состояние мира и Custom, сбрасывает команды рендеру, звук и цель камеры. Он увеличивает epoch сессии. Скомпилированный Custom, начатый для старого исполнителя или epoch, отклоняется. Это предотвращает применение запоздавшей сборки после Restart или замены проекта.
+<a id="play-stop-и-custom"></a>
 
-При обычном Apply совместимое состояние сохраняется. Несовместимый кандидат остаётся у исполнителя; UI получает исходник и причину отказа, а Reset/Migration отправляет отдельной явной командой. Изменённый после отказа текст не применяется через старый кандидат. Ошибка tick останавливает повторные попытки до явного Restart или успешного применения Custom; перерисовка окна сама не запускает неисправный код заново.
+## Play, Stop and Custom
 
-## Как проверять
+Pause changes the executor's state after the current operation. The UI keeps running while that operation finishes. Stop detaches the current executor and returns the authored scene; future snapshots from the old executor are no longer accepted. Closing and replacing GameWorker only signal a stop and do not call `join` on the UI. Its owning thread releases its Host, GPU and child processes.
+
+After returning from the window loop, `main` calls `finish_after_ui`: it first signals all surviving owners, then waits for them to finish outside the UI. This prevents the application process from exiting before persistent Rust processes are destroyed. Removing an executor remains nonblocking while the editor is running.
+
+Host preparation, Custom compilation and the authored preview are registered as cancellable background tasks. After the game owners finish, application shutdown cancels and waits for these tasks, then cleans up their artifacts. On Windows, Cargo and Custom belong to separate Job Objects: cancellation directly terminates the process tree owned by the application and waits for its exit before releasing files. Closing the last handle when an owner exits abnormally also terminates its child processes. `taskkill` is not used for this. This manages process lifetimes; it is not a security sandbox for user code.
+
+Restart uses the shared `GameHost::restart`: it recreates world and Custom state and resets renderer commands, audio and the camera target. It increments the session epoch. Compiled Custom started for an old executor or epoch is rejected. This prevents a late build from being applied after Restart or project replacement.
+
+Ordinary Apply preserves compatible state. An incompatible candidate stays with the executor; the UI receives the source and rejection reason, and sends Reset/Migration as a separate explicit command. Text edited after rejection is not applied through the old candidate. A tick error stops retries until an explicit Restart or successful Custom apply; window repainting alone does not rerun faulty code.
+
+<a id="как-проверять"></a>
+
+## How to verify
 
 ```powershell
 .\outputs\ModuleEngine.exe --game-worker-check game-project-v4.json outputs\verification-v04\game-worker
 .\verify.ps1 -NativeBenchmarks
 ```
 
-Worker acceptance использует настоящий скомпилированный Rust Custom и проверяет почтовые ящики во время его работы, доставку нажатий, управление сессией и устаревшие кандидаты. Нативные benchmark отдельно измеряют UI и завершение новых игровых кадров. Повторное отображение прежнего `Frame` не считается новым игровым кадром. Общие результаты аудита и ограничения находятся в [stability-audit.md](stability-audit.md).
+Worker acceptance uses real compiled Rust Custom and checks mailboxes while it runs, delivery of presses, session control and stale candidates. Native benchmarks measure the UI and completion of new game frames separately. Displaying the previous `Frame` again does not count as a new game frame. Overall audit results and limitations are in [stability-audit.md](stability-audit.md).

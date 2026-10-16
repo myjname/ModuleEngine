@@ -1,5 +1,7 @@
 # Source component schemas and composition
 
+[English](component-schemas.md) | [Русский](ru/component-schemas.md) | [Documentation](README.md)
+
 `CompositionContext` holds the installed root `ModuleRegistry` and gameplay
 `SystemRegistry`. The system registry owns a cloneable `ComponentRegistry`.
 Register a source extension once in the host composition root, with its component

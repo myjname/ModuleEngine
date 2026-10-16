@@ -1,67 +1,81 @@
-# Текущее состояние ModuleEngine
+<a id="текущее-состояние-moduleengine"></a>
 
-Сводка на 17 октября 2026 года, исходная база прежнего документационного этапа — `c64bc34ffd28419cfd851838c16a2a48c9c2fcf8`. Это указатель актуальных контрактов и накопленных доказательств, а не новая приёмка HEAD или готового EXE. Количества тестов и измерения относятся только к snapshot каждого отчёта.
+# Current ModuleEngine Status
 
-## Цели и границы
+[English](current-status.md) | [Русский](ru/current-status.md) | [Documentation](README.md)
 
-Общие модули и типизированные контракты должны работать независимо от жанра и конкретного примера. Авторские данные отделены от Play; отказ изменения сохраняет рабочую версию и пользовательскую работу. Engine владеет архитектурой, Project меняет разрешённое. Player — отдельная выбранная native-поставка без Editor, Rust/Cargo/DXC на машине игрока.
+Summary as of 17 October 2026; the source baseline for the previous documentation stage is `c64bc34ffd28419cfd851838c16a2a48c9c2fcf8`. This is an index of current contracts and accumulated evidence, not a new acceptance of HEAD or a finished EXE. Test counts and measurements apply only to the snapshot of each report.
 
-[Решения](decisions.md) сохраняют принятый объём и допущения, [открытые вопросы](questions.md) — будущие варианты. Исторические фразы «остаётся следующим этапом» в старых отчётах не переоткрывают уже завершённую работу. Скелетная анимация, полный PBR, navmesh, сетевой режим и другие большие подсистемы требуют отдельной задачи и критериев.
+<a id="цели-и-границы"></a>
 
-## Реализовано
+## Goals and Boundaries
 
-| Область | Актуальный контракт | Доказательства и описание |
+Shared modules and typed contracts must work independently of genre and specific examples. Authored data is separate from Play; rejecting a change preserves the working version and the user's work. Engine owns the architecture; Project changes what is permitted. Player is a separate native distribution with explicitly selected features, without Editor, Rust/Cargo/DXC on the player's machine.
+
+[Decisions](decisions.md) retain the accepted scope and assumptions; [open questions](questions.md) list future options. Historical statements such as “remains the next stage” in older reports do not reopen work already completed. Skeletal animation, full PBR, navmesh, networking, and other large subsystems require a separate task and criteria.
+
+<a id="реализовано"></a>
+
+## Implemented
+
+| Area | Current contract | Evidence and description |
 | --- | --- | --- |
-| Общий Host и ECS | Shared GameHost вне Editor; Core нейтрален к ARPG, изменяемый мир принадлежит ECS. | [Завершённые этапы 2–8](modular-runtime-progress.md), [Host](shared-game-host.md), [ECS](ecs-world.md). |
-| Игровые пакеты и Player | ARPG опционален; Two Arenas и независимый Puzzle — отдельные проекты. Player имеет отдельный executable и явно выбранные native features. | [Границы пакетов](optional-gameplay.md), [Player crate](../crates/player/README.md), этапы 5–7 в [журнале](modular-runtime-progress.md). |
-| Custom после Stop | При неизменённом supported compile context готовый код переиспользуется; freshness proof может вызывать Cargo без новой root compilation. State и worker PID экземпляров независимы. | [Compiled-program store](custom-program-store.md), [последующая Windows/Linux проверка](remaining-authoring-fixes-20261016.md). |
-| Defaults и Inspector | PropertySchema asset defaults учитываются с фактическими live IDs; точные JSON-ключи сохраняются; Apply без изменений сохраняет prefab inheritance. | [Исправления и регрессии](remaining-authoring-fixes-20261016.md), code snapshot `fb63b3ddae7cad52532761932855b755c61fb2c7`. |
-| Windows dialogs и Save As | Начальная папка — проверенная необязательная подсказка. Save As публикует кандидата до принятия в Editor; Cancel/error сохраняют исходную работу. Recovery-файл при отказе записи текущего файла допустим. | [Проверка диалогов и транзакции](dialog-path-fixes-20261016.md), code snapshot `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`. |
-| Linux | Native Editor, Player и Full/Team exports проверены в существующей Ubuntu/WSL2; окна X11/Wayland — через WSLg/llvmpipe. Это ограниченная функциональная поддержка. | [Условия запуска](linux-support.md), [authoring acceptance](remaining-authoring-fixes-20261016.md), [последний dialog-этап](dialog-path-fixes-20261016.md). |
+| Shared Host and ECS | Shared GameHost outside Editor; Core is neutral to ARPG, and the mutable world belongs to ECS. | [Completed stages 2–8](modular-runtime-progress.md), [Host](shared-game-host.md), [ECS](ecs-world.md). |
+| Game packages and Player | ARPG is optional; Two Arenas and the independent Puzzle are separate projects. Player has a separate executable and explicitly selected native features. | [Package boundaries](optional-gameplay.md), [Player crate](../crates/player/README.md), stages 5–7 in the [log](modular-runtime-progress.md). |
+| Custom after Stop | With an unchanged supported compile context, ready code is reused; the freshness proof may invoke Cargo without a new root compilation. Instance state and worker PIDs are independent. | [Compiled-program store](custom-program-store.md), [subsequent Windows/Linux verification](remaining-authoring-fixes-20261016.md). |
+| Defaults and Inspector | PropertySchema asset defaults account for actual live IDs; exact JSON keys are preserved; Apply without changes preserves prefab inheritance. | [Fixes and regressions](remaining-authoring-fixes-20261016.md), code snapshot `fb63b3ddae7cad52532761932855b755c61fb2c7`. |
+| Windows dialogs and Save As | The initial folder is a validated optional hint. Save As publishes the candidate before accepting it in Editor; Cancel/error preserves the original work. A recovery file is permitted when writing the current file fails. | [Dialog and transaction verification](dialog-path-fixes-20261016.md), code snapshot `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`. |
+| Linux | Native Editor, Player, and Full/Team exports were verified in the existing Ubuntu/WSL2 environment; X11/Wayland windows use WSLg/llvmpipe. This is limited functional support. | [Launch requirements](linux-support.md), [authoring acceptance](remaining-authoring-fixes-20261016.md), [latest dialog stage](dialog-path-fixes-20261016.md). |
 
-## Открыто и не подтверждено
+<a id="открыто-и-не-подтверждено"></a>
 
-- **Строгая цель Player 60 FPS, 1080p, 20 активных врагов не достигнута** в последних относящихся к ней замерах. Callback FPS и функциональное завершение не заменяют mean/p95 cadence уникальных игровых кадров. См. [финальные результаты](review-fixes-20261016.md).
-- **Холодная подготовка Editor с Custom в пределах прежних 45 секунд остаётся открытой.** Успешный prewarmed Editor и маленький Puzzle-сценарий её не подтверждают. См. [границы authoring-этапа](remaining-authoring-fixes-20261016.md) и [объём dialog smoke](dialog-path-fixes-20261016.md).
-- **Native Linux WAV и File/Folder dialogs отсутствуют.** Проверочный проект без audio и CLI-операции не подтверждают эти сервисы; production-данные нельзя молча лишать звука. См. [Linux services](linux-support.md#опциональные-сервисы).
-- **Аппаратный Linux, переносимость на произвольные ABI/драйверы и ручная foreground input-to-display QA не сертифицированы.** WSLg software Vulkan и offscreen package verify имеют другой объём проверки.
-- Custom worker управляет временем жизни процессов, но **не является sandbox для недоверенного Rust**. Синхронный GPU readback, ограниченное визуальное подмножество Rust и прочие функциональные границы остаются в тематических документах.
+## Open and Unconfirmed
 
-## Как выбирать доказательства
+- **The strict Player target of 60 FPS, 1080p, 20 active enemies was not reached** in the latest relevant measurements. Callback FPS and functional completion do not replace the mean/p95 cadence of unique game frames. See [final results](review-fixes-20261016.md).
+- **The previous 45-second target for cold Editor preparation with Custom remains open.** A successful prewarmed Editor and a small Puzzle scenario do not confirm it. See [authoring-stage boundaries](remaining-authoring-fixes-20261016.md) and [dialog smoke scope](dialog-path-fixes-20261016.md).
+- **Native Linux WAV and File/Folder dialogs are absent.** A verification project without audio and CLI operations do not confirm these services; production data must not silently lose sound. See [Linux services](linux-support.md#optional-services).
+- **Hardware Linux, portability across arbitrary ABIs/drivers, and manual foreground input-to-display QA are not certified.** WSLg software Vulkan and offscreen package verification cover a different scope.
+- The Custom worker manages process lifetimes, but **is not a sandbox for untrusted Rust**. Synchronous GPU readback, the limited visual Rust subset, and other functional boundaries remain documented in their respective contracts.
 
-Последний code snapshot исправлений диалогов — `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`: [отчёт](dialog-path-fixes-20261016.md) относится к трём изменённым Rust-файлам, Editor tests и перечисленным native сценариям. Полный workspace Windows/Linux из [предыдущего authoring-этапа](remaining-authoring-fixes-20261016.md) относится к `fb63b3ddae7cad52532761932855b755c61fb2c7`; его числа нельзя объявлять новым полным прогоном текущих исходников. Performance-статус из [review-fixes](review-fixes-20261016.md) не изменился от последующих успешных функциональных проверок.
+<a id="как-выбирать-доказательства"></a>
 
-Готовые `outputs/ModuleEngine.exe`, `ModuleEngine-review-fixed.exe`, `ModuleEngine-authoring-fixed.exe` и `ModuleEngine-dialogs-fixed.exe` относятся к разным source snapshots. Выбирайте артефакт по его отчёту и SHA; дата этой страницы не обновляет EXE или source inventory.
+## Choosing Evidence
 
-## Маршруты проверок
+The latest dialog-fix code snapshot is `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`: its [report](dialog-path-fixes-20261016.md) covers three changed Rust files, Editor tests, and the listed native scenarios. The full Windows/Linux workspace run from the [previous authoring stage](remaining-authoring-fixes-20261016.md) applies to `fb63b3ddae7cad52532761932855b755c61fb2c7`; its counts cannot be presented as a new full run of the current sources. The performance status from [review-fixes](review-fixes-20261016.md) did not change as a result of subsequent successful functional checks.
 
-- Windows: корневой [verify.ps1](../verify.ps1); необязательная ветка `-NativeBenchmarks` требует рабочего стола и изолированного замера.
-- Linux: корневой [verify.sh](../verify.sh), условия native toolchain/DXC/Vulkan — в [Linux guide](linux-support.md). Скрипт включает offscreen проверки и не закрывает desktop/export acceptance.
-- [Реестр и stdlib launcher](verification.md) добавляют явные `quick`, `contracts`, `native`, `native-tools`, `package`; `--plan`/`--list` читают конфигурацию без Cargo. Native tests запускаются напрямую из CargoJSON-selected executable с normal loader environment. Windows-only проверки на Linux отмечаются `skipped`. `package` проверяет минимальные Cargo product/snapshot fixtures, а не полный Full/Team/Player export.
-- Объём legacy-вызовов без аргументов сохранён; Windows `-NativeBenchmarks` выбирает actual normal Editor из CargoJSON и по-прежнему не требует Python. Новый launcher требует уже установленный Python 3.9+ без сторонних зависимостей. Performance остаётся отдельным opt-in legacy/адресным маршрутом с прежними ограничениями.
+The finished `outputs/ModuleEngine.exe`, `ModuleEngine-review-fixed.exe`, `ModuleEngine-authoring-fixed.exe`, and `ModuleEngine-dialogs-fixed.exe` correspond to different source snapshots. Choose an artifact by its report and SHA; the date of this page does not update the EXE or source inventory.
 
-Launcher и его unit fixtures реализованы отдельно от Rust. Unit-проверки и планирование не являются новой приёмкой engine/native/package; реальные профили требуют своих отчётов на текущем snapshot. Правила работы и сохранности данных: [AGENTS.md](../AGENTS.md).
+<a id="маршруты-проверок"></a>
 
-Три [проверки свойств Inspector](verification.md#проверки-свойств-inspector) добавляют 99 конечных сценариев через реальный Apply/save/reopen: точные ключи и null, opaque local payload, будущее наследование prefab/defaults и намеренные локальные правки. Это тестовое усиление существующего поведения; новые зависимости и продуктовые изменения не требовались. Проверка чувствительности действительно обнаружила временно возвращённую ошибку разбора `literal.key` как dot path; правильная реализация затем восстановлена побайтно.
+## Verification Routes
 
-На этом этапе `contracts` прошёл на Windows и Ubuntu/WSL (по 178 tests; platform-specific наборы отличаются); Windows `native`/`package` проверены отдельно на этапе маршрута. [Результаты и границы внедрения](verification.md#проверка-внедрения-16-октября-2026) не заменяют полную приёмку движка или опубликованных EXE.
+- Windows: root [verify.ps1](../verify.ps1); the optional `-NativeBenchmarks` branch requires a desktop and an isolated measurement.
+- Linux: root [verify.sh](../verify.sh); native toolchain/DXC/Vulkan requirements are in the [Linux guide](linux-support.md). The script includes offscreen checks and does not complete desktop/export acceptance.
+- The [registry and stdlib launcher](verification.md) add explicit `quick`, `contracts`, `native`, `native-tools`, `package` profiles; `--plan`/`--list` read configuration without Cargo. Native tests run directly from the CargoJSON-selected executable with the normal loader environment. Windows-only checks are marked `skipped` on Linux. `package` checks minimal Cargo product/snapshot fixtures, not a full Full/Team/Player export.
+- The scope of legacy invocations without arguments is preserved; Windows `-NativeBenchmarks` selects the actual normal Editor from CargoJSON and still does not require Python. The new launcher requires an already installed Python 3.9+ without third-party dependencies. Performance remains a separate opt-in legacy/targeted route with its previous limitations.
 
-17 октября в `contracts` добавлены четыре существующих Save As tests и три
-[проверки сохранности workflow](verification.md#сохранность-save-as-и-файловой-истории)
-с 28 конечными сценариями. Windows и Ubuntu/WSL прошли по 185 Rust tests на исходнике
+The launcher and its unit fixtures are implemented separately from Rust. Unit checks and planning are not a new engine/native/package acceptance; real profiles require their own reports on the current snapshot. Work and data-preservation rules: [AGENTS.md](../AGENTS.md).
+
+Three [Inspector property checks](verification.md#inspector-property-checks) add 99 finite scenarios through real Apply/save/reopen: exact keys and null, opaque local payload, future prefab/default inheritance, and intentional local edits. This strengthens tests of existing behavior; no new dependencies or product changes were required. The sensitivity check actually detected a temporarily reintroduced bug that parsed `literal.key` as a dot path; the correct implementation was then restored byte for byte.
+
+At this stage, `contracts` passed on Windows and Ubuntu/WSL (178 tests each; platform-specific sets differ); Windows `native`/`package` were verified separately during the routing stage. The [rollout results and boundaries](verification.md#rollout-verification-on-16-october-2026) do not replace full engine acceptance or acceptance of published EXEs.
+
+On 17 October, `contracts` gained four existing Save As tests and three
+[workflow preservation checks](verification.md#save-as-and-file-history-preservation)
+with 28 finite scenarios. Windows and Ubuntu/WSL each passed 185 Rust tests on source
 `editor_workflow.rs` SHA-256 `88e8f1d12cc01ce369d5e016e2107fdeb42b5706ab93078047b56b4a8a4aa1cf`.
-Временное отключение rollback вызвало реальный отказ по изменившимся файлам;
-исходник восстановлен побайтно, адресный тест затем прошёл. Это тестовое усиление,
-без изменения production-поведения или Cargo dependencies; прежние performance
-и delivery ограничения сохраняются.
+Temporarily disabling rollback caused a real failure due to changed files;
+the source was restored byte for byte, and the targeted test then passed. This strengthens tests,
+without changing production behavior or Cargo dependencies; previous performance
+and delivery limitations remain.
 
-[GitHub CI](ci.md) запускает Windows/Linux contracts и выбранные native/package
-маршруты; в публичном `myjname/ModuleEngine` для `main` требуется `CI required`,
-включая администратора. Новые версии оцениваются по фактическому CI своего SHA,
-не по старому зелёному запуску. Негативный служебный PR подтвердил блокировку merge.
+[GitHub CI](ci.md) runs Windows/Linux contracts and selected native/package
+routes; public `myjname/ModuleEngine` requires `CI required` for `main`,
+including administrators. New versions are assessed by the actual CI for their SHA,
+not an old green run. A negative service PR confirmed merge blocking.
 
-[Независимое ревью](review.md) обязательно для существенных изменений по AGENTS.
-Другой агент/человек проверяет diff, цель, реальные пути и evidence. Stdlib
-`review_snapshot.py` связывает заключение с HEAD и байтами tracked/untracked source;
-его успешная сверка сама не является approval. [Шаблон](review-template.md)
-сохраняет замечания, исправления, повторную проверку и непроверенные границы.
+[Independent review](review.md) is required for substantial changes under AGENTS.
+Another agent/person examines the diff, goal, actual paths, and evidence. The stdlib
+`review_snapshot.py` binds the conclusion to HEAD and tracked/untracked source bytes;
+a successful comparison is not itself approval. The [template](review-template.md)
+records findings, fixes, rechecks, and unverified boundaries.

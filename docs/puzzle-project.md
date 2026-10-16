@@ -1,5 +1,7 @@
 # Crate puzzle project
 
+[English](puzzle-project.md) | [Русский](ru/puzzle-project.md) | [Documentation](README.md)
+
 `module-engine-project-puzzle` is a small authored game built from
 `GameProject::empty()`. It depends on the neutral engine contracts and optionally
 egui for its controls and HUD. It has no dependency on the ARPG package or the

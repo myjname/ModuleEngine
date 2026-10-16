@@ -1,16 +1,22 @@
-# Зависания рабочего стола при запуске ModuleEngine — 15.10.2026
+<a id="зависания-рабочего-стола-при-запуске-moduleengine--15102026"></a>
 
-Причина локализована в пути показа окна OpenGL/Glow: поток композиции Windows DWM тратит почти целое ядро на поиск события DX BLT внутри `OpenDxBltEvent`. Изменение GUI на WGPU/DX12 устраняет воспроизведение секундных остановок обновления основного рабочего стола в контролируемом сравнении. Игровые ECS, Host и Vulkan не менялись.
+# Desktop stalls when launching ModuleEngine — 15.10.2026
 
-Ветка: `codex/fix-dwm-desktop-stalls`; исходный HEAD: `4cee54d40469afd9d59bb101d67af0a2176e5ece`. Commit реализации: `c714e9e7521d3203c86dd2b9c7e0574099cfa2bf`; отчёт и source inventory сохранены следующим commit. Компактные числовые доказательства: [desktop-stalls-20261015.json](evidence/desktop-stalls-20261015.json).
+[English](desktop-stalls-20261015.md) | [Русский](ru/desktop-stalls-20261015.md) | [Documentation](README.md)
 
-## Причина и границы установленного
+The cause was localized to the OpenGL/Glow window presentation path: the Windows DWM composition thread spends almost an entire core searching for a DX BLT event inside `OpenDxBltEvent`. Switching the GUI to WGPU/DX12 eliminates reproduction of multi-second stalls in primary desktop updates in a controlled comparison. Gameplay ECS, Host, and Vulkan were unchanged.
 
-Исходная ETW `E:\ModuleEngine\outputs\independent-audit\lag-diagnostics\trace-admin-20261015-102351\engine-lag.etl` сохранена: 543162368 байт, SHA-256 `E407947D4705EDBD72E491DB84CB6AD27A67C2FAA67EE2666B02419CD41A9D01`. Потерь событий/буферов нет. Сохранено предупреждение xperf об одном `InvalidEvent` на 22,607578 с в rundown другого процесса; массовой потери данных оно не означает.
+Branch: `codex/fix-dwm-desktop-stalls`; original HEAD: `4cee54d40469afd9d59bb101d67af0a2176e5ece`. Implementation commit: `c714e9e7521d3203c86dd2b9c7e0574099cfa2bf`; the report and source inventory were saved in the following commit. Compact numerical evidence: [desktop-stalls-20261015.json](evidence/desktop-stalls-20261015.json).
 
-DWM PID 2208, TID 3004 завершал `SCHEDULE_PRESENT` за максимум 2,823 мс до запуска. После запуска зарегистрированы 341,434; 2018,662 и 8123,493 мс. Последний интервал остался незавершённым до конца трассы. Аппаратный VSync продолжался примерно с 144 Гц; отправка движком Present не означает фактический показ кадров.
+<a id="причина-и-границы-установленного"></a>
 
-Публичные PDB Microsoft точно сопоставлены с GUID/age из ETL. Стек:
+## Cause and boundaries of the findings
+
+The original ETW `E:\ModuleEngine\outputs\independent-audit\lag-diagnostics\trace-admin-20261015-102351\engine-lag.etl` is retained: 543162368 bytes, SHA-256 `E407947D4705EDBD72E491DB84CB6AD27A67C2FAA67EE2666B02419CD41A9D01`. There are no lost events/buffers. An xperf warning about one `InvalidEvent` at 22.607578 s in another process's rundown is retained; it does not indicate widespread data loss.
+
+DWM PID 2208, TID 3004 completed `SCHEDULE_PRESENT` in at most 2.823 ms before launch. After launch, 341.434, 2018.662, and 8123.493 ms were recorded. The last interval remained unfinished until the trace ended. Hardware VSync continued at approximately 144 Hz; the engine submitting Present does not mean frames were actually displayed.
+
+Microsoft public PDBs were matched exactly to the GUID/age from the ETL. Stack:
 
 ```text
 NtQueryDirectoryObject → OpenDxBltEvent
@@ -18,35 +24,39 @@ NtQueryDirectoryObject → OpenDxBltEvent
 → CComposition::ProcessComposition
 ```
 
-За 11 секунд TID 3004 получил 10,999 секунды CPU; 10727 из 10995 CPU samples (97,56%) проходят через `OpenDxBltEvent`. Только `NtQueryDirectoryObject` занял 8,706 секунды, поиск имени объекта — ещё 1,120 секунды. Расшифровка соответствующего системного DLL показывает: после неудачного `OpenEventW("DwmDxBltEvent_…")` DWM перебирает `\Sessions\<session>\AppContainerNamedObjects`, пытаясь открыть событие в каждом подкаталоге.
+Over 11 seconds, TID 3004 received 10.999 seconds of CPU time; 10727 of 10995 CPU samples (97.56%) pass through `OpenDxBltEvent`. `NtQueryDirectoryObject` alone took 8.706 seconds, and object-name lookup another 1.120 seconds. Disassembly of the corresponding system DLL shows that after a failed `OpenEventW("DwmDxBltEvent_…")`, DWM enumerates `\Sessions\<session>\AppContainerNamedObjects`, attempting to open the event in each subdirectory.
 
-**Почему первоначальный `OpenEventW` неуспешен, не установлено.** Отсутствие события, ошибка доступа и конкретная ошибка Windows/драйвера не различаются имеющимися данными. Позднее чтение каталога обнаружило 2506 объектов; их происхождение и причинная роль не доказаны. Объекты не менялись.
+**Why the initial `OpenEventW` fails has not been established.** The available data cannot distinguish a missing event, an access failure, or a specific Windows/driver bug. A later directory read found 2506 objects; their origin and causal role have not been proven. The objects were not changed.
 
-Пустое окно eframe без проекта, GameHost и Vulkan воспроизвело проблему: средняя загрузка DWM — 94,67% одного ядра с Glow и 8,05% с DX12, без Desktop Duplication. Поэтому игровой рендеринг, ECS и стартовая компиляция не нужны для воспроизведения. Переполнение RAM/VRAM, постоянная общая загрузка CPU/GPU и секундные DPC/ISR не подтвердились. Причинность MPO и сторонних overlay не установлена. В исходной ETW горячий DWM сохраняется после закрытия; немедленное восстановление этой трассой не доказано.
+An empty eframe window without a project, GameHost, or Vulkan reproduced the problem: mean DWM load was 94.67% of one core with Glow and 8.05% with DX12, without Desktop Duplication. Gameplay rendering, ECS, and startup compilation are therefore unnecessary for reproduction. RAM/VRAM exhaustion, sustained overall CPU/GPU load, and multi-second DPC/ISR were not supported by the evidence. Causality of MPO and third-party overlays has not been established. In the original ETW, DWM remains busy after close; that trace does not prove immediate recovery.
 
-## Изменение и сравнение
+<a id="изменение-и-сравнение"></a>
 
-`E:\ModuleEngine\crates\player\src\ui.rs` задаёт общую политику Editor/Player: Windows GUI по умолчанию использует WGPU, с явным выбором DX12. `MODULE_ENGINE_GUI_BACKEND=glow` оставлен для диагностики. Инициализированный адаптер записывается отдельно от запрошенного backend. Подключение Editor: `E:\ModuleEngine\crates\editor\src\main.rs`; контрольное пустое окно: `E:\ModuleEngine\crates\editor\examples\desktop_presentation_probe.rs`. Зависимости обновлены в `Cargo.toml`/`Cargo.lock`.
+## Change and comparison
 
-Нативные снимки Editor поддерживает через `MODULE_ENGINE_UI_SCREENSHOT_TO` (`crates/editor/src/ui_capture.rs`), сохраняя WGPU. Старый `EFRAME_SCREENSHOT_TO` при неуказанном backend выбирает Glow; вместе с явно выбранным WGPU возвращает понятную ошибку. Для обычного запуска эти переменные должны отсутствовать.
+`E:\ModuleEngine\crates\player\src\ui.rs` sets the shared Editor/Player policy: Windows GUI defaults to WGPU, explicitly selecting DX12. `MODULE_ENGINE_GUI_BACKEND=glow` remains available for diagnostics. The initialized adapter is recorded separately from the requested backend. Editor integration: `E:\ModuleEngine\crates\editor\src\main.rs`; reference empty window: `E:\ModuleEngine\crates\editor\examples\desktop_presentation_probe.rs`. Dependencies were updated in `Cargo.toml`/`Cargo.lock`.
 
-A/B выполнялся последовательно одним Release EXE, с одинаковыми проектом, layout, настройками observer и основным монитором RTX 4080 SUPER, 3440×1440. Границы открытия определены QPC от resume до запроса закрытия. Desktop Duplication сохранял только метаданные, без чтения/копирования пикселей приложением observer.
+Editor supports native screenshots through `MODULE_ENGINE_UI_SCREENSHOT_TO` (`crates/editor/src/ui_capture.rs`), retaining WGPU. The old `EFRAME_SCREENSHOT_TO` selects Glow when no backend is specified; together with explicitly selected WGPU, it returns a clear error. These variables must be absent for ordinary launch.
 
-| В интервале открытия | Glow, 10,001 с | WGPU/DX12, 10,014 с |
+A/B ran sequentially with one Release EXE, using the same project, layout, observer settings, and RTX 4080 SUPER primary monitor at 3440×1440. Open intervals were defined by QPC from resume to the close request. Desktop Duplication retained metadata only, without the observer application reading/copying pixels.
+
+| During the open interval | Glow, 10.001 s | WGPU/DX12, 10.014 s |
 | --- | ---: | ---: |
-| Максимальный завершённый разрыв обновлений | 2437,964 мс | 30,232 мс |
-| Незавершённый интервал у последнего наблюдения | ≥6406,406 мс | ≥0,063 мс |
-| Максимальный наблюдённый возраст изображения | 6406,406 мс | 28,367 мс |
-| DWM, взвешенная загрузка одного ядра | 94,31% | 16,09% |
-| Максимальный промежуток между опросами observer | 108,034 мс | 30,241 мс |
+| Maximum completed update gap | 2437.964 ms | 30.232 ms |
+| Unfinished interval at last observation | ≥6406.406 ms | ≥0.063 ms |
+| Maximum observed image age | 6406.406 ms | 28.367 ms |
+| DWM, weighted load of one core | 94.31% | 16.09% |
+| Maximum observer polling interval | 108.034 ms | 30.241 ms |
 
-Разрыв Glow 8283,560 мс завершился на +11,801 с, уже после закрытия; он не включён в завершённые разрывы внутри открытия. Pointer-only события не сбрасывали возраст изображения. Продолжавшиеся опросы и отсутствие накопленных кадров в Glow не объясняют секундный провал остановкой observer.
+The 8283.560 ms Glow gap completed at +11.801 s, after close; it is not included among completed gaps within the open interval. Pointer-only events did not reset image age. Continued polling and the absence of accumulated frames in Glow do not support an observer stall as the explanation for the multi-second interruption.
 
-Дополнительное обычное окно с Game view работало 45 секунд без Desktop Duplication; средний DWM — 12,91% ядра. Computer Use не получил подтверждение доступа вовремя: снимков и нажатий кнопок в этом прогоне не было. Это не проверка Play/Stop.
+An additional ordinary window with Game view ran for 45 seconds without Desktop Duplication; mean DWM was 12.91% of a core. Computer Use did not receive access confirmation in time: no screenshots or button presses were made in that run. This is not a Play/Stop check.
 
-## Проверки, воспроизведение и оставшиеся ограничения
+<a id="проверки-воспроизведение-и-оставшиеся-ограничения"></a>
 
-Прошли Release-сборка A/B, 3 теста `native_options_tests` и Clippy с `-D warnings`:
+## Checks, reproduction, and remaining limitations
+
+The Release A/B build, 3 `native_options_tests` tests, and Clippy with `-D warnings` passed:
 
 ```powershell
 $env:CARGO_HOME='E:\ModuleEngine\.work\cargo-home'
@@ -55,7 +65,7 @@ cargo test --release --offline --locked -p module-engine-player --features ui na
 cargo clippy --release --offline --locked -p module-engine-editor -p module-engine-player --all-targets -- -D warnings
 ```
 
-Повтор сравнения ограничен таймером; имена каталогов должны быть новыми:
+Repeating the comparison is timer-bounded; directory names must be new:
 
 ```powershell
 $diag='E:\ModuleEngine\outputs\independent-audit\lag-diagnostics\fix-investigation'
@@ -64,12 +74,12 @@ $diag='E:\ModuleEngine\outputs\independent-audit\lag-diagnostics\fix-investigati
 & "$diag\Analyze-DesktopCases.ps1" -CaseDirectories @("$diag\repeat-glow-01","$diag\repeat-dx12-01") -OutputPath "$diag\repeat-analysis.json"
 ```
 
-Полные локальные сводки: `$diag\offline-etw-localization.json`, `desktop-case-analysis.json`, `desktop-case-claims.json`; исходные CSV сохранены в каталогах случаев. Исходный проект и оба personal layout восстановлены побайтно: SHA-256 совпадают с началом диагностики; старый `game-project.json` также сохранён.
+Full local summaries: `$diag\offline-etw-localization.json`, `desktop-case-analysis.json`, `desktop-case-claims.json`; source CSV files are retained in the case directories. The original project and both personal layouts were restored byte for byte: SHA-256 hashes match the start of diagnostics; the old `game-project.json` is also retained.
 
-Финальная Release-сборка Editor и Player прошла с UI/ARPG/Puzzle/Vulkan/audio. Native benchmark в изолированной Full-копии прошёл 90 остановленных и 90 игровых кадров: симуляция продвинулась, команда Stop немедленно освободила Game owner, затем обычная подготовка Game-панели создала остановленный worker `actor_id=2` вместо `1`, время `0`. `play_stop.verified=true`, `measurements_valid=true`, ошибок нет; авторский документ и файл не изменились. Это проверка общего dispatcher toolbar, а не внешнего клика. За 17,87 с жизни процесса максимальный разрыв обновлений desktop — 35,586 мс, взвешенный DWM — 21,39% ядра. Источники: `$diag\native-editor\report.json` и `native-desktop-analysis.json`.
+The final Editor and Player Release build passed with UI/ARPG/Puzzle/Vulkan/audio. The native benchmark in an isolated Full copy passed 90 stopped and 90 gameplay frames: simulation advanced, the Stop command immediately released the Game owner, and ordinary Game-panel preparation then created a stopped worker with `actor_id=2` instead of `1`, at time `0`. `play_stop.verified=true`, `measurements_valid=true`, no errors; the authored document and file did not change. This checks the shared toolbar dispatcher rather than an external click. During the process's 17.87 s lifetime, the maximum desktop update gap was 35.586 ms and weighted DWM was 21.39% of a core. Sources: `$diag\native-editor\report.json` and `native-desktop-analysis.json`.
 
-Итоговый `E:\ModuleEngine\outputs\ModuleEngine.exe` обновлён и совпадает с `target\release\module-engine-editor.exe`: SHA-256 `A40ED305456F9AFF3EE868CC91BCF86B34BDDB0111E35C3821C5DF1FD1F0069F`. Его обычный запуск на исходном проекте/layout без backend override, capture и Desktop Duplication прошёл 12 с: DWM в среднем 12,91% ядра, штатный exit 0, принудительного завершения не было, собственных дочерних процессов не осталось. Это дополнительная проверка CPU/cleanup; интервалы показа без observer здесь не измерялись. Источник: `$diag\final-exe-no-observer\summary.json`. Предыдущий EXE сохранён как `$diag\ModuleEngine.before.exe`.
+The final `E:\ModuleEngine\outputs\ModuleEngine.exe` was updated and matches `target\release\module-engine-editor.exe`: SHA-256 `A40ED305456F9AFF3EE868CC91BCF86B34BDDB0111E35C3821C5DF1FD1F0069F`. Its ordinary launch on the original project/layout without a backend override, capture, or Desktop Duplication ran for 12 s: DWM averaged 12.91% of a core, normal exit was 0, there was no forced termination, and no owned child processes remained. This is an additional CPU/cleanup check; presentation intervals without an observer were not measured here. Source: `$diag\final-exe-no-observer\summary.json`. The previous EXE is retained as `$diag\ModuleEngine.before.exe`.
 
-Встроенный WGPU screenshot создан и просмотрен (`$diag\dx12-game.png`): он подтверждает захват GUI во время подготовки; готовые Game/Scene pixels подтверждены отдельно native benchmark. Source inventory обновлён штатной командой `--seal-source-project`; Full Engine доступен, `modified_sources=[]`, diagnostics пусты. Windows GUI теперь требует DX12 adapter. Существующие экспорты и prebuilt Player автоматически не обновляются; их файлы не менялись.
+A built-in WGPU screenshot was created and inspected (`$diag\dx12-game.png`): it confirms GUI capture during preparation; completed Game/Scene pixels were confirmed separately by the native benchmark. The source inventory was updated using the standard `--seal-source-project` command; Full Engine is available, `modified_sources=[]`, and diagnostics are empty. Windows GUI now requires a DX12 adapter. Existing exports and prebuilt Player are not updated automatically; their files were not changed.
 
-Новая ETW не записывалась: дополнительные права/UAC не получались. Desktop Duplication измеряет обновления изображения выбранного монитора и может менять режим презентации; это не длительности `SCHEDULE_PRESENT`, физическое сканирование дисплея или задержка ввода. Ограничения обычного запуска и проверки Play/Stop указаны отдельно. Драйверы, настройки безопасности, MPO, overlay и глобальные настройки Windows не менялись.
+No new ETW was recorded: additional privileges/UAC were not obtained. Desktop Duplication measures image updates on the selected monitor and can change presentation mode; these are not `SCHEDULE_PRESENT` durations, physical display scanout, or input latency. Limits of ordinary launch and Play/Stop checks are stated separately. Drivers, security settings, MPO, overlays, and global Windows settings were not changed.

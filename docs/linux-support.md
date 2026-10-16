@@ -1,17 +1,23 @@
-# Подготовка Linux и границы проверки
+<a id="подготовка-linux-и-границы-проверки"></a>
 
-GUI Editor и Player используют общую политику: **Windows — WGPU/DX12, Linux — WGPU/Vulkan**. Игровой рендерер — отдельный Vulkan-модуль. Наличие одного API у GUI не определяет формат игрового графа. Windows-исправление зависаний DWM сохранено; диагностический Glow включается только явно.
+# Linux setup and verification boundaries
 
-Проверки политики с Linux-флагом на Windows не заменяют native сборку и запуск. В существующую Ubuntu/WSL2 по отдельному разрешению установлены native Rust/Cargo, C-компилятор, pkg-config и DXC. [Текущее состояние](current-status.md) связывает завершённые исправления и открытые границы с последующими проверками; [linux-support-20261015.md](linux-support-20261015.md) описывает первый прогон и сохраняется как история.
+[English](linux-support.md) | [Русский](ru/linux-support.md) | [Documentation](README.md)
 
-## Требования к среде
+GUI Editor and Player share one policy: **Windows — WGPU/DX12, Linux — WGPU/Vulkan**. The game renderer is a separate Vulkan module. The GUI using one API does not determine the game graph's format. The Windows DWM-freeze fix is preserved; diagnostic Glow is enabled only explicitly.
 
-* Native Linux Rust/Cargo 1.99.0 — проверенная версия; более ранние версии в этом прогоне не проверялись. Нужны компоненты rustfmt/Clippy, C-компилятор/linker и pkg-config. Команды ниже не устанавливают инструменты.
-* Для GUI: работающая сессия Wayland или X11, runtime библиотеки window system и xkbcommon, Vulkan loader и совместимый ICD. Для разработки/линковки могут понадобиться dev-пакеты выбранного дистрибутива. Их установку нужно выполнить явно средствами своей системы.
-* Для нового HLSL: native Linux DXC. Windows `dxc.exe` не используется через Wine/interop. Предкомпилированный Player не требует DXC или Rust, но требует системные runtime библиотеки и GPU-драйвер.
-* Native пакеты собираются на своей OS/архитектуре. Windows экспорт не становится Linux-пакетом после переименования EXE. Метка `native_platform` не доказывает совместимость glibc/драйвера со всеми дистрибутивами.
+Policy checks with a Linux flag on Windows do not replace native building and execution. Native Rust/Cargo, a C compiler, pkg-config and DXC were installed in the existing Ubuntu/WSL2 with separate authorization. [Current status](current-status.md) ties completed fixes and open boundaries to subsequent checks; [linux-support-20261015.md](linux-support-20261015.md) describes the first run and is retained as history.
 
-Read-only проверка среды, включая настоящий `vkCreateInstance` и перечисление Vulkan-устройств:
+<a id="требования-к-среде"></a>
+
+## Environment requirements
+
+* Native Linux Rust/Cargo 1.99.0 is the verified version; earlier versions were not checked in this run. rustfmt/Clippy components, a C compiler/linker and pkg-config are required. The commands below do not install tools.
+* For GUI: a working Wayland or X11 session, window-system and xkbcommon runtime libraries, a Vulkan loader and compatible ICD. Development/linking may require dev packages for the selected distribution. Install them explicitly through your system's tools.
+* For new HLSL: native Linux DXC. Windows `dxc.exe` is not used through Wine/interop. A precompiled Player needs neither DXC nor Rust, but needs system runtime libraries and a GPU driver.
+* Native packages are built on their own OS/architecture. A Windows export does not become a Linux package by renaming the EXE. The `native_platform` tag does not prove glibc/driver compatibility with every distribution.
+
+Read-only environment check, including real `vkCreateInstance` and Vulkan device enumeration:
 
 ```sh
 python3 scripts/linux_prerequisites.py
@@ -20,11 +26,13 @@ python3 scripts/linux_prerequisites.py --require gui
 python3 scripts/linux_prerequisites.py --require hlsl
 ```
 
-Код2 означает отсутствие требований выбранного режима. Успех probe не означает, что ModuleEngine собран или окно успешно создано. Тип устройства4/`software=true` означает программный Vulkan; это не измерение скорости дискретной видеокарты. Проверка сокета не доказывает авторизацию X11 или создание Vulkan surface.
+Code 2 means the selected mode's requirements are missing. A successful probe does not mean ModuleEngine has been built or a window successfully created. Device type 4/`software=true` means software Vulkan; this does not measure discrete-GPU performance. A socket check does not prove X11 authorization or Vulkan surface creation.
 
-## Сборка и запуск
+<a id="сборка-и-запуск"></a>
 
-В существующем checkout через native Linux-среду либо в явно созданном Full acceptance-пакете, после подготовки инструментов. Для обычной разработки новый checkout не требуется. Для GUI выберите проект формата 4 без активного запроса WAV; `/path/to/linux-project-v4.json` ниже означает его действительный путь. Корневой `project.json` этого checkout имеет старый формат 3 и сохраняется без автоматической миграции. `game-project-v4.json` имеет актуальный формат, но его аудиозапрос требует явного изменения отдельного проверочного проекта.
+## Building and running
+
+Use the existing checkout through a native Linux environment or an explicitly created Full acceptance package, after preparing tools. Ordinary development does not require a new checkout. For GUI, choose a format 4 project with no active WAV request; `/path/to/linux-project-v4.json` below means its actual path. This checkout's root `project.json` has the old format 3 and is preserved without automatic migration. `game-project-v4.json` has the current format, but its audio request requires an explicit change to a separate verification project.
 
 ```sh
 rustc -vV
@@ -34,17 +42,17 @@ sh verify.sh
 sh run.sh /path/to/linux-project-v4.json
 ```
 
-`run.sh` и `verify.sh` используют offline Cargo с `Cargo.lock`. Восстановление зависимостей — отдельная явная команда `cargo fetch`. Linux target расположен в `.work/linux-target/<host>`; Windows target и MSVC-настройки не переиспользуются. `CARGO_TARGET_DIR` можно явно заменить. Не подключайте Windows `.tools/env.ps1` в Linux. Windows toolchain-manifest/bootstrap остаются Windows-инструментами; автоматической установки Linux SDK пока нет.
+`run.sh` and `verify.sh` use offline Cargo with `Cargo.lock`. Restoring dependencies is a separate explicit `cargo fetch` command. The Linux target is in `.work/linux-target/<host>`; Windows target and MSVC settings are not reused. `CARGO_TARGET_DIR` can be explicitly replaced. Do not load Windows `.tools/env.ps1` on Linux. Windows toolchain-manifest/bootstrap remain Windows tools; automatic Linux SDK installation is not yet available.
 
-`verify.sh` запускает весь workspace suite, включая настоящий Vulkan rendering и offscreen GameUI-тест, поэтому требует пригодное Vulkan-устройство и native DXC. Это не только CPU/build-проверка. Для проверки одной компиляции достаточно `cargo check --offline --locked --release --target "$(rustc -vV | sed -n 's/^host: //p')" --workspace --all-targets`. Desktop-сессия Wayland/X11 не требуется для offscreen-теста; `--require gui` не используется как его обязательное условие. Создание native окна и экспорт проверяются отдельно ниже.
+`verify.sh` runs the entire workspace suite, including real Vulkan rendering and the offscreen GameUI test, so it requires a usable Vulkan device and native DXC. It is not merely a CPU/build check. To check compilation alone, use `cargo check --offline --locked --release --target "$(rustc -vV | sed -n 's/^host: //p')" --workspace --all-targets`. A Wayland/X11 desktop session is unnecessary for the offscreen test; `--require gui` is not a prerequisite for it. Native window creation and export are checked separately below.
 
-Полный source export переносит shell-скрипты и Python probe. Экспорт, выполненный на Unix, сохраняет execute bits. Скрипты можно запускать через `sh`, если передача файлов или файловая система потеряла эти биты. Native `Player` должен оставаться исполняемым.
+Full source export includes the shell scripts and Python probe. Export performed on Unix preserves execute bits. Scripts can be run through `sh` if file transfer or the filesystem lost those bits. Native `Player` must remain executable.
 
-На проверяемом ПК подготовлена отдельная native среда: `. .tools/linux-x86_64/env.sh` в Ubuntu. Этот локальный файл содержит абсолютные пути текущей машины и не поставляется как переносимый SDK. Он задаёт отдельные Linux Cargo/rustup homes и ext4 target; не изменяет Windows `.tools/cargo`, `.tools/rustup` или профили оболочки.
+A separate native environment is prepared on the test PC: `. .tools/linux-x86_64/env.sh` in Ubuntu. This local file contains absolute paths for the current machine and is not shipped as a portable SDK. It sets separate Linux Cargo/rustup homes and an ext4 target; it does not change Windows `.tools/cargo`, `.tools/rustup` or shell profiles.
 
-Проверенные версии, официальные URL и SHA-256 Linux Rust/DXC сохранены в `scripts/linux-toolchain.json`; этот файл переносится Full/Team вместе со `scripts/`. Это metadata для явного восстановления, не автоматически исполняемый installer. Windows-манифест и его pins сохранены.
+Verified versions, official URLs and SHA-256 hashes of Linux Rust/DXC are saved in `scripts/linux-toolchain.json`; this file is delivered with `scripts/` in Full/Team. It is metadata for explicit restoration, not an automatically executed installer. The Windows manifest and its pins are preserved.
 
-Проверочные CLI после `verify.sh`:
+Verification CLI commands after `verify.sh`:
 
 ```sh
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -55,11 +63,13 @@ editor="${CARGO_TARGET_DIR:-$PWD/.work/linux-target/$host}/$host/release/module-
 "$editor" --editor-ui-check game-project-v4.json outputs/linux-verification/workflow
 ```
 
-Эти команды требуют соответствующих runtime/SDK/DXC. Native Linux acceptance выполнялась для указанных в [отчётах](current-status.md#как-выбирать-доказательства) snapshots; приведённые команды сами по себе не подтверждают текущий HEAD. Acceptance может создавать временные Full/Team/Player-пакеты; запускайте последовательно. Активный запрос неподдерживаемого native audio нужно сначала явно убрать в отдельном проверочном проекте; production-проект автоматически не меняется.
+These commands require the corresponding runtime/SDK/DXC. Native Linux acceptance was performed for snapshots specified in the [reports](current-status.md#choosing-evidence); the commands alone do not confirm the current HEAD. Acceptance can create temporary Full/Team/Player packages; run sequentially. An active request for unsupported native audio must first be explicitly removed in a separate verification project; the production project is not changed automatically.
 
-## Wayland, X11 и диагностика
+<a id="wayland-x11-и-диагностика"></a>
 
-Оконная система выбирается независимо от GUI GPU backend:
+## Wayland, X11 and diagnostics
+
+The window system is selected independently of the GUI GPU backend:
 
 ```sh
 MODULE_ENGINE_WINDOW_SYSTEM=wayland sh run.sh /path/to/linux-project-v4.json
@@ -67,66 +77,70 @@ MODULE_ENGINE_WINDOW_SYSTEM=x11 sh run.sh /path/to/linux-project-v4.json
 MODULE_ENGINE_WINDOW_SYSTEM=auto sh run.sh /path/to/linux-project-v4.json
 ```
 
-Auto использует выбор winit: непустой Wayland environment имеет приоритет. После неудачного подключения к Wayland автоматический повтор через X11 не обещается. При ошибке проверьте `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `XDG_RUNTIME_DIR` и `DISPLAY` либо явно выберите X11. Неисправная конфигурация сообщает причину; скрытой замены WGPU на Glow нет.
+Auto uses winit's selection: a nonempty Wayland environment takes priority. An automatic retry through X11 after a failed Wayland connection is not promised. On error, check `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `XDG_RUNTIME_DIR` and `DISPLAY`, or explicitly select X11. A faulty configuration reports the reason; there is no hidden WGPU-to-Glow fallback.
 
-В обнаруженном WSLg `WAYLAND_DISPLAY=wayland-0`, но сокет лежит в `/mnt/wslg/runtime-dir/wayland-0`, а `XDG_RUNTIME_DIR=/run/user/0` на него не указывает. Для отдельного процесса допустим абсолютный путь:
+In the detected WSLg, `WAYLAND_DISPLAY=wayland-0`, but the socket is in `/mnt/wslg/runtime-dir/wayland-0`, and `XDG_RUNTIME_DIR=/run/user/0` does not point to it. An absolute path is allowed for a separate process:
 
 ```sh
 WAYLAND_DISPLAY=/mnt/wslg/runtime-dir/wayland-0 python3 scripts/linux_prerequisites.py
 ```
 
-Это адрес именно обнаруженной среды, не универсальная настройка Linux. Глобальные переменные/системные настройки probe не исправляет.
+This address is specific to the detected environment, not a universal Linux setting. The probe does not repair global variables/system settings.
 
-Для запуска самого Editor в этой WSLg использовалось `XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir` только в окружении дочернего процесса. Этот вариант проверен реальным созданием Wayland-окна; X11 отдельно проверен с `MODULE_ENGINE_WINDOW_SYSTEM=x11`.
+To start Editor itself in this WSLg, `XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir` was used only in the child process environment. This was verified by actual Wayland window creation; X11 was checked separately with `MODULE_ENGINE_WINDOW_SYSTEM=x11`.
 
-В общем Windows/WSL checkout привязка проекта может содержать Windows-путь вроде `E:\ModuleEngine` или его verbatim-вариант. На Linux такой абсолютный drive path разрешается через `/usr/bin/wslpath -u`, без shell и без записи в sidecar. Затем выполняются обычные проверки выбранного Engine, manifest, SDK и профиля. UNC/device/относительные Windows-пути не преобразуются. На обычном Linux без `wslpath` нужно явно выбрать доступный native Engine; отказ не разрешает другую архитектуру или доступ к отсутствующим исходникам.
+In a shared Windows/WSL checkout, the project binding can contain a Windows path such as `E:\ModuleEngine` or its verbatim form. On Linux, such an absolute drive path is resolved through `/usr/bin/wslpath -u`, without a shell or sidecar write. Ordinary checks of the selected Engine, manifest, SDK and profile then follow. UNC/device/relative Windows paths are not converted. On ordinary Linux without `wslpath`, explicitly select an accessible native Engine; rejection does not authorize another architecture or access to absent sources.
 
-Короткая проверка native окна без проекта, GameHost и сохранения layout:
+Short native-window check without a project, GameHost or layout saving:
 
 ```sh
 host=$(rustc -vV | sed -n 's/^host: //p')
 MODULE_ENGINE_PROBE_SECONDS=5 MODULE_ENGINE_WINDOW_SYSTEM=x11 \
   cargo run --offline --locked --release --target "$host" -p module-engine-editor --example desktop_presentation_probe
-# Затем отдельно повторить с MODULE_ENGINE_WINDOW_SYSTEM=wayland в исправной сессии.
+# Then repeat separately with MODULE_ENGINE_WINDOW_SYSTEM=wayland in a working session.
 ```
 
-Запуск с `--target` без `CARGO_TARGET_DIR` использует стандартный `target/<host>`; при необходимости задайте ту же переменную, что в `run.sh`. Не запускайте одновременно несколько GPU-проверок.
+Running with `--target` without `CARGO_TARGET_DIR` uses standard `target/<host>`; set the same variable as in `run.sh` if needed. Do not run multiple GPU checks simultaneously.
 
-Логи различают `requested` параметры и фактически `initialized` adapter/backend/window-system. `WGPU_BACKEND` не переопределяет Windows DX12 или Linux Vulkan. `MODULE_ENGINE_GUI_BACKEND=glow` — явная диагностика, требующая отдельного решения на машине с прежним DWM-дефектом. `EFRAME_SCREENSHOT_TO` больше не включает Glow неявно: для Editor используйте `MODULE_ENGINE_UI_SCREENSHOT_TO` с WGPU. Исторический DWM-отчёт описывает прежнее поведение capture.
+Logs distinguish `requested` parameters from the actually `initialized` adapter/backend/window-system. `WGPU_BACKEND` does not override Windows DX12 or Linux Vulkan. `MODULE_ENGINE_GUI_BACKEND=glow` is explicit diagnostics requiring a separate decision on a machine with the previous DWM defect. `EFRAME_SCREENSHOT_TO` no longer enables Glow implicitly: for Editor, use `MODULE_ENGINE_UI_SCREENSHOT_TO` with WGPU. The historical DWM report describes the previous capture behavior.
 
-## DXC, пакеты и процессы
+<a id="dxc-пакеты-и-процессы"></a>
 
-Поиск DXC: явный `MODULE_ENGINE_DXC`, native tools в backend package, затем `PATH`. Рекомендуемая структура:
+## DXC, packages and processes
+
+DXC search order: explicit `MODULE_ENGINE_DXC`, native tools in the backend package, then `PATH`. Recommended structure:
 
 ```text
 tools/dxc/bin/dxc
 tools/dxc/lib/libdxcompiler.so
 ```
 
-Допустим также `tools/dxc/dxc` с `tools/dxc/lib`. Проверяется ELF и execute bit. Соседний `lib` добавляется в `LD_LIBRARY_PATH` только дочернего DXC; окружение редактора/системы не меняется. Пакет должен включать фактические shared-library зависимости своей версии DXC. Список native библиотек внутри Linux-пакета требует проверки на Linux. Подключённый Vulkan Team требует DXC; граф без этого backend не приобретает такую зависимость.
+`tools/dxc/dxc` with `tools/dxc/lib` is also allowed. ELF and execute bit are checked. The adjacent `lib` is added to `LD_LIBRARY_PATH` only for the child DXC; the editor/system environment is unchanged. The package must include the actual shared-library dependencies of its DXC version. The native library list inside a Linux package requires verification on Linux. A connected Vulkan Team requires DXC; a graph without this backend does not acquire that dependency.
 
-Native Player имеет имя `Player` на Linux и `Player.exe` на Windows. Новые manifests записывают `native_platform=<os>-<arch>` и отвергают чужую платформу до создания Host. Старые schema2 manifests без метки остаются совместимыми; сама метка не заменяет проверку binary/ABI. Схемы графа и публичный SDK не менялись.
+Native Player is named `Player` on Linux and `Player.exe` on Windows. New manifests write `native_platform=<os>-<arch>` and reject a foreign platform before creating Host. Old schema2 manifests without the tag remain compatible; the tag itself does not replace binary/ABI checks. Graph schemas and the public SDK did not change.
 
-Native build/cache на Unix разделён по платформе, сборки сериализуются файловой блокировкой. Linux-публикация Player использует `renameat2(RENAME_NOREPLACE)`; неподдерживающий syscall/файловая система приводит к отказу, а не к неатомарному перезаписыванию назначения.
+Native build/cache on Unix is separated by platform; builds are serialized with a file lock. Linux Player publication uses `renameat2(RENAME_NOREPLACE)`; an unsupported syscall/filesystem causes rejection, not a nonatomic overwrite of the destination.
 
-В проверенной WSL общий Windows-диск `/mnt/e` (DrvFS) возвращает `EINVAL` для этой операции даже при свободном назначении. Поэтому публикация Player туда отклоняется с диагностикой; используйте назначение на native Linux filesystem. Экспорт на ext4 проверен. Исходники/ресурсы при этом могут находиться на Windows-диске — требование относится к файловой системе назначения, где создаётся staging и выполняется публикация.
+In the verified WSL, the shared Windows drive `/mnt/e` (DrvFS) returns `EINVAL` for this operation even when the destination is free. Player publication there is therefore rejected with diagnostics; use a destination on a native Linux filesystem. Export to ext4 was verified. Sources/resources can still be on the Windows drive: the requirement concerns the destination filesystem where staging is created and publication performed.
 
-Экспорт выбранного Player использует собственный cache `<Engine>/.work/player-native-target/linux-x86_64`, отдельно от `CARGO_TARGET_DIR` сборки Editor. Поэтому первый экспорт может повторно собирать GUI-зависимости даже после готовой сборки редактора. В проверочном Full-пакете явно переиспользован только build cache через symlink; это описано в отчёте и не означает холодную сборку на чистой машине.
+Export of the selected Player uses its own cache `<Engine>/.work/player-native-target/linux-x86_64`, separate from the Editor build's `CARGO_TARGET_DIR`. Therefore, the first export may rebuild GUI dependencies even after Editor is built. In the verification Full package, only the build cache was explicitly reused through a symlink; the report describes this, and it does not imply a cold build on a clean machine.
 
-Rust Custom использует worker target `custom-workers` внутри выбранного `CARGO_TARGET_DIR`. На Linux готовый worker запускается из уникального каталога `executables/<candidate>/worker` в этом target; исходники, lock и диагностика остаются в исходном рабочем каталоге проекта. Последний владелец закрывает процесс и освобождает только свой executable; общий cache и соседние кандидаты сохраняются. Для target, вложенного непосредственно в каталог кандидата, worker остаётся рядом с исходниками, вне удаляемых build outputs. Windows placement сохранён.
+Rust Custom uses the `custom-workers` worker target inside the selected `CARGO_TARGET_DIR`. On Linux, the ready worker starts from a unique directory `executables/<candidate>/worker` in this target; sources, lock and diagnostics remain in the project's original working directory. The last owner closes the process and releases only its executable; shared cache and neighboring candidates are preserved. For a target nested directly in the candidate directory, the worker stays beside the sources, outside deleted build outputs. Windows placement is preserved.
 
-В общем Windows/WSL checkout выбирайте native ext4 для `CARGO_TARGET_DIR` и `TMPDIR`. В измеренном случае запуск ELF с DrvFS добавлял около 48 мс к первому ответу Custom и приводил к превышению неизменённого IPC-лимита 150 мс у кода с задержкой 80 мс. Размещение executable на ext4 устраняет эту измеренную причину; оно не гарантирует выполнение произвольного пользовательского кода за 150 мс.
+In a shared Windows/WSL checkout, select native ext4 for `CARGO_TARGET_DIR` and `TMPDIR`. In the measured case, executing ELF from DrvFS added about 48 ms to Custom's first response and caused code with an 80 ms delay to exceed the unchanged 150 ms IPC limit. Placing the executable on ext4 eliminates this measured cause; it does not guarantee execution of arbitrary user code within 150 ms.
 
-При включённом [compiled-program store](custom-program-store.md) native filesystem нужен также для установленной toolchain и Cargo registry: проверка читает содержимое compiler/link inputs, а не доверяет только mtime. В проверке 16.10.2026 один полный proof с Rust/Cargo на `/mnt/e` занял 102,04 с. После точного переноса закреплённой установки в native cache Ubuntu с проверкой bytes/modes/symlinks тот же production context прошёл за 2,26 с. Это устранение измеренного IO bottleneck, не обещание времени для любого проекта; версии, watchdog и проверка входов сохранены. Условия, пути и остальные native результаты находятся в [отчёте этапа](review-fixes-20261016.md).
+With the [compiled-program store](custom-program-store.md) enabled, the installed toolchain and Cargo registry also need a native filesystem: verification reads compiler/link input contents rather than trusting mtime alone. In the 16.10.2026 check, one full proof with Rust/Cargo on `/mnt/e` took 102.04 s. After exact relocation of the pinned installation to Ubuntu's native cache with bytes/modes/symlinks checked, the same production context passed in 2.26 s. This removes a measured IO bottleneck, not a timing promise for every project; versions, watchdog and input checks are preserved. Conditions, paths and other native results are in the [stage report](review-fixes-20261016.md).
 
-Процессы компиляции и исполнения Rust Custom на Linux, включая Cargo этой подсистемы, принадлежат отдельным process groups. Отмена и завершение сигнализируют наследующим потомкам и ожидают лидера; `waitid(WNOWAIT)` сохраняет PID до завершения группы. Намеренный `setsid` может выйти из группы; гарантия очистки после аварии самого host не добавлена. Это управление жизненным циклом, не sandbox. Windows Job Object сохранён. Принудительный timeout внешнего verifier/relocation-процесса пока убивает только непосредственного ребёнка; полная гарантия его descendant cleanup остаётся ограничением.
+Rust Custom compilation and execution processes on Linux, including this subsystem's Cargo, belong to separate process groups. Cancellation and shutdown signal inheriting descendants and wait for the leader; `waitid(WNOWAIT)` preserves the PID until the group finishes. A deliberate `setsid` can escape the group; no cleanup guarantee after a crash of the host itself was added. This manages lifecycle, not a sandbox. Windows Job Object is preserved. A forced timeout of an external verifier/relocation process still kills only the immediate child; complete descendant cleanup remains a limitation.
 
-Повторное использование готового scheduled Rust Custom после Stop реализовано в [compiled-program store](custom-program-store.md). При неизменённом supported compile context экземпляры используют один проверенный код, сохраняя независимые state и worker PID; Cargo freshness proof не означает новую root compilation. Это подтверждено последующими [Windows/Linux проверками](remaining-authoring-fixes-20261016.md), а прежний отказ 45-секундного прогона остаётся историческим результатом. Холодная подготовка Editor в пределах 45 секунд и строгая Player 60 FPS цель всё ещё открыты; успешный prewarmed benchmark их не закрывает. См. [текущее состояние](current-status.md).
+Reusing ready scheduled Rust Custom after Stop is implemented in the [compiled-program store](custom-program-store.md). With an unchanged supported compile context, instances use the same verified code while retaining independent state and worker PIDs; Cargo freshness proof does not mean a new root compilation. This is confirmed by subsequent [Windows/Linux checks](remaining-authoring-fixes-20261016.md), while the previous failed 45-second run remains a historical result. Cold Editor preparation within 45 seconds and the strict Player 60 FPS target are still open; a successful prewarmed benchmark does not close them. See [current status](current-status.md).
 
-## Опциональные сервисы
+<a id="опциональные-сервисы"></a>
 
-Native WAV реализован на Windows. На Linux активный запрос `audio.wav` выдаёт ошибку до загрузки ассетов; export также отклоняется. Отсутствующий/отключённый service допустим. Экспорт не удаляет звук молча и не меняет авторские данные. Нельзя считать прошедший silent/headless check доказательством работы звука.
+## Optional services
 
-Для проверки Linux GUI/экспорта используйте проект, явно не запрашивающий WAV: например Puzzle или собственный профиль без audio. Текущие ARPG-настройки со звуковыми cues требуют явного изменения отдельной копии проекта. Полноценный Linux audio backend — следующий отдельный этап.
+Native WAV is implemented on Windows. On Linux, an active `audio.wav` request produces an error before assets load; export is also rejected. An absent/disabled service is allowed. Export does not silently remove sound or alter authored data. A passed silent/headless check cannot be treated as proof of audio operation.
 
-Native File/Folder dialogs пока реализованы только на Windows. На Linux команды выбора файла/папки сообщают об этом ограничении. Открытие графа по CLI-пути, сохранение в уже выбранный файл и CLI-экспорт не зависят от этих диалогов; интерактивные Import/Open/Save As требуют следующего этапа. Проверка запуска окна не доказывает parity всех меню с Windows.
+For Linux GUI/export verification, use a project that explicitly does not request WAV, for example Puzzle or your own profile without audio. Current ARPG settings with sound cues require an explicit change to a separate project copy. A complete Linux audio backend is the next separate stage.
+
+Native File/Folder dialogs are currently implemented only on Windows. On Linux, file/folder selection commands report this limitation. Opening a graph through a CLI path, saving an already selected file and CLI export do not depend on these dialogs; interactive Import/Open/Save As require the next stage. A window-launch check does not prove parity of all menus with Windows.

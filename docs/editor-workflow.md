@@ -1,50 +1,60 @@
-# Меню редактора и работа с проектом
+<a id="меню-редактора-и-работа-с-проектом"></a>
 
-Верхняя строка **File / Edit / Tools / Windows** объединяет команды проекта, сборки и раскладки. Под ней остаются **Project / Engine**, **Play / Pause**, **Stop**, **Save** и имя проекта. Наведение на имя показывает путь к открытому JSON; **● unsaved** означает, что авторские данные или черновик ещё не сохранены. Изменения Play-копии сцены не считаются авторскими правками.
+# Editor Menus and Project Workflow
 
-Меню и горячие клавиши вызывают одни и те же команды. Это сохраняет одинаковые проверки проекта и ограничений Full / Team независимо от способа запуска действия.
+[English](editor-workflow.md) | [Русский](ru/editor-workflow.md) | [Documentation](README.md)
 
-## Первый рабочий маршрут
+The top **File / Edit / Tools / Windows** bar brings together project, build, and layout commands. Beneath it remain **Project / Engine**, **Play / Pause**, **Stop**, **Save**, and the project name. Hovering over the name shows the path to the open JSON; **● unsaved** means authored data or a draft has not yet been saved. Changes to the Play copy of the scene do not count as authored edits.
 
-1. Выберите **File → New Project → Empty scene** или **Two arenas example**. В системном окне выберите новую или пустую папку проекта. Она может находиться, например, в `projects/` или `outputs/` установленного движка, но не внутри копируемой библиотеки ресурсов. В ней появится `project.json`, ресурсы и привязка к установленному Engine; после успешного создания редактор переключится на новый проект.
-2. Откройте **Windows → Scene**, **Hierarchy**, **Inspector** и **Assets**. Импортируйте glTF/GLB либо PNG/JPEG через **File → Import Asset…** или **Импорт…** в Assets. Перетащите модель в Scene, чтобы создать объект; выберите его щелчком или через Hierarchy и измените трансформацию ручками Move/Rotate/Scale. Текстуру перетащите на объект либо назначьте через Inspector. Импорт WAV добавляет аудиофайл для последующего использования игровыми событиями. Окно Game оставьте для Play.
-3. Нажмите **Ctrl+S**. Для отдельной копии выберите **File → Save As…**, другую папку и имя JSON. После завершения работа продолжится с копией. Оригинал останется на месте. Если выбран существующий файл назначения, Windows запросит подтверждение его замены.
-4. Через **File → Open Project…** или **Recent Projects** повторно откройте сохранённый JSON. Его сцены, шаблоны, исходники Custom и настройки будут прочитаны вместе с ресурсами из этой папки.
-5. Выполните **Tools → Check Project**, затем **Tools → Build Windows Player…**. Выберите новую или пустую папку для сборки. После успешного экспорта запустите `Player.exe` из неё. Player использует готовые Rust workers и SPIR-V; Rust/Cargo/DXC на машине игрока не нужны. GPU и Vulkan-драйвер требуются.
+Menus and shortcuts invoke the same commands. This preserves identical project and Full / Team restriction checks regardless of how an action is started.
 
-Работа с расстановкой и проводником описана в [Scene и Assets](scene-assets.md), игровой процесс и Play — в [редакторе игры](editor-game.md); требования и устройство сборки — в [Player](player.md).
+<a id="первый-рабочий-маршрут"></a>
 
-## File: создать, открыть, сохранить
+## First Working Route
 
-| Команда | Что делает |
+1. Choose **File → New Project → Empty scene** or **Two arenas example**. In the system dialog, select a new or empty project directory. It may be, for example, in `projects/` or `outputs/` of the installed engine, but not inside the resource library being copied. It will contain `project.json`, resources, and a binding to the installed Engine; after successful creation, the editor switches to the new project.
+2. Open **Windows → Scene**, **Hierarchy**, **Inspector**, and **Assets**. Import glTF/GLB or PNG/JPEG through **File → Import Asset…** or the Import button (`Импорт…`) in Assets. Drag a model into Scene to create an object; select it by clicking or through Hierarchy, and change its transform with Move/Rotate/Scale handles. Drag a texture onto an object or assign it through Inspector. WAV import adds an audio file for subsequent use by game events. Keep the Game window for Play.
+3. Press **Ctrl+S**. For a separate copy, choose **File → Save As…**, another directory, and a JSON name. After completion, work continues with the copy. The original stays in place. If an existing destination file is selected, Windows asks for confirmation before replacing it.
+4. Through **File → Open Project…** or **Recent Projects**, reopen the saved JSON. Its scenes, templates, Custom sources, and settings will be read together with resources from that directory.
+5. Run **Tools → Check Project**, then **Tools → Build Windows Player…**. Choose a new or empty build directory. After successful export, launch `Player.exe` from it. Player uses prebuilt Rust workers and SPIR-V; Rust/Cargo/DXC are not needed on the player's machine. A GPU and Vulkan driver are required.
+
+Placement and browser work are described in [Scene and Assets](scene-assets.md), gameplay and Play in the [game editor](editor-game.md); build requirements and design are in [Player](player.md).
+
+<a id="file-создать-открыть-сохранить"></a>
+
+## File: Create, Open, Save
+
+| Command | What it does |
 | --- | --- |
-| New Project → Empty scene | Создаёт одну пустую авторскую сцену с выбранной архитектурой Engine. |
-| New Project → Two arenas example | Создаёт игровой пример с монстрами, переходом и боссом на выбранной архитектуре Engine. |
-| Open Project… | Выбирает существующий JSON в нативном Windows-диалоге. |
-| Recent Projects | Показывает до 12 успешно открытых/созданных/сохранённых проектов, последние — первыми. Наведение раскрывает полный путь. |
-| Save Project | Сохраняет текущий авторский документ по открытому пути. |
-| Save As… | Сохраняет авторскую копию по выбранному пути и переключает редактор на неё; замена существующего файла требует нативного подтверждения. |
-| Import Asset… | Импортирует glTF/GLB, PNG/JPEG или WAV через выбор файла. |
-| Export → Windows Player… | Собирает самостоятельную игру. |
-| Export → Team editor… | Создаёт редактор для команды с замороженной архитектурой. |
-| Export → Full source project… | Экспортирует полный исходный проект движка и игры. |
-| Exit | Закрывает редактор после проверки несохранённых изменений. |
+| New Project → Empty scene | Creates one empty authored scene with the selected Engine architecture. |
+| New Project → Two arenas example | Creates a game example with monsters, a transition, and a boss on the selected Engine architecture. |
+| Open Project… | Selects an existing JSON in a native Windows dialog. |
+| Recent Projects | Shows up to 12 successfully opened/created/saved projects, most recent first. Hover reveals the full path. |
+| Save Project | Saves the current authored document to the open path. |
+| Save As… | Saves an authored copy to the selected path and switches the editor to it; replacing an existing file requires native confirmation. |
+| Import Asset… | Imports glTF/GLB, PNG/JPEG, or WAV through file selection. |
+| Export → Windows Player… | Builds a standalone game. |
+| Export → Team editor… | Creates a team editor with a frozen architecture. |
+| Export → Full source project… | Exports the full engine and game source project. |
+| Exit | Closes the editor after checking for unsaved changes. |
 
-**New Project** сохраняет граф модулей, идентификаторы источников, HLSL, настройки Engine и граф исполнения систем текущего проекта. Разрешённые игровые `update`-исходники Rust заменяются пустой логикой, объектные настройки прежней игры очищаются. Это позволяет начать новую игру на уже настроенном движке. Если изменить архитектуру нужно только для новой игры, сначала сделайте её копию и редактируйте Engine в ней при наличии Full-доступа.
+**New Project** preserves the module graph, source identifiers, HLSL, Engine settings, and system execution graph of the current project. Permitted game Rust `update` sources are replaced with empty logic, and the previous game's object settings are cleared. This allows a new game to start on an already configured engine. If the architecture must change only for the new game, first make a copy and edit Engine in it with Full access.
 
-Пустая сцена использует существующую камеру предпросмотра и освещение текущего renderer. Новый этап не добавляет отдельные авторские Camera/Light-компоненты или редактор схемы освещения. Импорт и создание геометрии описаны в [editor-game.md](editor-game.md).
+The empty scene uses the current renderer's existing preview camera and lighting. The new stage does not add separate authored Camera/Light components or a lighting-schema editor. Import and geometry creation are described in [editor-game.md](editor-game.md).
 
-Список Recent хранится отдельно от JSON, в `.user/editor-recent-projects.json` установленного пакета движка. Он не попадает в экспорт игры. Если файл проекта перемещён или удалён, открытие показывает ошибку; уже открытый проект остаётся в редакторе.
+Recent is stored separately from JSON, in `.user/editor-recent-projects.json` of the installed engine package. It does not enter the game export. If a project file is moved or deleted, opening it shows an error; the already open project remains in the editor.
 
-## Save As: авторская копия и установленный Engine
+<a id="save-as-авторская-копия-и-установленный-engine"></a>
 
-При переносе в другую папку Save As сохраняет весь авторский документ: сцены, связанные шаблоны и индивидуальные overrides, графы, встроенный Rust/HLSL, настройки и архивированные данные отключённых модулей. Переносятся **все файлы `assets/`**, включая неиспользуемые, а также объявленные в манифесте и данных сцены ресурсы, зависимости glTF и HLSL includes. Отключённые данные не отбрасываются ради runtime-сборки.
+## Save As: Authored Copy and Installed Engine
 
-Копирование сначала подготавливается и проверяется; редактор переключается на копию только после успешной записи. Существующий JSON назначения можно заменить после подтверждения в нативном диалоге. Заменяемые JSON и файл привязки получают точные резервные копии прежних байтов рядом с собой, с суффиксом `.backup-<id>`. Если выбран текущий открытый JSON, выполняется обычный Save.
+When moving to another directory, Save As preserves the entire authored document: scenes, linked templates and individual overrides, graphs, embedded Rust/HLSL, settings, and archived data of disabled modules. It transfers **all `assets/` files**, including unused ones, as well as resources declared in the manifest and scene data, glTF dependencies, and HLSL includes. Disabled data is not discarded for a runtime build.
 
-В существующей папке одинаковые ресурсы могут использоваться повторно, но файл с тем же относительным путём и другим содержимым вызывает ошибку **до изменения старого JSON**. Подтверждение замены проекта не разрешает перезаписать конфликтующие ресурсы. Для самостоятельной копии используйте отдельную папку. Она может быть внутри установки движка, например в `projects/` или `outputs/`; сохранять внутрь `assets/` и других деревьев ресурсов, которые сама операция копирует, нельзя. Если сохранить другой JSON в той же папке, оба документа используют общую библиотеку ресурсов этой папки.
+Copying is prepared and checked first; the editor switches to the copy only after a successful write. An existing destination JSON can be replaced after confirmation in the native dialog. Replaced JSON and binding files receive exact backups of their previous bytes beside them, with a `.backup-<id>` suffix. Selecting the currently open JSON performs an ordinary Save.
 
-Рядом с каждым новым JSON записывается собственный файл привязки, например:
+In an existing directory, identical resources can be reused, but a file with the same relative path and different contents causes an error **before the old JSON changes**. Confirmation to replace a project does not permit overwriting conflicting resources. For an independent copy, use a separate directory. It may be inside the engine installation, for example in `projects/` or `outputs/`; saving inside `assets/` or other resource trees copied by the operation itself is prohibited. Saving another JSON in the same directory makes both documents share that directory's resource library.
+
+A separate binding file is written beside each new JSON, for example:
 
 ~~~text
 project.json
@@ -52,195 +62,215 @@ project.json.module-engine-project.json
 assets/
 ~~~
 
-Привязка содержит версию, путь к установленному пакету и профиль Full / Team. Для Team также сохраняется замороженный blueprint. Права Engine определяются проверенным manifest и реальными исходниками установленного пакета; привязка не выдаёт дополнительные права и не подменяет SDK.
+The binding contains a version, path to the installed package, and Full / Team profile. Team also preserves the frozen blueprint. Engine permissions are determined by the verified manifest and actual installed-package sources; the binding grants no additional permissions and does not substitute an SDK.
 
-Save As делает самостоятельную **копию игровых авторских данных**, но не копирует весь установленный движок. Для открытия и выполнения нужен доступный совместимый пакет Engine с backend; компиляция Rust Custom использует его Full-исходники либо Team SDK и установленные инструменты. HLSL и сборка также используют инструменты пакета и машины. При переносе на другой компьютер используйте **Full source project**, **Team editor** или **Windows Player** в зависимости от нужного вида поставки. Их содержимое и требования различаются: см. [distribution.md](distribution.md) и [player.md](player.md).
+Save As makes an independent **copy of authored game data**, but does not copy the entire installed engine. Opening and execution require an available compatible Engine package with a backend; Rust Custom compilation uses its Full sources or Team SDK and installed tools. HLSL and building also use package and machine tools. When moving to another computer, use **Full source project**, **Team editor**, or **Windows Player**, depending on the required distribution type. Their contents and requirements differ: see [distribution.md](distribution.md) and [player.md](player.md).
 
-### Папка игры и папка инструментов
+<a id="папка-игры-и-папка-инструментов"></a>
 
-| Основа пути | Для чего используется |
+### Game Directory and Tool Directory
+
+| Path base | What it is used for |
 | --- | --- |
-| Папка открытого JSON | Игровые модели, текстуры, звук и прочие относительные пути ресурсов; рабочая директория запущенного Rust Custom. |
-| Установленный пакет Engine | Renderer backend, DXC, шейдерные includes движка и GPU-кеш. |
-| Full-исходники или Team `.sdk` установленного пакета | Компиляция Rust Custom с совместимыми контрактами движка. |
+| Open JSON directory | Game models, textures, audio, and other relative resource paths; the working directory of running Rust Custom. |
+| Installed Engine package | Renderer backend, DXC, engine shader includes, and GPU cache. |
+| Full sources or Team `.sdk` of the installed package | Rust Custom compilation with compatible engine contracts. |
 
-Например, `std::fs::read("assets/config.json")` внутри Rust Custom читает файл рядом с текущим игровым JSON, а не из исходной установки Engine. После Save As и при hot apply рабочая директория Custom остаётся папкой открытого проекта. Это позволяет игре с отдельной библиотекой ресурсов корректно работать, даже если движок установлен в другом месте.
+For example, `std::fs::read("assets/config.json")` inside Rust Custom reads a file beside the current game JSON rather than from the original Engine installation. After Save As and during hot apply, Custom's working directory remains the open project's directory. This allows a game with a separate resource library to work correctly even if the engine is installed elsewhere.
 
-DXC, backend и GPU-кеш не требуется копировать заново на каждый Save As: редактор получает их из установленного совместимого Engine. Зависимости авторских ресурсов при этом переносятся вместе с игрой. В Team локальные `assets/` проекта не подменяют замороженные шейдерные includes установленного backend; ограничения Engine продолжают проверяться.
+DXC, backend, and GPU cache need not be copied again on every Save As: the editor obtains them from the installed compatible Engine. Authored resource dependencies are transferred with the game. In Team, the project's local `assets/` do not replace the installed backend's frozen shader includes; Engine restrictions continue to be checked.
 
-**Full source project** переносит исходники Engine, его зависимости и игровые данные как отдельную поставку. Для распространения готовой игры используйте **Windows Player**: его пакет содержит собственные backend-ресурсы и заранее скомпилированные workers/шейдеры. Простое копирование игровой папки с файлом привязки не заменяет эти виды экспорта.
+**Full source project** transfers Engine sources, its dependencies, and game data as a separate distribution. To distribute a finished game, use **Windows Player**: its package contains its own backend resources and precompiled workers/shaders. Simply copying the game directory with a binding file does not replace these export types.
 
-## Несохранённые изменения и черновики
+<a id="несохранённые-изменения-и-черновики"></a>
 
-Перед Open, Recent, New, Exit, Check Project или экспортом редактор проверяет авторские изменения и показывает окно с тремя решениями:
+## Unsaved Changes and Drafts
 
-- **Сохранить и продолжить** записывает текущий документ и выполняет выбранную команду только после успешного сохранения.
-- **Не сохранять** продолжает без записи текущих правок. Для проверки и экспорта используется версия проекта на диске; текущие правки остаются открытыми в памяти.
-- **Отмена** оставляет текущую работу открытой и отменяет переход или сборку.
+Before Open, Recent, New, Exit, Check Project, or export, the editor checks authored changes and shows a dialog with three choices:
 
-При Open и New старый документ, история и черновики остаются доступны до успешного открытия или создания замены. Отмена системного диалога и ошибка не отбрасывают их даже после выбора **Не сохранять**. Для New в этом случае берётся последняя сохранённая конфигурация Engine. После успешного перехода редактор работает с новым проектом; при выходе без сохранения несохранённая работа закрывается.
+- **Save and continue** (`Сохранить и продолжить`) writes the current document and performs the selected command only after saving succeeds.
+- **Don't save** (`Не сохранять`) continues without writing current edits. Checking and export use the on-disk project version; current edits remain open in memory.
+- **Cancel** (`Отмена`) keeps the current work open and cancels the transition or build.
 
-Неверный JSON не заменяет документ и не допускает продолжения через сохранение. JSON-черновик окна **File** проверяется и применяется перед Save после завершения черновика Gameplay Systems. Исправьте его или явно отмените черновик, если изменения не нужны.
+On Open and New, the old document, history, and drafts remain available until the replacement is successfully opened or created. Canceling the system dialog and errors do not discard them even after choosing **Don't save** (`Не сохранять`). In that case, New uses the last saved Engine configuration. After a successful transition, the editor works with the new project; exiting without saving closes unsaved work.
 
-**Save As** сначала проверяет JSON-черновик как отдельного кандидата. Отмена выбора, ошибка системного окна или ошибка записи копии оставляют исходный документ, черновик, историю, Recent Projects и текущий Play без изменений. Кандидат становится открытым документом только после успешной записи JSON, привязки Engine и ресурсов. При сохранении по тому же пути история остаётся доступной; игровое состояние меняется только при успешном применении правок, требующих его пересоздания.
+Invalid JSON does not replace the document or permit continuation through saving. The **File** window's JSON draft is validated and applied before Save after completing the Gameplay Systems draft. Correct it or explicitly discard the draft if the changes are unnecessary.
 
-**Gameplay Systems** имеет собственный черновик графа. Перед сохранением его нужно завершить через **Apply graph draft** или **Discard draft**. Если окно защиты уже открыто, нажмите **Отмена**, вернитесь в Gameplay Systems и завершите черновик, затем повторите Save или нужную команду. Незавершённый черновик не выдаётся за сохранённый граф и не включается в экспорт. Подробности типизированных ресурсов и применения — в [editor-game.md](editor-game.md).
+**Save As** first validates the JSON draft as a separate candidate. Canceling selection, a system-dialog error, or a copy-write error leaves the original document, draft, history, Recent Projects, and current Play unchanged. The candidate becomes the open document only after successfully writing JSON, the Engine binding, and resources. Saving to the same path keeps history available; game state changes only when edits requiring its recreation are successfully applied.
 
-Пока черновик Gameplay Systems не завершён, Undo/Redo документа, применение другого JSON, checkpoint и merge не заменяют его основание. Сначала примените или отмените черновик, затем выполняйте эти команды. Если одновременно изменены JSON и Gameplay Systems, явно отмените JSON-черновик, чтобы снова редактировать Gameplay Systems; Save не применяет один черновик поверх другого и не стирает его молча.
+**Gameplay Systems** has its own graph draft. Before saving, finish it through **Apply graph draft** or **Discard draft**. If the protection dialog is already open, click **Cancel** (`Отмена`), return to Gameplay Systems, and finish the draft, then repeat Save or the required command. An unfinished draft is not presented as a saved graph and is not included in export. Typed resource and application details are in [editor-game.md](editor-game.md).
 
-## Edit и горячие клавиши
+While the Gameplay Systems draft is unfinished, document Undo/Redo, applying another JSON, checkpoint, and merge do not replace its base. Apply or discard the draft first, then perform these commands. If both JSON and Gameplay Systems have changed, explicitly discard the JSON draft to edit Gameplay Systems again; Save does not apply one draft over another or silently erase it.
 
-**Edit → Undo / Redo** работает с историей авторского документа. Файловые операции Assets, включая импорт, переименование, перенос, удаление и восстановление, создают отдельные границы истории: Undo/Redo возвращают вместе файлы и ссылки, а результат сохраняют. Один завершённый жест перемещения, вращения или масштаба — одна запись истории. История не перематывает игровой runtime и не откатывает личную раскладку.
+<a id="edit-и-горячие-клавиши"></a>
 
-**History / Merge** открывает историю, checkpoints, сравнение и объединение. Восстановление документа проверяет наличие и хеши его ресурсов; устаревший путь или удалённый ID не заменяет рабочую версию. Файлы сначала возвращают через Undo файловой операции либо корзину Assets. См. [scene-assets.md](scene-assets.md), [history-assets.md](history-assets.md) и [asset-workspace-api.md](asset-workspace-api.md).
+## Edit and Shortcuts
 
-| Клавиши | Команда |
+**Edit → Undo / Redo** works with authored-document history. Assets file operations, including import, rename, move, delete, and restore, create separate history boundaries: Undo/Redo restores files and references together and saves the result. One completed move, rotate, or scale gesture is one history entry. History does not rewind game runtime or roll back personal layout.
+
+**History / Merge** opens history, checkpoints, comparison, and merging. Restoring a document checks resource existence and hashes; a stale path or deleted ID does not replace the working version. First restore files through Undo of the file operation or Assets trash. See [scene-assets.md](scene-assets.md), [history-assets.md](history-assets.md), and [asset-workspace-api.md](asset-workspace-api.md).
+
+| Keys | Command |
 | --- | --- |
 | Ctrl+N | New Project → Empty scene |
 | Ctrl+O | Open Project |
 | Ctrl+S | Save Project |
 | Ctrl+Shift+S | Save As |
-| Ctrl+Z | Undo документа вне текстового поля |
-| Ctrl+Y / Ctrl+Shift+Z | Redo документа вне текстового поля |
+| Ctrl+Z | Document Undo outside a text field |
+| Ctrl+Y / Ctrl+Shift+Z | Document Redo outside a text field |
 
-Когда фокус находится в текстовом поле Rust, HLSL, JSON или обычной строке, Ctrl+Z/Redo остаются текстовому редактору и не отменяют весь документ. Фокус в viewport, кнопке или другом нетекстовом виджете не отключает Undo/Redo документа. Команды файла, включая Ctrl+S, доступны и при вводе текста; Save учитывает JSON-черновик и не пропускает незавершённый граф Gameplay Systems.
+When a Rust, HLSL, JSON, or ordinary text field has focus, Ctrl+Z/Redo remain with the text editor and do not undo the entire document. Focus on a viewport, button, or other nontext widget does not disable document Undo/Redo. File commands, including Ctrl+S, are available while typing; Save accounts for the JSON draft and does not bypass an unfinished Gameplay Systems graph.
 
-## Tools и фоновые операции
+<a id="tools-и-фоновые-операции"></a>
 
-**Check Project** проверяет сохранённый проект тем же CLI-маршрутом, что `--check`. **Build Windows Player…** запускает `--export-game`. **Diagnostics** открывает сведения о профиле, исходниках и ошибках runtime/предпросмотра; **Project Settings** открывает параметры, разрешённые Engine. **Last operation report** повторно показывает последний результат проверки или экспорта.
+## Tools and Background Operations
 
-Нативные диалоги, импорт, подготовка копии, проверки и экспорт выполняются в рабочем потоке. Редактор продолжает перерисовываться и показывает название операции, индикатор ожидания и прошедшее время; это не процент готовности и не прогноз завершения. Одновременно выполняется одна операция. На время операции команды изменения документа заблокированы, чтобы результат относился к выбранной версии проекта. Пока операция идёт, закрытие редактора блокируется; после её завершения можно закрыть окно.
+**Check Project** checks the saved project through the same CLI route as `--check`. **Build Windows Player…** runs `--export-game`. **Diagnostics** opens profile, source, and runtime/preview error information; **Project Settings** opens parameters permitted by Engine. **Last operation report** shows the latest check or export result again.
 
-Ошибка показывается в окне **Результат операции**. Пока отчёт открыт, глобальные команды меню и клавиш заблокированы; закройте отчёт, чтобы продолжить работу с проектом. Для CLI-проверок и сборок полный stdout/stderr записывается в `.work/editor-jobs/<id>/` рядом с открытым JSON; путь включён в отчёт. Ошибки нативного диалога, импорта или копирования показываются непосредственно. Системная отмена выбора файла/папки возвращает управление текущему проекту.
+Native dialogs, import, copy preparation, checks, and export run in a worker thread. The editor continues repainting and shows the operation name, waiting indicator, and elapsed time; this is neither a completion percentage nor an estimate. One operation runs at a time. Document-changing commands are locked during an operation so that the result applies to the selected project version. Closing the editor is blocked while an operation runs; after it finishes, the window can be closed.
 
-Нативные диалоги доступны на Windows. Начальная папка — необязательная подсказка: редактор приводит относительные пути, `/`, `.`/`..` и обычные extended-length пути к форме, понятной Windows Shell, отдельно от рабочих путей проекта. Если папка исчезла, Shell не поддерживает её путь или отклонил подсказку, окно открывается с папкой по умолчанию. Ошибки самого диалога и чтения выбранного результата по-прежнему показываются пользователю. Выбранные пути, Recent Projects, привязки и файловый ввод-вывод не переписываются ради подсказки.
+Errors appear in the **Operation result** window (`Результат операции`). While the report is open, global menu and shortcut commands are locked; close the report to continue working on the project. For CLI checks and builds, full stdout/stderr is written to `.work/editor-jobs/<id>/` beside the open JSON; the path is included in the report. Native-dialog, import, or copying errors are shown directly. System cancellation of file/folder selection returns control to the current project.
 
-На Linux системные окна выбора файлов пока возвращают явное сообщение об отсутствии поддержки. Запуск Editor/Player и работа с путями через CLI от этого ограничения не зависят. Границы проверки и исправления диалогов описаны в [отчёте](dialog-path-fixes-20261016.md).
+Native dialogs are available on Windows. The initial directory is an optional hint: the editor normalizes relative paths, `/`, `.`/`..`, and ordinary extended-length paths into a form understood by Windows Shell, separately from working project paths. If the directory disappeared, Shell does not support its path, or rejects the hint, the dialog opens in its default directory. Errors in the dialog itself and reading the selected result still appear to the user. Selected paths, Recent Projects, bindings, and file I/O are not rewritten for the hint.
 
-**«Экспорт проекта…»** в Module Library вызывает ту же асинхронную команду Full export, что меню File. Она использует системный выбор папки, проверку несохранённых изменений и черновика Gameplay Systems. Копирование выполняется вне отрисовки библиотеки; результат и ошибки отображаются в общем отчёте операции.
+On Linux, system file-selection dialogs currently return an explicit unsupported message. Editor/Player launch and CLI path operations are independent of this limitation. Dialog verification and fix boundaries are described in the [report](dialog-path-fixes-20261016.md).
 
-Импорт резервирует отдельную новую папку для одного набора файлов. Если копирование, разбор зависимостей или принятие файлов в журнал отклонены, эта папка удаляется; существующие ассеты сохраняются. Если сама очистка не удалась, отчёт указывает оставшийся путь. Успешный импорт сохраняет общий Undo файлов и ссылок.
+The Export project command (`Экспорт проекта…`) in Module Library invokes the same asynchronous Full export command as the File menu. It uses system folder selection and checks unsaved changes and the Gameplay Systems draft. Copying runs outside library painting; results and errors appear in the shared operation report.
 
-## Windows и личная раскладка
+Import reserves a separate new directory for one file set. If copying, dependency parsing, or adoption into the log is rejected, that directory is removed; existing assets are preserved. If cleanup itself fails, the report identifies the remaining path. Successful import preserves shared Undo for files and references.
 
-Выбор типа области через **Windows** ищет её в текущем **Engine** или **Project**. Если таких областей несколько, активируется недавно использованная; если ни одной нет, активная область делится на две рядом и в новой открывается выбранный редактор. Уже открытое окно не дублируется, тип соседней области сохраняется. Нажатие на область меняет её активность; активная область выделяется рамкой.
+<a id="windows-и-личная-раскладка"></a>
 
-Доступные типы берутся из установленных активных модулей и профиля поставки. Engine-области и сама вкладка Engine доступны только Full с полным совместимым source inventory. Team остаётся в рамках Project, разрешённых параметров и игрового Rust; New, Save As и меню не снимают заморозку архитектуры.
+## Windows and Personal Layout
 
-**Scene**, **Hierarchy**, **Inspector** и **Assets** доступны в обеих раскладках. Scene/Hierarchy/Inspector используют общий выбор авторского объекта; каждый Scene сохраняет собственную обзорную камеру. Каждый Assets хранит свою папку и фильтры. Эти окна можно расположить рядом с Game; авторские правки выполняются после Stop. Подробнее — [scene-assets.md](scene-assets.md).
+Selecting an area type through **Windows** searches for it in the current **Engine** or **Project**. If several such areas exist, the most recently used one is activated; if none exist, the active area splits into two adjacent areas and the selected editor opens in the new one. An already open window is not duplicated, and the neighboring area's type is preserved. Clicking an area changes which is active; the active area has a highlighted border.
 
-В заголовке любой области можно выбрать другой доступный тип, разделить её **H / V** или закрыть **×**. Раскладки Engine и Project независимы. **Save Layout** сохраняет личные раскладки, **Load Saved Layout** перечитывает их, **Reset Layout** сбрасывает текущее пространство к начальному виду. Изменения также сохраняются автоматически. Личные настройки находятся в `.user/<full|team>/<engine|project>.json` установленного пакета и не входят в сцены или историю документа.
+Available types come from installed active modules and the distribution profile. Engine areas and the Engine tab itself are available only to Full with a complete compatible source inventory. Team stays within Project, permitted parameters, and game Rust; New, Save As, and menus do not unfreeze architecture.
 
-В графах **Ctrl + колесо** приближает и отдаляет содержимое под курсором, в том числе над узлом или пином. Положение графа компенсирует изменение масштаба, поэтому точка под курсором остаётся на месте. Правая или средняя кнопка перемещает вид. Масштабируется только граф под курсором; остальные окна и размер интерфейса остаются прежними. Это общий обработчик для графа модулей, GPU-проходов, Rust и Gameplay Systems.
+**Scene**, **Hierarchy**, **Inspector**, and **Assets** are available in both layouts. Scene/Hierarchy/Inspector share authored-object selection; each Scene retains its own viewing camera. Each Assets retains its own directory and filters. These windows can sit beside Game; authored edits are made after Stop. See [scene-assets.md](scene-assets.md) for details.
 
-Обработчик находится в `canvas.rs` и использует `InputState::zoom_delta()`: egui уже преобразует Ctrl + колесо в коэффициент масштаба, оставляя обычную прокрутку нулевой. Проверки `canvas::tests` подают реальные события колеса в egui и проверяют оба направления над фоном/узлом/пином, сохранение точки под курсором, соседний граф, пределы масштаба и отсутствие реакции на обычную прокрутку или отключённую область.
+Any area's header can select another available type, split it with **H / V**, or close it with **×**. Engine and Project layouts are independent. **Save Layout** saves personal layouts, **Load Saved Layout** rereads them, and **Reset Layout** resets the current workspace to its initial view. Changes are also saved automatically. Personal settings are in `.user/<full|team>/<engine|project>.json` of the installed package and are outside scenes and document history.
 
-Перетаскивание узла меняет его расположение в схеме и сохраняется в документе, истории и экспорте. Оно не должно пересоздавать Game/Scene, GPU-исполнитель, скомпилированный Custom или состояние игры. Для этого `Graph::execution_eq` рекурсивно исключает координаты и подписи узлов, а у `custom.rust` / `custom.rust.update` — также `code_layout` и `code_layout_keys`. Все остальные параметры, связи, порядок, исходники, ассеты и сцены продолжают участвовать в проверке. Обновление авторского документа и фонового preview использует это сравнение; обычный `PartialEq` и сериализация по-прежнему сохраняют раскладку полностью.
+In graphs, **Ctrl + wheel** zooms content under the cursor, including over a node or pin. Graph position compensates for zoom, so the point under the cursor stays in place. Right or middle mouse button pans the view. Only the graph under the cursor is scaled; other windows and interface size stay unchanged. This is a shared handler for module, GPU-pass, Rust, and Gameplay Systems graphs.
 
-Регрессия `app::tests::graph_node_drag_preserves_game_and_scene_hosts` выполняет настоящее перетаскивание в egui над внешним и вложенным GPU-графом с заранее открытыми Game и Scene. Она проверяет перемещение узла и сохранение исполнителей; число кадров можно увеличить переменной `MODULE_ENGINE_GRAPH_DRAG_FRAMES` (до 240). Если задан `MODULE_ENGINE_GRAPH_DRAG_REPORT`, результат записывается в указанный JSON. Замер включает обработку графа и синхронизацию остановленных Game/Scene; нативный вывод и растеризация 3D-вида в него не входят. До исправления этот сценарий пересоздавал исполнители и фиксировал отдельные задержки около 2,3 секунды в debug-сборке.
+The handler is in `canvas.rs` and uses `InputState::zoom_delta()`: egui already converts Ctrl + wheel into a zoom factor, leaving ordinary scrolling at zero. `canvas::tests` send real wheel events into egui and check both directions over background/node/pin, preservation of the point under the cursor, a neighboring graph, zoom limits, and no response to ordinary scrolling or a disabled area.
 
-После исправления проверены по 120 кадров ввода, включая 113 фактических перемещений: Game/Scene сохраняют исполнители, максимумы составили 7,04 мс для внешнего графа и 8,07 мс для GPU-графа в том же debug-сценарии. [Отчёт до и после](media/graph-drag-report.json) указывает границы замера и различие размеров выборки; эти числа не являются FPS всего редактора.
+Dragging a node changes its position in the diagram and is saved in the document, history, and export. It must not recreate Game/Scene, the GPU executor, compiled Custom, or game state. For this, `Graph::execution_eq` recursively excludes node coordinates and labels, and for `custom.rust` / `custom.rust.update` also `code_layout` and `code_layout_keys`. All other parameters, connections, order, sources, assets, and scenes continue participating in comparison. Authored-document and background-preview updates use this comparison; ordinary `PartialEq` and serialization still preserve the full layout.
 
-## Сборка GPU-графа и возврат удалённых проходов
+The `app::tests::graph_node_drag_preserves_game_and_scene_hosts` regression performs real egui dragging over the external and nested GPU graph with Game and Scene already open. It checks node movement and executor preservation; the frame count can be increased with `MODULE_ENGINE_GRAPH_DRAG_FRAMES` (up to 240). If `MODULE_ENGINE_GRAPH_DRAG_REPORT` is set, the result is written to the specified JSON. The measurement includes graph processing and synchronization of stopped Game/Scene; native presentation and 3D-view rasterization are excluded. Before the fix, this scenario recreated executors and recorded individual delays around 2,3 seconds in a debug build.
 
-В **Engine** дважды щёлкните Vulkan renderer. Добавляйте проходы через **+ Узел** над самим графом или через **Windows → Module Library**. В библиотеке есть поиск по имени и ID модуля; строка **«Добавление в»** показывает граф и номер окна, куда попадёт узел. Библиотека следует последнему активному Module Graph текущего рабочего пространства. Чтобы выбрать другое окно графа, щёлкните в нём. Контексты Engine и Project сохраняются раздельно; изменение архитектуры требует Full с исходниками.
+After the fix, 120 input frames were checked for each graph, including 113 actual movements: Game/Scene preserve executors, with maxima of 7,04 ms for the external graph and 8,07 ms for the GPU graph in the same debug scenario. The [before/after report](media/graph-drag-report.json) states measurement boundaries and the difference in sample sizes; these numbers are not FPS of the whole editor.
 
-Для возвращения сглаживания добавьте **FXAA** и соедините `tonemap.color → FXAA.color → encode.color`. Последнее соединение заменяет старую прямую связь тонмаппера с кодированием. Для возвращения **Screen-space AO** подключите цвет HDR, нормали и глубину к его входам, затем его выход `color` к тонмапперу. В Forward цвет берётся у Geometry, в Deferred — у lighting, а нормали и глубина у Geometry.
+<a id="сборка-gpu-графа-и-возврат-удалённых-проходов"></a>
 
-[Нативное окно с библиотекой GPU-проходов](media/gpu-graph-library.png) показывает граф без AO/AA: их можно добавить из списка или найти поиском. Если проход появился за пределами текущего вида, редактор переводит вид к нему, сохраняя выбранный масштаб.
+## Building a GPU Graph and Restoring Deleted Passes
 
-Новый FXAA получает варианты включения/выключения Project, направленные на реальный ID нового прохода. Новый тонмаппер получает параметры и варианты режима; имеющиеся авторские настройки не перезаписываются. Для SSAO можно настроить `strength` в инспекторе или открыть **Engine Settings → Expose an existing GPU parameter** и разрешить параметр для Project. Новые штатные presets тонмаппера используют контракт шейдера `ACES = 1`, `Reinhard = 0`; сохранённые авторские команды автоматически не мигрируют.
+In **Engine**, double-click the Vulkan renderer. Add passes through the Add Node button (`+ Узел`) above the graph itself or through **Windows → Module Library**. The library supports search by module name and ID; the Add to line (`Добавление в`) shows the graph and window number that will receive the node. The library follows the last active Module Graph in the current workspace. To choose another graph window, click inside it. Engine and Project contexts are preserved separately; architectural changes require Full with sources.
 
-Кнопки **GPU Forward / GPU Deferred** в 3D-предпросмотре заменяют внутренний граф renderer, подключённого к Viewport. Настройки исчезнувших проходов и ресурсов очищаются вместе с Project-ссылками; определения для сохранившихся целей остаются. Новые штатные проходы получают собственные настройки. Переключение и изменения настроек отменяются одним Undo. Неиспользуемый альтернативный renderer не заменяется этой командой.
+To restore antialiasing, add **FXAA** and connect `tonemap.color → FXAA.color → encode.color`. The last connection replaces the old direct tonemapper-to-encoding connection. To restore **Screen-space AO**, connect HDR color, normals, and depth to its inputs, then its `color` output to the tonemapper. In Forward, color comes from Geometry; in Deferred, from lighting, while normals and depth come from Geometry.
 
-Соединение выполняется кликом по выходному пину, затем по входному. Кроме общего типа пина проверяются формат текстуры, смысл данных, размер и число samples. Например, HDR нельзя напрямую подключить к FXAA, ожидающему LDR. Отклонённая связь не удаляет прежнюю. Каждый шаг добавления и соединения имеет свою границу Undo/Redo, включая созданные настройки. Добавление GPU Custom в разных графах создаёт независимые HLSL source ID.
+The [native window with the GPU-pass library](media/gpu-graph-library.png) shows a graph without AO/AA: add them from the list or find them through search. If a pass appears outside the current view, the editor moves the view to it while retaining the selected zoom.
 
-Пока не подключены все нужные входы и выходы нового прохода, граф считается незавершённым. Документ можно продолжать редактировать; предыдущий рабочий рендер сохраняется. Статус подготовки сообщает причину отказа и подтверждает применение, когда цепочка стала корректной.
+New FXAA receives Project enable/disable variants targeting the actual ID of the new pass. A new tonemapper receives parameters and mode variants; existing authored settings are not overwritten. For SSAO, configure `strength` in the Inspector or open **Engine Settings → Expose an existing GPU parameter** and expose the parameter to Project. New standard tonemapper presets use the shader contract `ACES = 1`, `Reinhard = 0`; saved authored commands do not migrate automatically.
 
-## Удаление GPU-прохода и связанных настроек
+The **GPU Forward / GPU Deferred** buttons in the 3D preview replace the internal graph of the renderer connected to Viewport. Settings for disappeared passes and resources are cleared with Project references; definitions for surviving targets remain. New standard passes receive their own settings. Switching and settings changes are undone with one Undo. This command does not replace an unused alternative renderer.
 
-В **Engine** раскройте Vulkan renderer, выберите проход и удалите его через инспектор узла. Изменение архитектуры доступно Full с совместимыми исходниками. Флаг **«Проход включён»** сохраняет узел и его настройки; команда удаления убирает сам проход из графа.
+Connections are made by clicking an output pin, then an input pin. Beyond the common pin type, texture format, data meaning, size, and sample count are checked. For example, HDR cannot connect directly to FXAA expecting LDR. A rejected connection does not remove the previous one. Each addition and connection step has its own Undo/Redo boundary, including created settings. Adding GPU Custom in different graphs creates independent HLSL source IDs.
 
-Удаление согласует граф с разрешёнными настройками Engine и Project в одном изменении документа:
+Until all required inputs and outputs of a new pass are connected, the graph is incomplete. Editing the document can continue; the previous working render is preserved. Preparation status reports the rejection reason and confirms application when the chain becomes valid.
 
-- Из Engine Exposure удаляются параметры, направленные в удалённый pass.
-- Если хотя бы одна команда ready variant обращается к удалённому pass или его ресурсу, удаляется **вариант целиком**. Оставшиеся команды такого варианта не превращаются в новый, частично работающий preset.
-- Если удалён default группы, default назначается одному из оставшихся доступных вариантов. Группа без вариантов удаляется.
-- Из Project очищаются значения удалённых параметров и выборы, ссылающиеся на исчезнувшие группы или варианты. Удаляются правила, требующие удалённого параметра, группы или варианта; действующие выборы и правила сохраняются. Если отдельного выбора больше нет, применяется доступный default группы.
+<a id="удаление-gpu-прохода-и-связанных-настроек"></a>
 
-Например, после удаления FXAA из графа исчезают ready variants, управлявшие этим проходом, и связанные Project rules. Если других вариантов в группе сглаживания не осталось, сама группа перестаёт отображаться в настройках. **Undo** восстанавливает удалённый узел, связи, Engine Exposure и соответствующие значения, выборы и правила Project вместе; Redo повторяет удаление.
+## Deleting a GPU Pass and Related Settings
 
-[Пример работающего графа после удаления AA](media/editor-aa-removal.png).
+In **Engine**, expand the Vulkan renderer, select a pass, and delete it through the node Inspector. Architectural changes are available to Full with compatible sources. The Pass enabled flag (`Проход включён`) preserves the node and its settings; the delete command removes the pass itself from the graph.
 
-Для штатных **SSAO** и **FXAA** предусмотрено соединение предшествующего цветового выхода с получателями цветового выхода удалённого узла, если контракты совместимы. Например, цепочка `тонмаппер → FXAA → кодирование цвета` после удаления FXAA продолжает передавать готовый цвет от тонмаппера в кодирование. Такой обход возможен и для Custom с однозначным контрактом.
+Deletion reconciles the graph with permitted Engine and Project settings in one document change:
 
-Для автоматического соединения у удаляемого прохода должен быть единственный output и ровно один input с теми же `format`, `semantic`, `extent` и `samples`. В этот input должна вести единственная связь. Имена пинов не обязаны быть `color`: решение определяется совпадением контрактов. Проход с несколькими outputs или неоднозначным подходящим input автоматически не обходится.
+- Parameters targeting the deleted pass are removed from Engine Exposure.
+- If at least one ready-variant command refers to the deleted pass or its resource, the **entire variant** is removed. Remaining commands in that variant do not become a new partially working preset.
+- If a group's default is deleted, one of the remaining available variants becomes the default. A group with no variants is removed.
+- Project values for deleted parameters and selections referring to disappeared groups or variants are cleared. Rules requiring a deleted parameter, group, or variant are removed; valid selections and rules are preserved. If an individual selection no longer exists, the group's available default applies.
 
-Удаление geometry не создаёт геометрию и G-buffer; удаление тонмаппера не преобразует HDR в LDR; удаление кодирования не заменяет преобразование цветового пространства. При таких изменениях нужно вручную соединить совместимые этапы или установить подходящую замену. Типы пинов, форматы и смысл ресурсов продолжают проверяться; доступный default сам по себе не исправляет несовместимую цепочку рендера. Ошибка подготовки остаётся видна в статусе, а предыдущий рабочий вариант используется до успешного применения.
+For example, deleting FXAA from the graph removes ready variants controlling that pass and related Project rules. If no other variants remain in the antialiasing group, the group itself disappears from settings. **Undo** restores the deleted node, connections, Engine Exposure, and corresponding Project values, selections, and rules together; Redo repeats the deletion.
 
-Сохранённые в runtime переопределения параметров и включения проходов, а также команды ресурсов на удалённые цели очищаются **после успешного применения** нового рендера. Отклонённый кандидат не меняет переопределения предыдущей рабочей конфигурации. Это очистка уже существовавших назначений: новая команда Custom, обращающаяся к неизвестному pass или ресурсу, по-прежнему отклоняется с ошибкой.
+[Example of a working graph after AA removal](media/editor-aa-removal.png).
 
-Согласование настроек обрабатывает объявленные ссылки Engine Exposure и ProjectConfiguration. Цели настроек определяются по рендереру, подключённому к Viewport; одноимённый проход в неиспользуемом альтернативном рендерере не сохраняет настройки удалённого активного прохода. Произвольные Rust/HLSL-исходники не переписываются: команды Custom, имена проходов и ресурсы, зашитые в коде, при необходимости обновляет автор. Для проверки сохранённого результата выполните **Tools → Check Project**: проверяются текущие настройки и все объявленные ready variants, включая невыбранные. Устройство параметров и готовых вариантов описано в [settings.md](settings.md).
+Standard **SSAO** and **FXAA** support connecting the preceding color output to consumers of the deleted node's color output when contracts are compatible. For example, after deleting FXAA, the `tonemapper → FXAA → color encoding` chain continues passing finished color from the tonemapper to encoding. This bypass is also possible for Custom with an unambiguous contract.
 
-## Подготовка и применение изменений
+For automatic reconnection, the deleted pass must have a single output and exactly one input with the same `format`, `semantic`, `extent`, and `samples`. Exactly one connection must lead to that input. Pin names need not be `color`: the decision is based on matching contracts. A pass with multiple outputs or an ambiguous suitable input is not automatically bypassed.
 
-При изменении GPU-графа — например переключении **«Проход включён»** у AA — нижняя строка показывает выполняющиеся операции, текущий этап и прошедшее время. Spinner обозначает работу без оценки оставшегося времени. Нажмите строку или стрелку, чтобы раскрыть отдельные задачи Engine, Game, Scene и Rust; длинную ошибку можно прочитать полностью и скопировать. Успех и ошибка сохраняются после завершения операции.
+Deleting geometry does not create geometry and a G-buffer; deleting the tonemapper does not convert HDR to LDR; deleting encoding does not replace color-space conversion. Such changes require manually connecting compatible stages or installing a suitable replacement. Pin types, formats, and resource meaning continue to be checked; an available default alone does not repair an incompatible render chain. The preparation error remains visible in status, and the previous working version is used until successful application.
 
-Подготовка Vulkan, шейдеров и новых исполнителей Game/Scene выполняется в фоне. Пока кандидат готовится, используется предыдущий рабочий вариант или последний кадр; при первом открытии окна показывается ожидание подготовки. При быстрых повторных изменениях применяется актуальная конфигурация, а устаревший результат пропускается. Для успешной сборки статус **«Готово»** появляется после принятия результата редактором, а не сразу после завершения компилятора. Отменённые и заменённые запросы тоже завершаются: подробность прямо указывает отмену или замену, а не применение.
+Runtime parameter and pass-enable overrides, and resource commands targeting removed destinations, are cleared **after successful application** of the new renderer. A rejected candidate does not change overrides of the previous working configuration. This cleans up existing assignments: a new Custom command targeting an unknown pass or resource is still rejected with an error.
 
-Замена только рендера сохраняет игровую сессию, состояние Rust, камеру и загруженные ресурсы. Изменение самой модели мира или графа исполняемых систем требует подготовки нового исполнителя: шаги Play временно приостанавливаются, а принятие нового исполнителя пересоздаёт игровое состояние. Если подготовка отклонена, ошибка остаётся видна, а предыдущий рабочий вариант сохраняется. Авторские правки остаются в документе: их можно исправить или отменить через Undo. Сохранение JSON и применение его в предпросмотре — отдельные действия, состояние подготовки видно и после Save.
+Settings reconciliation processes declared Engine Exposure and ProjectConfiguration references. Settings targets are determined by the renderer connected to Viewport; a same-named pass in an unused alternative renderer does not preserve settings for a deleted active pass. Arbitrary Rust/HLSL sources are not rewritten: the author updates Custom commands, pass names, and resources embedded in code when needed. To check the saved result, run **Tools → Check Project**: current settings and all declared ready variants, including unselected ones, are checked. Parameter and ready-variant design is described in [settings.md](settings.md).
 
-Эта очередь обслуживает изменения графа и встроенного HLSL-текста. Отслеживание внешних HLSL-файлов во время рендера пока использует прежний путь компиляции; перенос его в фон остаётся отдельной задачей.
+<a id="подготовка-и-применение-изменений"></a>
 
-После неудачной подготовки Engine, Game или Scene исправление внешнего буквального HLSL include разрешает повторную попытку без изменения JSON. Состояние зависимостей снимается до запуска задачи и после отказа проверяется не чаще раза в 250 мс относительно выбранного backend. Поэтому учитывается и файл, исправленный до получения ошибки от worker. Неизменившаяся ошибка не запускает компиляцию каждый кадр; это не общий файловый watcher проекта.
+## Preparing and Applying Changes
 
-Регрессии проверяют реальный клик по AA с отрисовкой старого GPU во время подготовки, сохранение игровой копии и Rust-состояния, ошибочный HLSL, Stop и устаревшие результаты. Отдельно проверены начальное ожидание Scene и раскрытие длинной ошибки. Примеры нативного окна: [успешное применение](media/editor-preparation-ready.png), [ошибка HLSL](media/editor-preparation-error.png).
+When the GPU graph changes, for example when switching the Pass enabled flag (`Проход включён`) for AA, the bottom bar shows ongoing operations, the current stage, and elapsed time. A spinner indicates work without estimating remaining time. Click the bar or arrow to expand individual Engine, Game, Scene, and Rust tasks; a long error can be read in full and copied. Success and errors remain after the operation ends.
 
-Общая модель `activity.rs` передаёт этапы из worker через `BuildProgress`; UI читает снимки и продолжает перерисовываться. `PreviewBuilder`, компиляция Rust и подготовка Game/Scene сообщают этапы и результат через один интерфейс. Обычные CLI-проверки сохраняют синхронное поведение и не зависят от окна редактора.
+Vulkan, shader, and new Game/Scene executor preparation runs in the background. While a candidate is prepared, the previous working version or latest frame is used; the first window opening shows a preparation wait. With rapid repeated changes, the current configuration is applied and stale results skipped. For a successful build, Ready status (`Готово`) appears after the editor accepts the result, not immediately after the compiler finishes. Canceled and superseded requests also finish: their details explicitly state cancellation or replacement rather than application.
 
-В нативном Editor после подготовки GameHost передаётся постоянному игровому потоку. Он выполняет симуляцию, применение игрового Rust, обновление графики и рендер Game. UI отправляет ввод и команды без ожидания, показывает последний завершённый кадр и состояние. Медленный Custom поэтому замедляет продвижение игры, но не заставляет окно выполнять серию догоняющих тактов. Владелец игры обрабатывает команды между отдельными тактами; работающий Rust не прерывается в середине такта. Pause и Restart вступают в силу на этой границе, Stop отсоединяет исполнителя, а освобождение его процессов и GPU-ресурсов проходит вне UI. Авторская Scene остаётся отдельным предпросмотром.
+Replacing only rendering preserves the game session, Rust state, camera, and loaded resources. Changing the world model itself or executable-system graph requires preparing a new executor: Play steps pause temporarily, and accepting the new executor recreates game state. If preparation is rejected, the error remains visible and the previous working version is preserved. Authored edits remain in the document: they can be corrected or undone through Undo. Saving JSON and applying it in preview are separate actions; preparation status remains visible after Save.
 
-Изменения графики объединяются до последнего ожидающего документа: у UI одновременно не более одного отправленного и одного следующего кандидата. Старый рабочий кадр остаётся видимым до принятия нового. Нажатия attack/interact/restart сохраняются отдельно от последнего удерживаемого направления; переполнение ограниченной очереди ввода даёт явную ошибку и приостанавливает Play. Скрытое окно Game прекращает запрашивать GPU-кадры, сохраняя возможность симуляции и работы Rust-окна. В Diagnostics отдельно показаны текущая ревизия состояния и tick/ревизия последних готовых пикселей: сохранённый кадр при ошибке не выдаётся за новый.
+This queue handles graph and embedded HLSL-text changes. Watching external HLSL files during rendering currently uses the previous compilation route; moving it into the background remains a separate task.
 
-Эта модель включается настоящим нативным Editor и нативной диагностикой; один лишь режим фоновой подготовки не меняет синхронный контракт headless-проверок. См. [GameWorker](game-worker.md) и [состояние Custom](custom-state.md).
+After failed Engine, Game, or Scene preparation, correcting an external literal HLSL include permits retry without changing JSON. Dependency state is captured before the task starts and checked after failure no more often than once per 250 ms against the selected backend. This also accounts for a file corrected before the worker error arrives. An unchanged error does not trigger compilation every frame; this is not a general project file watcher.
 
-## Перерисовка и измерение производительности
+Regressions check a real AA click while drawing the old GPU during preparation, preservation of the game copy and Rust state, erroneous HLSL, Stop, and stale results. Initial Scene waiting and expansion of a long error were checked separately. Native-window examples: [successful application](media/editor-preparation-ready.png), [HLSL error](media/editor-preparation-error.png).
 
-При неподвижной Scene повторные события в других окнах используют готовую текстуру. Изменения камеры, размера, принятых сцены, ресурсов или GPU-конфигурации обновляют её сразу; раз в 250 мс остаётся проверочная перерисовка для внешних HLSL-файлов. Выбор объекта и ручки рисуются поверх изображения каждый UI-кадр. Game отдельно читает ввод и рисует HUD, а игровой рендер ограничен 60 кадрами в секунду; Stop/Pause использует готовое изображение до изменения или периодической проверки.
+The shared `activity.rs` model sends worker stages through `BuildProgress`; the UI reads snapshots and continues repainting. `PreviewBuilder`, Rust compilation, and Game/Scene preparation report stages and results through one interface. Ordinary CLI checks retain synchronous behavior and do not depend on the editor window.
 
-Готовый GPU-план переиспользуется между неизменёнными кадрами. Явная подготовка кандидата по-прежнему проверяет свежие HLSL include-файлы; при обычном рендере их повторные проверки объединяются с интервалом 250 мс. Проверка контрактов и разрешённых настроек работает по манифестам без чтения шейдерных файлов. Фоновая сетка графа рисуется одним mesh вместо тысяч отдельных shapes. В **Tools → Diagnostics** доступны счётчики подготовок, рендеров и повторного использования кадров; это счётчики работы, не FPS.
+In native Editor, after preparation, GameHost is transferred to a persistent game thread. It performs simulation, game Rust application, graphics updates, and Game rendering. The UI sends input and commands without waiting and shows the latest completed frame and state. Slow Custom therefore slows game progression but does not force the window to execute a series of catch-up ticks. The game owner processes commands between individual ticks; running Rust is not interrupted midway through a tick. Pause and Restart take effect at this boundary, Stop detaches the executor, and its processes and GPU resources are released outside the UI. Authored Scene remains a separate preview.
 
-Для повторяемого измерения всего редактора служит `--editor-benchmark game-project.json output-folder`. Запускайте его на отдельной Full-копии: конструктор редактора записывает Recent в `.user` этой копии. Диагностика открывает настоящий Editor с Graph, Game и Scene, прогревает подготовку и измеряет по 90 реальных движений графа при Stop и Play. В `report.json` отдельно записываются время Editor UI, предыдущего CPU-кадра eframe и интервал между кадрами, ограничения видимости/фокуса и сохранность документа. Эти показатели не заменяют измерение задержки экрана или самостоятельного Player.
+Graphics changes are coalesced into the latest pending document: the UI has at most one submitted and one next candidate at a time. The old working frame remains visible until the new one is accepted. Attack/interact/restart presses are preserved separately from the latest held direction; overflow of the bounded input queue produces an explicit error and pauses Play. A hidden Game window stops requesting GPU frames while retaining simulation and Rust-window functionality. Diagnostics separately shows the current state revision and tick/revision of the latest ready pixels: a retained frame on error is not presented as new.
 
-Сравнение release-сборок от 15.10.2026: тот же проект без AA/AO, Graph/Game/Scene, 20 живых врагов, нативное окно 1920×1080 на мониторе 144 Гц; по 90 измеренных перемещений графа в каждой фазе. Оба окна имели фокус во всех измеренных кадрах. В таблице указаны **медиана / p95 в мс**, меньше — лучше.
+This model is enabled by real native Editor and native diagnostics; background preparation mode alone does not change the synchronous headless-check contract. See [GameWorker](game-worker.md) and [Custom state](custom-state.md).
 
-| Замер | До | После |
+<a id="перерисовка-и-измерение-производительности"></a>
+
+## Repainting and Performance Measurement
+
+With a stationary Scene, repeated events in other windows use the ready texture. Camera, size, accepted-scene, resource, or GPU-configuration changes update it immediately; a verification repaint remains every 250 ms for external HLSL files. Object selection and handles are drawn over the image every UI frame. Game separately reads input and draws the HUD, while game rendering is capped at 60 frames per second; Stop/Pause uses the ready image until a change or periodic check.
+
+The ready GPU plan is reused between unchanged frames. Explicit candidate preparation still checks fresh HLSL include files; during ordinary rendering, repeated checks are coalesced at a 250 ms interval. Contract and permitted-settings validation works from manifests without reading shader files. The graph background grid is drawn as one mesh instead of thousands of individual shapes. **Tools → Diagnostics** provides preparation, render, and frame-reuse counters; these count work, not FPS.
+
+For repeatable whole-editor measurement, use `--editor-benchmark game-project.json output-folder`. Run it on a separate Full copy: the editor constructor writes Recent to that copy's `.user`. Diagnostics opens a real Editor with Graph, Game, and Scene, warms up preparation, and measures 90 real graph movements each at Stop and Play. `report.json` separately records Editor UI time, the previous eframe CPU frame, inter-frame interval, visibility/focus limitations, and document preservation. These metrics do not replace screen-latency or standalone Player measurements.
+
+Release-build comparison from 15.10.2026: the same project without AA/AO, Graph/Game/Scene, 20 living enemies, a 1920×1080 native window on a 144 Hz monitor; 90 measured graph movements in each phase. Both windows had focus in every measured frame. The table gives **median / p95 in ms**; lower is better.
+
+| Measurement | Before | After |
 | --- | --- | --- |
-| Stop: обработка Editor UI | 4,77 / 5,56 | 0,70 / 1,86 |
-| Play: обработка Editor UI | 7,14 / 9,77 | 2,03 / 4,12 |
-| Stop: интервал между UI-кадрами | 6,86 / 8,12 | 6,94 / 7,22 |
-| Play: интервал между UI-кадрами | 9,08 / 14,33 | 6,94 / 7,27 |
+| Stop: Editor UI processing | 4,77 / 5,56 | 0,70 / 1,86 |
+| Play: Editor UI processing | 7,14 / 9,77 | 2,03 / 4,12 |
+| Stop: interval between UI frames | 6,86 / 8,12 | 6,94 / 7,22 |
+| Play: interval between UI frames | 9,08 / 14,33 | 6,94 / 7,27 |
 
-[Отчёт сравнения](media/editor-native-performance-comparison.json) содержит дополнительные CPU-метрики, максимумы и ограничения. Проверены неизменность документа/файла, сохранность Custom-исполнителей и продвижение Play. Ввод подаётся программно в настоящее окно; задержка физической мыши и вывода на экран не измеряется, native visibility остаётся неизвестной. Это два последовательных запуска на одном ПК, а не гарантия скорости других проектов. Первый прогон старой сборки без фокуса сохранён отдельно и в эту таблицу не включён.
+The [comparison report](media/editor-native-performance-comparison.json) contains additional CPU metrics, maxima, and limitations. Document/file invariance, Custom-executor preservation, and Play progression were checked. Input is supplied programmatically to a real window; physical mouse and display latency is not measured, and native visibility remains unknown. These are two sequential runs on one PC, not a speed guarantee for other projects. The first unfocused run of the old build is preserved separately and excluded from this table.
 
-Отдельная проверка Player на одном и том же упакованном контенте с 20 врагами при 1920×1080: медиана обработки игрового кадра 5,22 → 4,44 мс, p95 5,70 → 5,23 мс. Она включает симуляцию, звук и Vulkan с readback, но исключает окно, vsync и HUD. Функциональные проверки обеих моделей мира, поражения, перехода арен, победы и rollback Rust также прошли. Сильное ухудшение самостоятельного Player на этом фиксированном примере не воспроизвелось; больший подтверждённый расход был в редакторе.
+A separate Player check on the same packaged content with 20 enemies at 1920×1080: median game-frame processing 5,22 → 4,44 ms, p95 5,70 → 5,23 ms. It includes simulation, audio, and Vulkan with readback, but excludes the window, vsync, and HUD. Functional checks of both world models, defeat, arena transition, victory, and Rust rollback also passed. Severe standalone Player degradation was not reproduced on this fixed example; the larger confirmed cost was in the editor.
 
-## Где находится реализация
+<a id="где-находится-реализация"></a>
 
-| Файл | Назначение |
+## Implementation Locations
+
+| File | Purpose |
 | --- | --- |
-| `crates/editor/src/editor_workflow.rs` | Общие команды меню/клавиш, Recent, защита изменений, фоновые задания и отчёты. |
-| `crates/editor/src/activity.rs` | Общий прогресс подготовки, время, результат и раскрываемая диагностика. |
-| `crates/editor/src/native_dialogs.rs` | Windows COM-диалоги файлов и папок без отдельного вспомогательного процесса. |
-| `crates/editor/src/workspace_files.rs` | Шаблоны проекта и проверенное копирование авторских данных и ресурсов. |
-| `crates/editor/src/window_navigation.rs` | Поиск существующей области, активность и добавление рядом. |
-| `crates/editor/src/editor_benchmark.rs` | Нативный замер Editor с Graph/Game/Scene, программным вводом и проверкой сохранности проекта. |
-| `crates/editor/src/distribution.rs` | Привязка проекта к Engine, проверка исходников/SDK и политика Full / Team. |
-| `crates/editor/src/assets_ui.rs` | Папки, фильтры, выбор, диалоги и команды проводника без файловых изменений внутри UI. |
-| `crates/editor/src/assets_workspace_ui.rs` | Кеш индекса ресурсов, сведения, очередь превью и проверка ресурсов восстанавливаемой версии. |
-| `crates/project-tools/src/asset_workspace.rs` | Постоянные ID, зависимости, транзакции файлов, корзина и откат вместе с документом. |
-| `crates/editor/src/scene_view_ui.rs`, `scene_tools.rs`, `scene_workspace.rs` | Визуальные инструменты, выбор геометрии, обзорная камера и применение жестов к авторской сцене. |
+| `crates/editor/src/editor_workflow.rs` | Shared menu/shortcut commands, Recent, change protection, background jobs, and reports. |
+| `crates/editor/src/activity.rs` | Shared preparation progress, time, result, and expandable diagnostics. |
+| `crates/editor/src/native_dialogs.rs` | Windows COM file/folder dialogs without a separate helper process. |
+| `crates/editor/src/workspace_files.rs` | Project templates and verified copying of authored data and resources. |
+| `crates/editor/src/window_navigation.rs` | Finding existing areas, activation, and adjacent addition. |
+| `crates/editor/src/editor_benchmark.rs` | Native Editor measurement with Graph/Game/Scene, programmatic input, and project-preservation checks. |
+| `crates/editor/src/distribution.rs` | Project-to-Engine binding, source/SDK checks, and Full / Team policy. |
+| `crates/editor/src/assets_ui.rs` | Directories, filters, selection, dialogs, and browser commands without file changes inside the UI. |
+| `crates/editor/src/assets_workspace_ui.rs` | Resource-index cache, information, preview queue, and validation of resources for a restored version. |
+| `crates/project-tools/src/asset_workspace.rs` | Persistent IDs, dependencies, file transactions, trash, and rollback with the document. |
+| `crates/editor/src/scene_view_ui.rs`, `scene_tools.rs`, `scene_workspace.rs` | Visual tools, geometry selection, viewing camera, and applying gestures to the authored scene. |
 
-UI использует существующие команды проверки и экспорта. Разделение установленного движка и папки игры позволяет сохранять новые проекты без копирования compiler/backend при каждом Save As и при этом проверять, какой Engine действительно обслуживает проект.
+The UI uses existing check and export commands. Separating the installed engine from the game directory allows saving new projects without copying compiler/backend on every Save As, while still checking which Engine actually serves the project.
 
-В сервисе файлов `save_as` по умолчанию не перезаписывает существующий JSON. UI вызывает отдельный `save_as_confirmed` только после подтверждения замены в нативном диалоге; обе функции проверяют ресурсы и сохраняют ограничения профиля.
+In the file service, `save_as` does not overwrite an existing JSON by default. The UI invokes a separate `save_as_confirmed` only after replacement is confirmed in the native dialog; both functions check resources and retain profile restrictions.

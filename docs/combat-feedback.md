@@ -1,40 +1,50 @@
-# Визуальная обратная связь ближнего боя
+<a id="визуальная-обратная-связь-ближнего-боя"></a>
 
-В игровом примере урон уже рассчитывался, но обычный удар не показывал область и результат. Эта правка добавляет общий визуал для редакторского Play и самостоятельного Windows Player, сохраняя правила боя и авторские сцены.
+# Melee combat visual feedback
 
-## Что видно в игре
+[English](combat-feedback.md) | [Русский](ru/combat-feedback.md) | [Documentation](README.md)
 
-- До удара бледно-голубой сектор и стрелка показывают направление под курсором. Золотые кольца выделяют живых противников, которые сейчас подходят под проверку попадания.
-- Во время удара область становится золотой и появляется движущийся след взмаха. Направление фиксируется в начале удара, включая настраиваемую подготовку; текущая мышь снова управляет предпросмотром после его завершения.
-- Подтверждённое попадание высветляет модель на 0,16 секунды, создаёт искры и всплывающее число урона. Искры и число сохраняются 0,35 секунды, включая смертельные попадания после удаления цели.
-- Атаки врагов и полученный игроком урон обозначаются красным.
+The game example already calculated damage, but an ordinary attack did not show its area or result. This change adds shared visuals for editor Play and standalone Windows Player while preserving combat rules and authored scenes.
 
-Радиус, угол, урон, перезарядка и попадание один раз по каждой цели за взмах не изменены. В поставляемом примере это дальность 2,2, угол 1,9 радиана, урон 28 и длительность взмаха 0,12 секунды. Предпросмотр проверяет текущую геометрию, а не готовность перезарядки. Радиус цели учитывается в дальности, угол проверяется по её центру: цель может быть доступна у самого края нарисованного сектора.
+<a id="что-видно-в-игре"></a>
 
-## Где это устроено
+## What appears in the game
 
-| Часть | Назначение |
+- Before an attack, a pale blue sector and arrow show the direction under the cursor. Gold rings highlight living opponents that currently meet the hit-test criteria.
+- During an attack, the area turns gold and a moving swing trail appears. Direction locks at the start of the attack, including the configurable windup; the current mouse position controls the preview again after it ends.
+- A confirmed hit brightens the model for 0.16 seconds and creates sparks and a floating damage number. The sparks and number persist for 0.35 seconds, including lethal hits after the target is removed.
+- Enemy attacks and damage received by the player are shown in red.
+
+Radius, angle, damage, cooldown, and one hit per target per swing are unchanged. The shipped example uses a range of 2.2, an angle of 1.9 radians, damage of 28, and a swing duration of 0.12 seconds. The preview tests current geometry rather than cooldown readiness. Target radius counts toward range, while angle is tested at its center: a target may be reachable at the very edge of the drawn sector.
+
+<a id="где-это-устроено"></a>
+
+## Implementation locations
+
+| Part | Purpose |
 | --- | --- |
-| `crates/gameplay-arpg/src/queries.rs` | `MeleeArea::contains` — общая проверка области для боя и подсветки; `melee_aim`/`melee_targets` — запросы предпросмотра; `attack_visuals`/`hit_visuals` — временные данные настоящих ударов и попаданий. |
-| `crates/gameplay-arpg/src/ui/combat_visuals.rs` | Общая проекция секторов, целей, следов, искр и чисел; вспышка в извлечённом снимке сцены. |
-| `crates/editor/src/player.rs` | Игровой HUD вызывает общий визуал; самостоятельный Player показывает те же эффекты. |
-| `crates/editor/src/game_ui.rs` | Передаёт прицеливание активного редакторского игрового окна. |
-| `crates/game-host/src/game_host.rs` | Применяет вспышки после материалов к снимку для GPU, сохраняя исходные цвета и компоненты объектов. |
+| `crates/gameplay-arpg/src/queries.rs` | `MeleeArea::contains` is the shared area test for combat and highlighting; `melee_aim`/`melee_targets` are preview queries; `attack_visuals`/`hit_visuals` are transient data for actual attacks and hits. |
+| `crates/gameplay-arpg/src/ui/combat_visuals.rs` | Shared projection of sectors, targets, trails, sparks, and numbers; flash in the extracted scene snapshot. |
+| `crates/editor/src/player.rs` | The game HUD calls the shared visuals; standalone Player displays the same effects. |
+| `crates/editor/src/game_ui.rs` | Supplies aiming from the active editor game window. |
+| `crates/game-host/src/game_host.rs` | Applies flashes after materials to the snapshot for the GPU, preserving the objects' original colors and components. |
 
-Временные данные живут по игровым часам: Pause замораживает эффект, Stop/Restart/загрузка сцены очищают его. Victory/Defeat скрывают боевые наложения. Секторы и следы проецируются поверх изображения сцены; анимация скелета и частицы с проверкой глубины сюда не входят.
+Transient data follows the game clock: Pause freezes the effect; Stop/Restart/scene loading clears it. Victory/Defeat hides combat overlays. Sectors and trails are projected over the scene image; skeletal animation and depth-tested particles are outside this scope.
 
-Описание управления — в [Player](player.md), контракт боя — в [gameplay](gameplay.md).
+Controls are described in [Player](player.md); the combat contract is in [gameplay](gameplay.md).
 
-## Проверка этой правки
+<a id="проверка-этой-правки"></a>
 
-14 октября 2026 прошли 136 workspace unit tests, проверка форматирования, Clippy для всех targets и генерация rustdoc с `-D warnings`. Новые проверки покрывают границы сектора, цели без здоровья, одинаковые результаты Object/ECS, направление при движении курсора во время взмаха и подготовки, смертельное попадание, истечение эффектов и сохранность авторских цветов/материалов.
+## Verification of this change
 
-Окончательный экспортированный Player проверен без Rust/Cargo в PATH и с заведомо отсутствующим DXC: использует готовые workers и SPIR-V. Сравнение Object/ECS, отказ/откат Custom, смерть/Restart и прохождение двух арен прошли. Как и прежде, автопрохождение использует отдельную копию с повышенным здоровьем; поставляемая игра от этого не меняется.
+On October 14, 2026, 136 workspace unit tests, formatting checks, Clippy for all targets, and rustdoc generation with `-D warnings` passed. New checks cover sector boundaries, targets without health, identical Object/ECS results, direction while moving the cursor during swing and windup, lethal hits, effect expiry, and preservation of authored colors/materials.
 
-Отдельный замер настоящего окна Player на RTX 4080 SUPER: 1920×1080, 20 живых врагов, 30 прогретых и 120 измеренных кадров. Средний период кадра — 11,13 мс (89,83 FPS), p95 — 13,47 мс; ошибок нет, цель 60 FPS выполнена. Замер выполнен с обычной сценой, без пользовательского ввода и без фокуса окна. Он не является отдельным стресс-тестом большого количества одновременно рисуемых ударов. Первоначальные показатели 0.4 сохранены отдельно в [release-v04](release-v04.md).
+The final exported Player was checked without Rust/Cargo in PATH and with DXC deliberately absent: it uses ready-made workers and SPIR-V. Object/ECS comparison, Custom rejection/rollback, death/Restart, and completion of both arenas passed. As before, automated completion uses a separate copy with increased health; the shipped game is unchanged by it.
 
-![Настоящий удар в Windows Player: область, взмах, цель и урон](media/player-attack-feedback.png)
+A separate measurement of the actual Player window on RTX 4080 SUPER used 1920×1080, 20 living enemies, 30 warmup frames, and 120 measured frames. Mean frame period was 11.13 ms (89.83 FPS), p95 was 13.47 ms; there were no errors, and the 60 FPS target was met. The measurement used the ordinary scene, without user input or window focus. It is not a separate stress test of many simultaneously drawn attacks. Original 0.4 figures are retained separately in [release-v04](release-v04.md).
 
-Снимок получен собственным screenshot-режимом native Player. Отдельная авторская fixture ставит персонажа в 1,4 единицы от монстра; до открытия окна исполняются три настоящих fixed tick, первый с действием атаки. Урон, дальность и угол остаются обычными. Эффекты взяты из состояния боя; изображение не дорисовывалось. Fixture не заменяет `game-project.json`.
+![An actual attack in Windows Player: area, swing, target, and damage](media/player-attack-feedback.png)
 
-Отчёты и точный вход снимка находятся в `outputs/combat-feedback-verification`: `player-final-functional/game-report.json`, `player-final-native/native-frame-report.json`, `capture-project.json`, `capture-fixture.json`, `release-evidence.json`. Обновлены `outputs/ModuleEngine.exe`, `outputs/game-player-v04`, `outputs/source-project-v04` и `outputs/team-build-v04`. Резервная папка предыдущих сборок записана в `backup-path.txt` рядом с отчётами.
+The image was captured with native Player's own screenshot mode. A separate authored fixture places the character 1.4 units from a monster; three actual fixed ticks run before the window opens, with an attack action on the first. Damage, range, and angle remain ordinary. Effects come from combat state; the image was not painted over. The fixture does not replace `game-project.json`.
+
+Reports and exact image inputs are in `outputs/combat-feedback-verification`: `player-final-functional/game-report.json`, `player-final-native/native-frame-report.json`, `capture-project.json`, `capture-fixture.json`, `release-evidence.json`. `outputs/ModuleEngine.exe`, `outputs/game-player-v04`, `outputs/source-project-v04`, and `outputs/team-build-v04` were updated. The backup folder for previous builds is recorded in `backup-path.txt` next to the reports.

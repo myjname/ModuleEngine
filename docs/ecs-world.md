@@ -1,5 +1,7 @@
 # Gameplay ECS storage
 
+[English](ecs-world.md) | [Русский](ru/ecs-world.md) | [Documentation](README.md)
+
 `GameState.world: EcsWorld` is the mutable gameplay world. Stable author IDs index
 Transform, Parent, Color, dynamic component columns and named references. There is
 no independently mutable entity map to synchronize with it. This stage is under

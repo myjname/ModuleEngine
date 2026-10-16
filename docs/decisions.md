@@ -1,78 +1,88 @@
-# Решения и рабочие допущения
+<a id="решения-и-рабочие-допущения"></a>
 
-Этот журнал отделяет принятый продуктовый объём от выбранных деталей реализации. Возможность считается реализованной только вместе с её ограничениями и проверкой.
+# Decisions and Working Assumptions
 
-## Принято для 0.2
+[English](decisions.md) | [Русский](ru/decisions.md) | [Documentation](README.md)
 
-| Решение | Последствие |
+This log separates the accepted product scope from selected implementation details. A capability is considered implemented only together with its limitations and verification.
+
+<a id="принято-для-02"></a>
+
+## Accepted for 0.2
+
+| Decision | Consequence |
 | --- | --- |
-| Первый GPU backend — Vulkan. | Реальные raster/compute проходы и ресурсы, forward/deferred графы. Другие graphics API позднее. |
-| Custom HLSL — обычный текст самостоятельного прохода. | Стадия, точки входа и ресурсы описываются manifest; код доступен в проекте. |
-| Rust Custom действительно компилируется и применяется без перезапуска редактора. | Диагностика rustc, отдельный кандидат и сохранение предыдущей рабочей версии. |
-| Rust управляет через переносимые типизированные команды. | Одна логика работает с обоими мирами и зарегистрированным renderer; прямые Vulkan-вызовы из ScriptContext не предусмотрены. |
-| Визуальная поддержка Rust расширяется постепенно. | Неподдержанные конструкции сохраняются как opaque-текст и могут компилироваться обычным Rust. |
-| Локальные undo/redo, контрольные версии, diff и трёхсторонний merge нужны сейчас. | Конфликты сохраняются явно; live coediting отложен. |
-| Первый AA — FXAA текущего кадра. | Temporal AA и temporal-ресурсы отложены. |
-| Экспорт включает файлы, версии инструментов и восстановление с загрузками. | Полный offline SDK не упаковывается; интернет при восстановлении допустим. |
-| Полный исходный проект остаётся редактируемым. | Ролевые поставки были отложены до 0.3; ниже описан реализованный Full/Team объём. |
+| The first GPU backend is Vulkan. | Real raster/compute passes and resources, forward/deferred graphs. Other graphics APIs come later. |
+| Custom HLSL is ordinary text for a standalone pass. | The manifest describes the stage, entry points, and resources; code is available in the project. |
+| Rust Custom really compiles and applies without restarting the editor. | rustc diagnostics, a separate candidate, and preservation of the previous working version. |
+| Rust controls execution through portable typed commands. | The same logic works with both worlds and a registered renderer; direct Vulkan calls from ScriptContext are not provided. |
+| Visual Rust support expands gradually. | Unsupported constructs are preserved as opaque text and can compile as ordinary Rust. |
+| Local undo/redo, checkpoints, diff, and three-way merge are needed now. | Conflicts are preserved explicitly; live coediting is deferred. |
+| The first AA is current-frame FXAA. | Temporal AA and temporal resources are deferred. |
+| Export includes files, tool versions, and restoration with downloads. | A full offline SDK is not packaged; internet access during restoration is permitted. |
+| The full source project remains editable. | Role-based distributions were deferred until 0.3; the implemented Full/Team scope is described below. |
 
-## Выбранные детали реализации
+<a id="выбранные-детали-реализации"></a>
 
-- GPU рендерит offscreen с синхронным readback для egui. В 0.4 используются постоянные buffers/images и cached readback memory; swapchain и кадры в полёте остаются отдельной работой. Renderer, GameHost и настоящий оконный цикл измеряются раздельно.
-- Rust компилируется в worker executable и обменивается owned JSON-пакетами без Rust DLL ABI. В 0.2/0.3 worker создавался на каждый tick. В 0.4 процесс постоянный, состояние явно объявлено и принадлежит host; timeout останавливает worker, а следующий tick восстанавливает последнее принятое состояние. Это не изолирует доступ к ОС и не обещает миграцию globals.
-- Корневой Cargo.lock авторитетен и для зависимостей worker. Генерируемая worker-сборка проверяет версии и source пакетов перед offline --locked build; её собственный пакет имеет техническую версию 0.0.0.
-- Инструменты закреплены в toolchain-manifest.json: Rust 1.99.0, DXC 1.9.2609.5. Doctor не изменяет систему; явный Restore устанавливает инструменты в каталог проекта и проверяет DXC по хешам.
-- История хранит снимки документа, а merge нормализует узлы по ID и связи по входу. Конфликт оставляет базовое значение в предварительном документе и обе альтернативы в отчёте.
-- Ресурсы используют AssetId, относительный путь и SHA-256. Include-зависимости HLSL экспортируются рекурсивно; макрос вместо имени include отклоняется.
-- Программный renderer 0.1 сохраняется как отдельный модуль.
+## Selected Implementation Details
 
-## Рабочие допущения
+- The GPU renders offscreen with synchronous readback for egui. Version 0.4 uses persistent buffers/images and cached readback memory; a swapchain and frames in flight remain separate work. Renderer, GameHost, and the real window loop are measured separately.
+- Rust compiles into a worker executable and exchanges owned JSON packets without a Rust DLL ABI. In 0.2/0.3, a worker was created on every tick. In 0.4, the process is persistent, state is explicitly declared and owned by the host; a timeout stops the worker, and the next tick restores the last accepted state. This does not isolate OS access or promise migration of globals.
+- The root Cargo.lock is authoritative for worker dependencies as well. The generated worker build checks package versions and sources before an offline --locked build; its own package has the technical version 0.0.0.
+- Tools are pinned in toolchain-manifest.json: Rust 1.99.0, DXC 1.9.2609.5. Doctor does not modify the system; explicit Restore installs tools into the project directory and verifies DXC hashes.
+- History stores document snapshots, and merge normalizes nodes by ID and connections by input. A conflict leaves the base value in the preview document and both alternatives in the report.
+- Resources use AssetId, a relative path, and SHA-256. HLSL include dependencies are exported recursively; a macro in place of an include name is rejected.
+- The 0.1 software renderer is retained as a separate module.
 
-Следующие правила приняты командой для реализации; пользователь не выбирал все их детали отдельно:
+<a id="рабочие-допущения"></a>
 
-1. Изменение рендерера и исходников сохраняет мир/время, когда ID, тип и параметры мира совпадают. Явная замена мира сбрасывает его.
-2. Неверный кандидат сохраняет текст и последнюю рабочую версию, а диагностике виден его отказ.
-3. Миграция не перезаписывает исходник при загрузке; запись существующего файла создаёт резервную копию.
-4. ID модулей и их порты должны оставаться стабильными. Несовместимое изменение потребует явной миграции.
-5. Позиции Rust-узлов можно переносить только при однозначном сопоставлении. Текущие ограничения описаны в Custom; полноценные постоянные AST ID пока не обещаны.
+## Working Assumptions
 
-Дальнейшие продуктовые решения находятся в [открытых вопросах](questions.md).
+The following rules were adopted by the team for implementation; the user did not select every detail individually:
 
-## Принято для 0.3 (ответы 24–28)
+1. Changing the renderer and sources preserves the world/time when the world's ID, type, and parameters match. Explicitly replacing the world resets it.
+2. An invalid candidate preserves its text and the last working version, and diagnostics show its rejection.
+3. Migration does not overwrite the source during loading; writing an existing file creates a backup.
+4. Module IDs and their ports must remain stable. An incompatible change will require explicit migration.
+5. Rust node positions can be transferred only when matching is unambiguous. Current limitations are described in Custom; full persistent AST IDs are not yet promised.
 
-| Решение | Реализация и граница |
+Further product decisions are in [open questions](questions.md).
+
+<a id="принято-для-03-ответы-2428"></a>
+
+## Accepted for 0.3 (Answers 24–28)
+
+| Decision | Implementation and boundary |
 | --- | --- |
-| Активные модули вносят собственные typed поля/настройки. | Descriptor.properties, active participation и defaults; физическое удаление всего unused code из бинарника позднее. |
-| Object/Component поля принадлежат фактическим участникам. | Выбранный объект и attach/detach; Global/Module поля в Project Settings. |
-| Независимые Blender-like области Engine/Project. | Split/join/resize/type selection, личная persistence, отдельные камеры/навигация при общем runtime. |
-| Engine владеет архитектурой и exposure. | Project меняет объявленные ranges/ready variants/conditions; новые/reordered passes запрещены. |
-| Graph/HLSL/Custom Rust hot apply доступны сейчас. | Native world/renderer/UI Rust требует сборки; hot native modules позднее. |
-| Team никогда не включает Engine. | Explicit package marker, frozen blueprint и gameplay whitelist, .sdk для compiled Custom. |
-| Full authoring требует полного совместимого source inventory. | Version/required files/active module paths проверяются; legitimate source edits отмечаются modified. Tools availability отдельно. |
+| Active modules contribute their own typed fields/settings. | Descriptor.properties, active participation, and defaults; physical removal of all unused code from the binary comes later. |
+| Object/Component fields belong to actual participants. | Selected object and attach/detach; Global/Module fields are in Project Settings. |
+| Independent Blender-like Engine/Project areas. | Split/join/resize/type selection, personal persistence, separate cameras/navigation with a shared runtime. |
+| Engine owns architecture and exposure. | Project changes declared ranges/ready variants/conditions; new/reordered passes are prohibited. |
+| Graph/HLSL/Custom Rust hot apply is available now. | Native world/renderer/UI Rust requires a build; hot native modules come later. |
+| Team never includes Engine. | Explicit package marker, frozen blueprint and gameplay whitelist, .sdk for compiled Custom. |
+| Full authoring requires a complete compatible source inventory. | Version/required files/active module paths are checked; legitimate source edits are marked modified. Tool availability is separate. |
 
-Рабочие детали: .module-engine-package.json; личные .user/<profile>/<workspace>.json вне документа; gameplay whitelist только active custom.rust.update; SDK lock — subset полного lock по name/version/source. Team backend pins охватывают HLSL include closure и инструменты, обычные game assets остаются игровыми данными. Режим является policy, не adversarial security boundary.
+Working details: .module-engine-package.json; personal .user/<profile>/<workspace>.json outside the document; the gameplay whitelist covers only active custom.rust.update; the SDK lock is a subset of the full lock by name/version/source. Team backend pins cover the HLSL include closure and tools; ordinary game assets remain game data. The mode is policy, not an adversarial security boundary.
 
-Историческая граница 0.3: inactive archive сохранялся Full/local history и исключался из runtime/Team; Networking был schema test fixture; FXAA/off и ACES/Reinhard работали. Transform/Color старого Object Inspector меняли preview, авторских игровых сцен и импортера ещё не было. В 0.4 новые game-сцены сохраняются отдельно; прежние окна оставлены как legacy. Известные first-party pins старых этапов обновляются по явному списку совместимости, сторонние конфликты сохраняются; детали актуальной миграции — [graph-format.md](graph-format.md).
+Historical 0.3 boundary: the inactive archive was preserved by Full/local history and excluded from runtime/Team; Networking was a schema test fixture; FXAA/off and ACES/Reinhard worked. Transform/Color in the old Object Inspector changed the preview; authored game scenes and an importer did not yet exist. In 0.4, new game scenes are saved separately; the previous windows remain as legacy. Known first-party pins from older stages are updated through an explicit compatibility list; third-party conflicts are preserved; current migration details are in [graph-format.md](graph-format.md).
 
-## Принято для игрового этапа 0.4
+<a id="принято-для-игрового-этапа-04"></a>
 
-| Решение | Реализация и граница |
+## Accepted for the 0.4 Game Stage
+
+| Decision | Implementation and boundary |
 | --- | --- |
-| Проверочная игра — 3D ARPG-вид, WASD и мышь. | Две отдельные арены с коротким переходом: 20 малых врагов, затем босс. Камера сверху под углом, один melee к курсору, каждый враг получает урон один раз за swing. |
-| Босс имеет тяжёлую атаку с предупреждением. | Windup, отмеченная область и уклонение движением; дополнительных фаз и dash нет. |
-| Этапы и порядок подсистем задаются графом. | Общие фабрики ExecutableSystem, typed resource contracts и проверка before/after/production; новый модуль не требует ветки в executor. Native регистрации требуют сборки. |
-| Play использует копию авторской сцены. | Pause сохраняет копию, Stop её уничтожает; runtime spawn/death не записывается в источник автоматически. |
-| Связанные шаблоны имеют отдельные instance overrides. | Изменение defaults распространяется, локальные Transform/ID/ссылки и явно переопределённые fields сохраняются. |
-| Собственные статические модели, текстуры и простые материалы нужны сейчас. | glTF/GLB, PNG/JPEG и opaque base-color на GPU; skeletons, transparency и полный PBR отложены. |
-| Столкновения блокируют движение, атаки используют области. | Управляемые тела/прямоугольники, без dynamic rigid bodies и navmesh. |
-| Базовый звук исполняется по событиям. | Отдельный audio system и Windows WAV endpoint, один голос; spatial/mixer позже. |
-| Rust Custom сохраняет явно объявленное состояние. | Persistent worker и транзакционные JSON-пакеты; совместимый hot apply сохраняет state, несовместимый требует явного reset/migration. |
-| Самостоятельная игра сначала Windows. | Player-пакет с заранее собранными workers/SPIR-V, без SDK/Rust/DXC на машине игрока. Native editor-код пока физически не исключён из общего executable. |
-| Критерий — 60 FPS, 1080p, до 20 активных врагов на текущем ПК и фиксированном контенте. | Processing и настоящий оконный замер публикуют нагрузку, mean/p95/max и раскрывают scope; unit tests или renderer-only FPS не подменяют проверку готовой игры. |
-| Документация сопровождает изменения. | API/контракты, зачем нужен модуль, данные, реальные действия редактора, проверки и границы описаны в docs. |
+| The verification game has a 3D ARPG view, WASD, and mouse controls. | Two separate arenas with a short transition: 20 small enemies, then a boss. Angled overhead camera, one melee attack toward the cursor, each enemy takes damage once per swing. |
+| The boss has a telegraphed heavy attack. | Windup, a marked area, and dodging through movement; no additional phases or dash. |
+| The graph defines stages and subsystem order. | Shared ExecutableSystem factories, typed resource contracts, and before/after/production checks; a new module requires no branch in the executor. Native registrations require a build. |
+| Play uses a copy of the authored scene. | Pause preserves the copy; Stop destroys it; runtime spawn/death is not automatically written into the source. |
+| Linked templates have separate instance overrides. | Default changes propagate; local Transform/ID/references and explicitly overridden fields are preserved. |
+| Custom static models, textures, and simple materials are needed now. | glTF/GLB, PNG/JPEG, and opaque base-color on the GPU; skeletons, transparency, and full PBR are deferred. |
+| Collisions block movement; attacks use areas. | Controlled bodies/rectangles, without dynamic rigid bodies or navmesh. |
+| Basic audio plays in response to events. | A separate audio system and Windows WAV endpoint, one voice; spatial audio/mixer later. |
+| Rust Custom preserves explicitly declared state. | Persistent worker and transactional JSON packets; compatible hot apply preserves state, while an incompatible change requires explicit reset/migration. |
+| The standalone game targets Windows first. | A Player package with prebuilt workers/SPIR-V, without SDK/Rust/DXC on the player's machine. Native editor code is not yet physically excluded from the shared executable. |
+| The criterion is 60 FPS, 1080p, up to 20 active enemies on the current PC and fixed content. | Processing and real window measurements publish load, mean/p95/max, and disclose scope; unit tests or renderer-only FPS do not substitute for verification of the finished game. |
+| Documentation accompanies changes. | API/contracts, the purpose of each module, data, actual editor actions, checks, and boundaries are described in docs. |
 
-Рабочее допущение: долговременные игровые сохранения не входят в этот этап. Linux, бесшовная streaming-подгрузка, network, temporal AA и физическое исключение неиспользуемого native-кода остаются следующими задачами. Допущение про glTF/GLB и PNG/JPEG выбрано для реализации, пользователь не задавал конкретные форматы отдельно. [next-stage.md](next-stage.md) связывает решения с написанными подсистемами.
-
-
-
-
+Working assumption: long-term game saves are outside this stage. Linux, seamless streaming, networking, temporal AA, and physical exclusion of unused native code remain future tasks. The glTF/GLB and PNG/JPEG assumption was chosen for implementation; the user did not specify particular formats individually. [next-stage.md](next-stage.md) connects the decisions to the implemented subsystems.

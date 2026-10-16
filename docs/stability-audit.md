@@ -1,73 +1,87 @@
-# Функциональность и стабильность 0.4 — 15 октября 2026
+<a id="функциональность-и-стабильность-04--15-октября-2026"></a>
 
-Проверяется существующий Windows-движок: Editor Full/Team, Vulkan, авторские сцены и ресурсы, Custom Rust/HLSL и самостоятельный Player. По результатам замера медленного Custom пользователь дополнительно согласовал перенос симуляции из UI и повторную проверку жизненного цикла. Успешные unit-тесты не считаются доказательством работоспособности каждого окна: дополнительно проверяются файловые операции, фактический GPU-вывод, упаковка и нативные оконные циклы.
+# Functionality and stability 0.4 — October 15, 2026
 
-## Исправления
+[English](stability-audit.md) | [Русский](ru/stability-audit.md) | [Documentation](README.md)
 
-| Проблема | Изменение и проверяемое поведение |
+This audit checks the existing Windows engine: Full/Team Editor, Vulkan, authored scenes and assets, Custom Rust/HLSL, and standalone Player. Following slow-Custom measurements, the user additionally approved moving simulation out of the UI and rechecking lifecycle behavior. Passing unit tests are not treated as proof that every window works: file operations, actual GPU output, packaging, and native window loops are checked as well.
+
+<a id="исправления"></a>
+
+## Fixes
+
+| Problem | Change and verifiable behavior |
 | --- | --- |
-| Сборка Custom могла заменить артефакты основного Cargo workspace перед rustdoc. | Workers используют отдельный `target/custom-workers`, в том числе при заданном `CARGO_TARGET_DIR`. Реальная компиляция проверяет сохранность артефактов внешней сборки. |
-| Медленный Custom выполнялся на UI, а догоняющие tick умножали задержку окна. | Нативные Editor/Player передают GameHost постоянному worker; UI читает завершённые снимки без ожидания. Один tick на оборот позволяет обрабатывать команды между обновлениями. Ввод, Restart, hot apply и отбрасывание устаревших кандидатов проверяются отдельно. |
-| Rust-окно показывало legacy-исполнитель вместо игрового, а без Game-панели Apply не мог завершиться. | Окно подготавливает игровой host в фоне, показывает его экземпляры, ошибки и применённые версии. Reset/migration относятся к действительному игровому кандидату; устаревший текст не применяется через старый отказ. |
-| Экспорт из Library обходил проверки черновика и выполнялся на UI-потоке. | Используется общий асинхронный workflow с guard, прогрессом и отчётом. |
-| Замена Forward/Deferred оставляла настройки удалённых пользовательских pass IDs. | Исчезнувшие назначения очищаются; сохранившиеся авторские controls сохраняются. Undo восстанавливает граф и настройки вместе. |
-| Неисправный внешний HLSL повторно запускал DXC; исправление include не снимало отказ подготовки. | Отказы кешируются по зависимостям, исправленные файлы вызывают новую попытку. Watch захватывается до начала worker, включая случай исправления во время сборки. Сохраняется последний принятый runtime. |
-| Изменение include во время компиляции могло опубликовать SPIR-V под чужим fingerprint. | Зависимости перепроверяются перед публикацией артефакта и после создания pipeline; временные файлы имеют RAII-владение. |
-| Restart сбрасывал GameSession, сохраняя renderer overrides и старую цель камеры. | Клавиша R, HUD и toolbar используют один Host restart: мир, Custom-состояние, команды рендера, звук и цель камеры согласованы. |
-| Ошибка игрового tick повторялась каждый UI-кадр Player. | Симуляция останавливается до явного Restart; последний кадр и обработка окна сохраняются. Успешный рендер очищает только собственную прежнюю ошибку. |
-| Assets синхронно хешировал каталог; поиск ссылок повторно сериализовал весь документ для каждого tile. | Скан выполняется в worker, а обратные ссылки считаются одним обходом документа. Устаревший индекс отбрасывается, новые правки сцены не заменяются старым снимком. |
-| Запись файла ассета сначала удаляла оригинал. | Подготовленный и flushed файл заменяет оригинал через rename, без предварительного unlink. Общий crash recovery проекта этим не добавляется. |
-| Неудачный импорт оставлял файлы и частичный журнал без Undo. | Откатываются только собственные свежие каталог и журнал; существующие файлы/история не удаляются. |
-| Неудачный экспорт Player оставлял частичный пакет и блокировал повтор в ту же папку. | Сборка, проверка пакета и пробный GPU-кадр выполняются в staging. Windows-публикация не заменяет возникшее конкурирующее назначение. Внутренний staging не попадает в индекс Assets. |
-| Старые штатные примеры путали ACES/Reinhard. | Исправлены три файла в `examples`: ACES=1, Reinhard=0. Сохранённые авторские варианты и пользовательский `game-project.json` автоматически не переписываются. |
+| Custom builds could replace main Cargo workspace artifacts before rustdoc. | Workers use a separate `target/custom-workers`, including when `CARGO_TARGET_DIR` is set. Actual compilation checks that outer-build artifacts survive. |
+| Slow Custom ran on the UI, and catch-up ticks multiplied window latency. | Native Editor/Player hand GameHost to a persistent worker; the UI reads completed snapshots without waiting. One tick per iteration allows commands to be handled between updates. Input, Restart, hot apply, and obsolete-candidate rejection are checked separately. |
+| The Rust window showed the legacy executor instead of the game executor, and Apply could not finish without a Game panel. | The window prepares the game host in the background and displays its instances, errors, and applied versions. Reset/migration targets the actual game candidate; obsolete text is not applied through an old rejection. |
+| Library export bypassed draft checks and ran on the UI thread. | The shared asynchronous workflow is used with a guard, progress, and a report. |
+| Replacing Forward/Deferred left settings for removed custom pass IDs. | Disappeared targets are cleared; retained authored controls survive. Undo restores the graph and settings together. |
+| Faulty external HLSL repeatedly invoked DXC; fixing an include did not clear preparation rejection. | Failures are cached by dependencies; repaired files trigger a retry. The watch is captured before worker startup, including a repair during compilation. The last accepted runtime is preserved. |
+| An include change during compilation could publish SPIR-V under another fingerprint. | Dependencies are rechecked before artifact publication and after pipeline creation; temporary files have RAII ownership. |
+| Restart reset GameSession while retaining renderer overrides and the old camera target. | R, HUD, and toolbar use one Host restart: world, Custom state, render commands, audio, and camera target remain consistent. |
+| A game-tick error repeated every Player UI frame. | Simulation stops until an explicit Restart; the last frame and window handling remain available. Successful rendering clears only its own previous error. |
+| Assets hashed the directory synchronously; reference lookup serialized the entire document again for each tile. | Scanning runs in a worker, and back references are computed in one document traversal. An obsolete index is discarded, and new scene edits are not replaced by an old snapshot. |
+| Writing an asset file first deleted the original. | A prepared and flushed file replaces the original through rename, without a preceding unlink. This does not add general project crash recovery. |
+| Failed import left files and a partial journal without Undo. | Only its own fresh directory and journal are rolled back; existing files/history are not deleted. |
+| Failed Player export left a partial package and prevented a retry into the same folder. | Building, package verification, and a trial GPU frame run in staging. Windows publication does not replace a concurrently created destination. Internal staging does not enter the Assets index. |
+| Old standard examples confused ACES/Reinhard. | Three files in `examples` were corrected: ACES=1, Reinhard=0. Saved authored variants and the user's `game-project.json` are not automatically rewritten. |
 
-Точные реализации и ограничения описаны в [GameWorker](game-worker.md), [workflow](editor-workflow.md), [Custom state](custom-state.md), [Assets API](asset-workspace-api.md), [Vulkan](gpu-hlsl.md) и [Player](player.md).
+Exact implementations and limitations are described in [GameWorker](game-worker.md), [workflow](editor-workflow.md), [Custom state](custom-state.md), [Assets API](asset-workspace-api.md), [Vulkan](gpu-hlsl.md), and [Player](player.md).
 
-## Покрытие
+<a id="покрытие"></a>
 
-| Возможность | Проверка |
+## Coverage
+
+| Capability | Verification |
 | --- | --- |
-| Object/ECS, модульные контракты, порядок систем, lifecycle и rollback | Core/unit, CPU self-check, integration, Game parity по 180 действиям и GPU-пикселям |
-| Добавление, соединение, удаление, вложенность, pan/zoom и history графа | Реальные события egui, runtime render, сохранность host/Custom при перемещении узлов |
-| Forward/Deferred, SSAO, tone mapping, FXAA, encoding, Custom raster/compute | Vulkan unit/integration, shader reflection, фактические пиксели, invalid candidate и include recovery |
-| Rust text/graph, компиляция, последний рабочий код, schema reset/migration | Custom/unit, игровые slots, UI Apply без открытого Game, runtime/Player precompiled workers |
-| File/New/Open/Save/Save As/Recent, защита правок, горячие клавиши, окна | Workflow unit + `--editor-ui-check`, перемещённые ресурсы и экспорт |
-| Scene/Hierarchy/Inspector, выбор и G/R/S, snapping, world/local, Undo/Escape | Scene unit + `--scene-assets-check`, реальные pointer gestures и Vulkan |
-| Assets, импорт, ID, ссылки, перенос/переименование/удаление, корзина | Project-tools/unit + acceptance, файловый Undo/Redo, отказ и восстановление |
-| Сцены, шаблоны/overrides, Play/Pause/Stop, ввод/бой/предупреждение босса | Core/Game/UI unit + две арены, поражение, Restart и победа через GameHost |
-| Звук и игровые события | WAV/события/consumption через GameHost; субъективная слышимость и настройки устройства не измеряются |
-| Full/Team ограничения и отдельный Player | Source inventory, frozen blueprint, SDK, реальные экспорты и запуск precompiled payload |
-| Отзывчивость и скорость | Нативные Editor/Player benchmark, отдельные CPU/GPU-readback и UI-cadence показатели; без обещания FPS для другого контента |
+| Object/ECS, module contracts, system order, lifecycle, and rollback | Core/unit, CPU self-check, integration, Game parity across 180 actions and GPU pixels |
+| Graph addition, connection, deletion, nesting, pan/zoom, and history | Actual egui events, runtime rendering, host/Custom preservation while moving nodes |
+| Forward/Deferred, SSAO, tone mapping, FXAA, encoding, Custom raster/compute | Vulkan unit/integration, shader reflection, actual pixels, invalid candidate, and include recovery |
+| Rust text/graph, compilation, last-good code, schema reset/migration | Custom/unit, game slots, UI Apply without an open Game, runtime/Player precompiled workers |
+| File/New/Open/Save/Save As/Recent, edit protection, shortcuts, windows | Workflow unit + `--editor-ui-check`, moved assets, and export |
+| Scene/Hierarchy/Inspector, selection and G/R/S, snapping, world/local, Undo/Escape | Scene unit + `--scene-assets-check`, actual pointer gestures, and Vulkan |
+| Assets, import, IDs, references, move/rename/delete, trash | Project-tools/unit + acceptance, file Undo/Redo, rejection, and restoration |
+| Scenes, prefabs/overrides, Play/Pause/Stop, input/combat/boss warning | Core/Game/UI unit + two arenas, defeat, Restart, and victory through GameHost |
+| Audio and game events | WAV/events/consumption through GameHost; subjective audibility and device settings are not measured |
+| Full/Team restrictions and separate Player | Source inventory, frozen blueprint, SDK, actual exports, and precompiled payload launch |
+| Responsiveness and speed | Native Editor/Player benchmarks, separate CPU/GPU-readback and UI-cadence figures; no FPS promise for other content |
 
-## Результаты этого прогона
+<a id="результаты-этого-прогона"></a>
 
-Проверка выполнена на Windows, NVIDIA GeForce RTX 4080 SUPER, мониторе 144 Гц. Авторский `game-project.json` сохранён побайтно: SHA-256 `BF2D5D86FFB51241CFF34E9247C51890145FC0EFD6418A6EB5DED2BDE2B2DC6B`.
+## Results of this run
 
-* Общий последовательный прогон: **308 unit-тестов**, без ошибок. Дополнительно прошли отдельная UI-проверка Custom 80 мс и новый тест завершения владельцев после закрытия окна: всего **310 различных unit-сценариев**. Целевой повтор трёх worker/lifecycle тестов также прошёл. Диагностика прежнего синхронного catch-up запускается отдельно и не считается обязательным unit-сценарием.
-* Все шесть наборов doc-tests, Clippy для workspace/all-targets с `-D warnings`, rustdoc с `-D warnings` и release build прошли.
-* На окончательном EXE прошли CPU, integration, settings, editor workflow, Scene/Assets, Game и GameWorker CLI acceptance. Все 12 штатных JSON-примеров проверены. Full даёт доступ к Engine, Team его не даёт; упакованный Player прошёл `--game-check` с пустым `PATH` и заведомо отсутствующим DXC, используя precompiled workers/SPIR-V.
-* Прежний синхронный диагностический `step(0.25)` с Custom 80 мс занимал **1281,28 мс** за 15 tick. В окончательной worker-проверке 256 чтений снимка и три отправки ввода во время настоящего медленного Custom заняли **0,0499 мс** суммарно. p95 одного `latest` — **0,0007 мс**, ввода — **0,0043 мс**; неблокирующий Drop — **0,0774 мс**. Эти цифры описывают мост UI/worker, не FPS и не ускорение самого алгоритма.
-* Нативный Editor: по 90 реальных pan-кадров на Stop/Play, документ и идентичности Custom сохранены, симуляция в Play продвигалась, ошибок нет. При Play UI handler: median **1,07 мс**, p95 **1,86 мс**, max **3,46 мс**. На Stop: median **0,90 мс**, p95 **1,31 мс**. В отличие от старого baseline новый процесс был без фокуса; сравнение процентов ускорения не заявляется. Видимость ОС не определена, фактическая задержка физической мыши/экрана не измерена.
-* Нативный упакованный Player: **120 разных завершённых кадров**, 1080p, 20 живых врагов, без ошибок; **60,05 новых игровых кадров/с** и **141,00 UI callback/с**. p95 игрового периода **18,18 мс**, max **20,80 мс**. Строгий критерий `mean/p95 ≤ 16,667 мс` **не выполнен** (`target_met=false`): номинальная частота около 60 Гц достигнута, равномерность кадров остаётся ограничением. Старые 105 кадров/с синхронного Player и новый UI FPS напрямую не сравниваются: теперь игровое исполнение ограничено фиксированными обновлениями, повтор старых пикселей не считается новым кадром.
+Verification ran on Windows, NVIDIA GeForce RTX 4080 SUPER, and a 144 Hz monitor. The authored `game-project.json` was preserved byte for byte: SHA-256 `BF2D5D86FFB51241CFF34E9247C51890145FC0EFD6418A6EB5DED2BDE2B2DC6B`.
 
-Логи и JSON находятся в рабочем проекте `outputs/full-functional-audit/`: `serial-workspace-tests.log`, `isolated-slow-ui.log`, `final-worker-lifecycle-tests.log`, `final-doc-tests.log`, `final-clippy.log`, `final-rustdoc.log`, `final-*.log`, `final-worker/game-worker-report.json`, `editor-native-after/report.json`, `player-native-after/native-frame-report.json`. Это результаты на конкретном контенте и ПК, без обещания скорости для любых моделей или Rust-кода.
+* The shared sequential run: **308 unit tests**, no errors. An additional isolated UI check with 80 ms Custom and a new owner-completion test after window close also passed: **310 distinct unit scenarios** in total. A focused repeat of three worker/lifecycle tests passed too. Diagnostics of the former synchronous catch-up path run separately and are not counted as a mandatory unit scenario.
+* All six doc-test suites, workspace/all-targets Clippy with `-D warnings`, rustdoc with `-D warnings`, and the release build passed.
+* CPU, integration, settings, editor workflow, Scene/Assets, Game, and GameWorker CLI acceptance passed on the final EXE. All 12 standard JSON examples were checked. Full grants Engine access; Team does not; packaged Player passed `--game-check` with an empty `PATH` and DXC deliberately absent, using precompiled workers/SPIR-V.
+* The previous synchronous diagnostic `step(0.25)` with 80 ms Custom took **1281.28 ms** for 15 ticks. In the final worker check, 256 snapshot reads and three input submissions during actual slow Custom took **0.0499 ms** in total. A single `latest` had p95 **0.0007 ms**, input **0.0043 ms**; nonblocking Drop took **0.0774 ms**. These figures describe the UI/worker bridge, not FPS or acceleration of the algorithm itself.
+* Native Editor: 90 actual pan frames each in Stop/Play; the document and Custom identities were preserved, simulation advanced in Play, and there were no errors. In Play, UI handler median was **1.07 ms**, p95 **1.86 ms**, max **3.46 ms**. In Stop: median **0.90 ms**, p95 **1.31 ms**. Unlike the old baseline, the new process was unfocused; no percentage speedup is claimed. OS visibility was undetermined, and actual physical mouse/screen latency was not measured.
+* Native packaged Player: **120 distinct completed frames**, 1080p, 20 living enemies, no errors; **60.05 new game frames/s** and **141.00 UI callbacks/s**. Game-period p95 was **18.18 ms**, max **20.80 ms**. The strict `mean/p95 ≤ 16.667 ms` criterion was **not met** (`target_met=false`): a nominal rate near 60 Hz was reached, while frame consistency remains a limitation. The old synchronous Player's 105 frames/s and the new UI FPS cannot be compared directly: game execution is now limited by fixed updates, and repeating old pixels does not count as a new frame.
 
-## Повторение
+Logs and JSON are in the working project's `outputs/full-functional-audit/`: `serial-workspace-tests.log`, `isolated-slow-ui.log`, `final-worker-lifecycle-tests.log`, `final-doc-tests.log`, `final-clippy.log`, `final-rustdoc.log`, `final-*.log`, `final-worker/game-worker-report.json`, `editor-native-after/report.json`, `player-native-after/native-frame-report.json`. These are results for specific content and a specific PC, without a performance promise for arbitrary models or Rust code.
+
+<a id="повторение"></a>
+
+## Reproduction
 
 ```powershell
 .\verify.ps1
-# Дополнительно открыть настоящие окна и измерить оконный цикл:
+# Also open real windows and measure the window loop:
 .\verify.ps1 -NativeBenchmarks
 ```
 
-Скрипт использует закреплённые установленные инструменты и offline Cargo cache. Восстановление инструментов и зависимостей запускается отдельно через `scripts/bootstrap.ps1 -Restore`. Общие unit-тесты запускаются последовательно: несколько сценариев используют общий Cargo cache, GPU и жёсткие сроки исполнения. Проверка UI с Custom 80 мс выполняется обязательным отдельным этапом с `--ignored --exact`, сохраняя Play, hot apply и проверки задержек. При параллельной подготовке медленные fixtures превышали рабочий timeout Custom 150 мс из-за планирования ОС; увеличение production timeout для получения зелёного теста не делалось. Отдельный timeout-сценарий проверяет остановку и восстановление.
+The script uses pinned installed tools and an offline Cargo cache. Tool and dependency restoration runs separately through `scripts/bootstrap.ps1 -Restore`. Shared unit tests run sequentially: several scenarios use a shared Cargo cache, GPU, and strict execution deadlines. The UI check with 80 ms Custom runs as a mandatory separate stage with `--ignored --exact`, retaining Play, hot apply, and latency checks. During parallel preparation, slow fixtures exceeded the working Custom timeout of 150 ms because of OS scheduling; production timeout was not increased to obtain a green test. A separate timeout scenario checks stopping and recovery.
 
-Doc-tests, Clippy и rustdoc проверяются отдельно; затем CPU, integration, settings, game, editor workflow, Scene/Assets и GameWorker acceptance. Нативные замеры требуют доступного рабочего стола. Они могут записать Recent в личные настройки выбранного Full-пакета.
+Doc-tests, Clippy, and rustdoc are checked separately; then CPU, integration, settings, game, editor workflow, Scene/Assets, and GameWorker acceptance run. Native measurements require an available desktop. They may write Recent into the selected Full package's personal settings.
 
-Для аудита используется один Git workspace. Исходная версия сохранена коммитом `6c16533c8d5f2531ad7f4aa5eec5f579e57c785b`; исправления идут последующими локальными коммитами. Build/cache/отчёты и скачиваемые DXC binaries исключены из Git, закреплённые версии и лицензии сохранены. Тестовые fixtures и Full/Team/Player export проверяют функциональность и не являются резервными копиями исходного проекта.
+The audit uses one Git workspace. The original version is retained in commit `6c16533c8d5f2531ad7f4aa5eec5f579e57c785b`; fixes follow in subsequent local commits. Build/cache/reports and downloadable DXC binaries are excluded from Git; pinned versions and licenses are retained. Test fixtures and Full/Team/Player exports verify functionality and are not backups of the source project.
 
-## Границы вывода
+<a id="границы-вывода"></a>
 
-Этот прогон не доказывает отсутствие всех возможных ошибок. Проверяется конкретный ПК и конечный набор сценариев. Нативные Windows-диалоги имеют проверки ABI/отмены и workflow, но выбор каждого файла человеком в реальном COM-окне автоматически не проверяется. Новая установка Windows/драйверов/инструментов на другой машине, Linux и субъективная задержка экрана не проверены.
+## Limits of the conclusions
 
-Остаются ранее заявленные ограничения: синхронный GPU readback и компиляция внешнего HLSL при обновлении, одноголосный PCM WAV, ограниченное визуальное подмножество Rust, отсутствие общего восстановления файловой транзакции после аварийного завершения и недоверенного sandbox для Custom. Отменённый read-only scan может завершиться в фоне, его устаревший результат не принимается. Это ограничения текущей реализации, а не закрытые этим аудитом функции.
+This run does not prove the absence of every possible error. It checks a specific PC and a finite set of scenarios. Native Windows dialogs have ABI/cancellation and workflow checks, but a human selecting each file in an actual COM window is not automatically checked. A fresh Windows/driver/tool installation on another machine, Linux, and subjective screen latency were not checked.
+
+Previously stated limitations remain: synchronous GPU readback and external HLSL compilation on update, single-voice PCM WAV, a limited visual subset of Rust, no general file-transaction recovery after a crash, and no sandbox for untrusted Custom. A cancelled read-only scan may finish in the background; its obsolete result is not accepted. These are limitations of the current implementation, not features completed by this audit.

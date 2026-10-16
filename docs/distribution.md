@@ -1,28 +1,34 @@
-# Full, Team и отдельный Player
+<a id="full-team-и-отдельный-player"></a>
 
-Full source package предназначен автору движка; Team — автору игры с выбранной архитектурой. Обе поставки содержат редактор. Player — отдельный runtime экспорт без редакторских окон, SDK и компиляторов; его формат и запуск описаны в [player.md](player.md). Доступность исходников отделена от доступности компилятора.
+# Full, Team and a separate Player
 
-.module-engine-package.json содержит schema_version:1, engine_version:0.4.0, profile, files, module_sources, sdk_files, backend_files и для Team gameplay_source_ids/blueprint_hash. files — relative path → SHA-256 baseline native источников. Проверяются подключённые узлы и engine.enabled_modules.
+[English](distribution.md) | [Русский](ru/distribution.md) | [Documentation](README.md)
 
-Engine доступен только Full с полным Cargo/native Rust/HLSL inventory и совпадающей workspace.package.version. Два Cargo/lib файла не заменяют source package. Изменённые исходники отмечаются modified и остаются доступными. Отсутствие DXC/Rust диагностируется отдельно; docs/examples/tools не определяют SourceStatus.available. --seal-source-project <folder> обновляет baseline сознательно; экспорт делает это сам.
+The Full source package is intended for the engine author; Team is for the game author with a selected architecture. Both deliveries contain the editor. Player is a separate runtime export without editor windows, SDK or compilers; its format and launch are described in [player.md](player.md). Source availability is separate from compiler availability.
 
-Compile-time original workspace не выдаёт авторский доступ. Выбирается marker около executable/проекта или текущего каталога. Team marker имеет приоритет и отвергает --profile full. .sdk без marker отклоняется без заимствования исходников исходной установки.
+.module-engine-package.json contains schema_version:1, engine_version:0.4.0, profile, files, module_sources, sdk_files, backend_files and, for Team, gameplay_source_ids/blueprint_hash. files is a relative path → SHA-256 baseline of native sources. Connected nodes and engine.enabled_modules are checked.
+
+Engine is available only to Full with a complete Cargo/native Rust/HLSL inventory and matching workspace.package.version. Two Cargo/lib files do not constitute a source package. Changed sources are marked modified and remain available. Missing DXC/Rust is diagnosed separately; docs/examples/tools do not determine SourceStatus.available. --seal-source-project <folder> deliberately updates the baseline; export does this itself.
+
+The compile-time original workspace does not grant author access. A marker near the executable/project or in the current directory is selected. The Team marker takes priority and rejects --profile full. An .sdk without a marker is rejected without borrowing sources from the original installation.
 
 ## Frozen blueprint
 
-Hash фиксирует граф Engine, bindings/source IDs, exposure/ranges/варианты, shaders, module pins, граф исполнения игровых систем и Engine Rust. Разрешённый Rust — подключённые custom.rust.update исходники, включая игровые системы; legacy scalar speed принадлежит Engine. Source key set и привязки неизменны. Позиции/label обычных Graph nodes и code_layout/code_layout_keys gameplay не входят в hash. В ExecutionGraph нет координат: его стадии, узлы, параметры, after и bindings заморожены для Team. Авторские сцены и активные шаблоны остаются редактируемыми игровыми данными.
+The hash pins the Engine graph, bindings/source IDs, exposure/ranges/variants, shaders, module pins, game-system execution graph and Engine Rust. Allowed Rust consists of connected custom.rust.update sources, including game systems; legacy scalar speed belongs to Engine. The source key set and bindings are immutable. Positions/labels of ordinary Graph nodes and gameplay code_layout/code_layout_keys are excluded from the hash. ExecutionGraph has no coordinates: its stages, nodes, parameters, after and bindings are frozen for Team. Authored scenes and active templates remain editable game data.
 
-Project settings, свойства и gameplay текст редактируются в пределах schema. Core проверяет ranges, участие и команды; UI/CLI проверяют blueprint при загрузке/применении/сохранении. Локальный detach сохраняет archive для undo/attach, но runtime его не видит. Team и Player используют общий runtime projection: удаляют неподключённые рабочие узлы рекурсивно, сохраняют обязательные interface mappings вложенных графов и все запланированные игровые системы. Подключённые выключенные проходы остаются доступными для разрешённого переключения. Неиспользуемые рабочие Rust/HLSL sources исключаются до поиска include-файлов; Team сохраняет объявленную библиотеку игровых ассетов, а Player выбирает ресурсы своей игры.
+Project settings, properties and gameplay text are editable within the schema. Core checks ranges, participation and commands; UI/CLI check the blueprint on load/apply/save. A local detach preserves the archive for undo/attach, but runtime cannot see it. Team and Player use a shared runtime projection: they recursively remove unconnected working nodes, preserve required interface mappings of nested graphs and all scheduled game systems. Connected disabled passes remain available for allowed switching. Unused working Rust/HLSL sources are excluded before searching for include files; Team preserves the declared game-asset library, while Player selects resources for its game.
 
-Исходный документ проверяется до projection. Published Engine profile, его архивный blueprint, enabled modules, module versions и exact locks сохраняются без перепубликации. Team stamp закрепляет полученный рабочий граф. New Project → Inherit Current наследует именно его и его source maps: архивные узлы профиля не возвращаются в новый рабочий проект. Изменение состава Engine остаётся недоступным Team.
+The source document is validated before projection. The published Engine profile, its archived blueprint, enabled modules, module versions and exact locks are preserved without republication. The Team stamp pins the resulting working graph. New Project → Inherit Current inherits that graph and its source maps: archived profile nodes do not return to the new working project. Changing Engine composition remains unavailable to Team.
 
-Backend pins строго проверяют executable, tool manifest, DXC/DLL/лицензии, assets/gpu и рекурсивные literal HLSL includes, включая заголовки вне assets. Обычные game assets не заморожены этой картой: их AssetManifest задаёт paths/hashes.
+Backend pins strictly check the executable, tool manifest, DXC/DLL/licenses, assets/gpu and recursive literal HLSL includes, including headers outside assets. Ordinary game assets are not frozen by this map: their AssetManifest defines paths/hashes.
 
-Это рабочая политика редактирования, не security sandbox и не криптографически подписанная поставка. Пользователь с доступом к файлам может модифицировать программу; Custom Rust имеет обычные права ОС.
+This is a working editing policy, not a security sandbox or a cryptographically signed delivery. A user with file access can modify the program; Custom Rust has ordinary OS privileges.
 
-## Экспорт и SDK
+<a id="экспорт-и-sdk"></a>
 
-Full экспорт — весь workspace с новым manifest. Team содержит:
+## Export and SDK
+
+Full export is the entire workspace with a new manifest. Team contains:
 
 ~~~text
 ModuleEngine.exe
@@ -38,9 +44,9 @@ tools/dxc/... DLL + licenses
 .sdk/crates/engine-core/...
 ~~~
 
-.sdk содержит Core контракт для compiled Custom, без native editor/Vulkan authoring пакетов. SDK lock нормализуется из полного Cargo.lock и проверяется как подмножество тех же name/version/source. Compiler берёт tools/cache из package root, sources из .sdk. Неполный SDK даёт ошибку без fallback к original E. Явный Team профиль на Full также требует собственного SDK для compiled Custom.
+.sdk contains the Core contract for compiled Custom, without native editor/Vulkan authoring packages. The SDK lock is normalized from the full Cargo.lock and checked as a subset with the same name/version/source. The compiler takes tools/cache from the package root and sources from .sdk. An incomplete SDK produces an error without falling back to original E. An explicit Team profile on Full also requires its own SDK for compiled Custom.
 
-Экспорт scoped к выбранному Full source/resource root; registered assets разрешаются относительно открытого JSON. Нельзя писать внутрь копируемых деревьев/поверх непустого каталога. project.json, marker, executable, .sdk и cache пути зарезервированы. Неполный результат при ошибке сохраняется для диагностики.
+Export is scoped to the selected Full source/resource root; registered assets are resolved relative to the open JSON. Writing inside copied trees/over a nonempty directory is forbidden. project.json, marker, executable, .sdk and cache paths are reserved. An incomplete result is retained on error for diagnostics.
 
 ~~~powershell
 .\scripts\bootstrap.ps1 -Json
@@ -48,9 +54,9 @@ tools/dxc/... DLL + licenses
 .\ModuleEngine.exe
 ~~~
 
-Restore выбирает Cargo.toml Full либо .sdk/Cargo.toml Team. Portable Rust лежит в .tools, dependency cache в .work/cargo-home. Требуются host MSVC/Windows SDK и GPU driver; их script не устанавливает. Restore допускает сеть; полного offline toolchain SDK нет.
+Restore selects Full Cargo.toml or Team .sdk/Cargo.toml. Portable Rust lives in .tools, and the dependency cache in .work/cargo-home. Host MSVC/Windows SDK and a GPU driver are required; the script does not install them. Restore permits network access; there is no complete offline toolchain SDK.
 
 
 
 
-Исторически проверено в 0.3: автоматический Full/Team export с manifest, relocated Team execution и чтение relative game asset рабочим Rust worker; реальные source/profile случаи complete, modified, missing native/tool, Team policy и blueprint отказ. После первого отказа sandbox DNS повторный сетевой Restore с разрешённым доступом скачал 13 закреплённых Cargo-зависимостей в собственный новый Team-кеш. Затем пакет с очищенными CARGO_HOME/CARGO_TARGET_DIR собрал Custom SDK и отрендерил сцену. Это проверка загрузки зависимостей с уже установленными Rust/MSVC/драйвером, а не холодной установки всей toolchain или полноценного offline SDK. Результаты нового игрового 0.4 этапа публикуются отдельно в [Player](player.md) и [game verification](game-verification.md).
+Historically verified in 0.3: automated Full/Team export with a manifest, relocated Team execution and reading a relative game asset through a working Rust worker; real source/profile cases for complete, modified, missing native/tool, Team policy and blueprint rejection. After the first sandbox DNS failure, a repeated network Restore with authorized access downloaded 13 pinned Cargo dependencies into its own new Team cache. The package then built Custom SDK and rendered the scene with CARGO_HOME/CARGO_TARGET_DIR cleared. This checks dependency downloads with Rust/MSVC/driver already installed, not a cold installation of the whole toolchain or a complete offline SDK. Results of the new 0.4 game stage are published separately in [Player](player.md) and [game verification](game-verification.md).

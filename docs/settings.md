@@ -1,10 +1,14 @@
-# Настройки Engine и Project
+<a id="настройки-engine-и-project"></a>
 
-EngineConfiguration включает feature-модули и задаёт разрешённые Project controls. ProjectConfiguration хранит значения, ready variants и условия. PropertyStore хранит module-contributed данные отдельно от графа архитектуры.
+# Engine and Project settings
 
-В Project Settings измените exposure и выберите ACES/Reinhard либо FXAA/off. Это реальные GPU варианты. Условия по времени/параметру выбирают готовый вариант; первое совпавшее правило группы имеет приоритет, иначе используется selection/default. Отсутствующий вариант даёт ошибку без молчаливой замены.
+[English](settings.md) | [Русский](ru/settings.md) | [Documentation](README.md)
 
-В прежнем демонстрационном project.json выберите объект 1 в Object Tree. Legacy Object Inspector показывает game.motion.speed компонента game.motion. Сохранённое значение читает его compiled controller; это отдельный пример typed PropertyStore, не игровой контроллер нового game-project.json:
+EngineConfiguration enables feature modules and defines the allowed Project controls. ProjectConfiguration stores values, ready variants and conditions. PropertyStore stores module-contributed data separately from the architecture graph.
+
+In Project Settings, change exposure and select ACES/Reinhard or FXAA/off. These are real GPU variants. Time/parameter conditions select a ready variant; the first matching rule in a group takes priority, otherwise selection/default is used. A missing variant produces an error without a silent fallback.
+
+In the previous demo project.json, select object 1 in Object Tree. The Legacy Object Inspector shows game.motion.speed of the game.motion component. Its compiled controller reads the saved value; this is a separate typed PropertyStore example, not the game controller of the new game-project.json:
 
 ~~~rust
 if let Some(speed) = ctx.component_property(1, "game.motion", "game.motion.speed")
@@ -14,24 +18,24 @@ if let Some(speed) = ctx.component_property(1, "game.motion", "game.motion.speed
 }
 ~~~
 
-Другие объекты не получают поле из-за одного установленного descriptor. Attach добавляет участие; Detach архивирует значения. Отключение feature-модуля убирает вклад из активных views/runtime, сохраняя данные для восстановления. Archive входит в Full save/export и local history, исключается из новой Team поставки.
+Other objects do not receive the field merely because a descriptor is installed. Attach adds participation; Detach archives values. Disabling a feature module removes its contribution from active views/runtime while preserving data for restoration. The archive is included in Full save/export and local history, and excluded from a new Team delivery.
 
-В legacy PropertyStore persistent values привязаны к начальным объектам demo, а Transform/Color старого Object Inspector меняют live preview. Для сохраняемых игровых сцен используйте Game / Scene: Transform/Color, components, references, prefab и overrides записываются в game.scenes. Новые объекты создаются в этом авторском окне; runtime spawn во время Play не переносится в источник автоматически. Настройки actor/health/melee нового примера принадлежат этим компонентам, без legacy Scalar-цепочки.
+In the legacy PropertyStore, persistent values are bound to the demo's initial objects, while Transform/Color in the old Object Inspector change the live preview. For saved game scenes, use Game / Scene: Transform/Color, components, references, prefab and overrides are written to game.scenes. New objects are created in this authoring window; runtime spawns during Play are not transferred to the source automatically. Actor/health/melee settings in the new example belong to those components, without the legacy Scalar chain.
 
-PropertySchema содержит namespaced id, label, scope, value_type, default, requires_modules/components. Scope: Global, Module, Object, Component {component}. Типы: конечный Number с включительным min/max, Boolean, Enum и Text с лимитом UTF-8 bytes. Видимость зависит от actual active modules/component participation.
+PropertySchema contains a namespaced id, label, scope, value_type, default, requires_modules/components. Scope: Global, Module, Object, Component {component}. Types: finite Number with inclusive min/max, Boolean, Enum and Text with a UTF-8 byte limit. Visibility depends on the actual active modules/component participation.
 
-Global/Module поля редактируются в Project Settings; Object/Component фильтруются по выбранному объекту. resolved_properties подставляет defaults; archive не передаётся в ScriptContext. ctx.parameter/property/component_property и ctx.properties.global/modules читают активные resolved values.
+Global/Module fields are edited in Project Settings; Object/Component fields are filtered by the selected object. resolved_properties supplies defaults; the archive is not passed to ScriptContext. ctx.parameter/property/component_property and ctx.properties.global/modules read active resolved values.
 
-Engine Exposure связывает exposed numeric scalar с pass ID/name/range. VariantGroup содержит ready варианты разрешённых RenderCommand. Состав/порядок вариантов задаёт Engine; Project выбирает варианты/условия. Текущая renderer parameter граница числовая; Boolean/Enum choices pipeline представлены ready variants.
+Engine Exposure binds an exposed numeric scalar to a pass ID/name/range. VariantGroup contains ready variants of allowed RenderCommand. Engine defines the contents/order of variants; Project selects variants/conditions. The current renderer parameter boundary is numeric; Boolean/Enum pipeline choices are represented by ready variants.
 
-Compiled команды проверяются той же policy: необъявленный target, out-of-range и запрещённый pass отклоняются до изменения состояния. Legacy schema1/2 читается; GUI/Team инициализирует новую policy. Team требует initialized:true.
+Compiled commands are checked against the same policy: an undeclared target, out-of-range value or forbidden pass is rejected before state changes. Legacy schema1/2 is read; GUI/Team initializes the new policy. Team requires initialized:true.
 
-Networking schema есть только в тестах. Этот механизм позволяет модулю внести собственные поля; он не означает готовой сетевой подсистемы.
+The Networking schema exists only in tests. This mechanism lets a module contribute its own fields; it does not mean a networking subsystem is ready.
 
-## Компоненты игрового маршрута 0.4
+<a id="компоненты-игрового-маршрута-04"></a>
 
-SystemDescriptor.components объявляет вклад подключённой игровой системы. Нормальный инспектор фильтрует по активному модулю и наличию компонента у объекта; отдельный Advanced JSON показывает сохранённый авторский архив. Игра получает только активные компоненты, а Team/Player экспорт подготавливает такую же копию. Структура полей текущей формы берётся из JSON-значений: полноценные enum/range/help schemas игровых компонентов ещё не предоставлены всем native-модулям.
+## Components in the 0.4 game route
 
-Шаблон хранит defaults; индивидуальная правка наследованного поля записывается отдельным dot-path override. Правка defaults действует на остальные экземпляры. Порядок систем, bindings, after и список подключённых модулей принадлежат Engine и заморожены для Team. Подробности и кнопки — [editor-game.md](editor-game.md), формат данных — [scenes.md](scenes.md).
+SystemDescriptor.components declares the contribution of a connected game system. The normal inspector filters by active module and whether the object has the component; a separate Advanced JSON view shows the saved authored archive. The game receives only active components, and Team/Player export prepares the same copy. The current form's field structure comes from JSON values: complete enum/range/help schemas for game components are not yet provided by every native module.
 
-
+A template stores defaults; an individual edit to an inherited field is recorded as a separate dot-path override. Editing defaults affects other instances. System order, bindings, after and the list of connected modules belong to Engine and are frozen for Team. Details and buttons: [editor-game.md](editor-game.md); data format: [scenes.md](scenes.md).

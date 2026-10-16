@@ -1,31 +1,49 @@
-# Работа над ModuleEngine
+<a id="работа-над-moduleengine"></a>
 
-## Цели и точка входа
+# Working on ModuleEngine
 
-Начните с [текущего состояния](docs/current-status.md), затем читайте документы затронутого контракта. [Архитектура](docs/architecture.md) описывает границы; [решения](docs/decisions.md) отделяют принятый объём от допущений. Исторический отчёт подтверждает только указанный в нём snapshot.
+[English](AGENTS.md) | [Русский](docs/ru/agent-guide.md) | [Documentation](docs/README.md)
 
-ModuleEngine — модульный Rust-движок и нативный редактор. Core хранит общие контракты и ECS; игровые правила и конкретные примеры принадлежат отдельным пакетам. Engine задаёт архитектуру и разрешённые изменения Project. Отдельный Player исполняет выбранную игру без редактора и компиляторов.
+<a id="цели-и-точка-входа"></a>
 
-[Открытые вопросы](docs/questions.md) — перечень будущих решений, а не разрешение включать их в каждую задачу. Не добавляйте новую подсистему, миграцию, зависимость или изменение пользовательского поведения без связи с текущей целью. Для существенного изменения кратко зафиксируйте ожидаемое поведение, нецели и критерий приёмки; для малого исправления используйте его воспроизведение.
+## Goals and entry point
 
-## Рабочие данные
+Start with the [current status](docs/current-status.md), then read the documents covering the affected contract. The [architecture](docs/architecture.md) defines boundaries; [decisions](docs/decisions.md) separate accepted scope from assumptions. A historical report provides evidence only for its stated snapshot.
 
-- Продолжайте работу в существующем checkout. Не создавайте новые development copies, worktrees или клоны без соответствующего запроса. Full/Team/Player acceptance-пакеты являются проверочными поставками.
-- Перед правкой выясните исходный diff. Сохраняйте не относящиеся к задаче пользовательские изменения, авторские JSON, ресурсы, layout, Recent, Engine binding и SDK metadata. Используйте отдельные fixtures для разрушающих сценариев; не подменяйте ими авторский проект.
-- Промежуточные материалы храните в `work/`, готовые сборки и отчёты — в `outputs/`. Не очищайте общие caches и не заменяйте опубликованный EXE ради подготовки проверки.
+ModuleEngine is a modular Rust engine and native editor. Core owns shared contracts and ECS; game rules and specific examples belong to separate packages. Engine defines the architecture and the changes permitted in Project. A separate Player runs the selected game without the editor or compilers.
 
-## Инварианты изменений
+[Open questions](docs/questions.md) list future decisions; they do not authorize adding them to every task. Do not add a subsystem, migration, dependency, or user-visible behavior change unrelated to the current goal. For a substantial change, briefly record the expected behavior, non-goals, and acceptance criterion; for a small fix, use its reproduction case.
 
-- Авторский документ и Play-копия разделены. Отказ кандидата сохраняет last-good; Cancel и ошибка публикации сохраняют прежние авторские данные и состояние. Допустимые recovery-файлы учитывайте явно.
-- Сохраняйте точные JSON-ключи, unknown payload, null, стабильные ID и чужие namespaces. No-op Apply не создаёт local overrides и не прекращает наследование prefab.
-- Различайте authored значения и effective defaults, ComponentSchema и PropertySchema, неизвестные live IDs и известное пустое множество. Используйте общие Core-правила ownership и доступности; учитывайте exact owner/schema/SDK pins. См. [схемы](docs/component-schemas.md) и [asset API](docs/asset-workspace-api.md).
-- Не обходите ограничения Full/Team или проверку исходников ради зелёного теста. Выбранные native features, рабочий граф и ресурсы Player должны соответствовать проекту; отсутствие необязательного модуля не активирует его неявно.
-- Переиспользуемый compiled code не означает общее состояние: экземпляры Custom имеют независимые state и worker. Освобождайте только принадлежащие операции процессы и файлы. См. [Custom store](docs/custom-program-store.md).
+<a id="рабочие-данные"></a>
 
-## Проверки и результат
+## Working data
 
-Выбирайте проверки по затронутым контрактам: UI, сохранение, runtime и экспорт могут зависеть от одной schema. [Реестр и маршруты проверок](docs/verification.md) описывают явные профили `quick`, `contracts`, `native`, `native-tools`, `package` и сохранённые legacy-вызовы `verify.ps1`/`verify.sh` без аргументов. Сначала проверьте `--plan`; scope профиля не равен полной приёмке. Выполняйте native/GPU/timing проверки последовательно, без конкурирующих сборок. Не повторяйте полный suite после каждого малого шага без нового основания.
+- Continue in the existing checkout. Do not create development copies, worktrees, or clones without a corresponding request. Full/Team/Player acceptance packages are verification deliveries.
+- Establish the initial diff before editing. Preserve unrelated user changes, authored JSON, assets, layout, Recent, Engine bindings, and SDK metadata. Use separate fixtures for destructive scenarios; do not replace the authored project with them.
+- Store intermediate material in `work/`, and completed builds and reports in `outputs/`. Do not clear shared caches or replace a published EXE to prepare a check.
 
-Существенные изменения до завершения передавайте [независимому reviewer](docs/review.md): отдельному агенту с чистым контекстом или человеку, который не писал реализацию. Он проверяет цель, diff, новые файлы и доказательства; автор исправляет замечания и повторяет проверки, reviewer проверяет исправление. Привязывайте заключение к HEAD и source digest с tracked/untracked файлами; после изменения исходников повторяйте просмотр изменившегося объёма. Собственное ревью автора или успешный snapshot check не заменяют независимое заключение. Если reviewer недоступен, явно укажите, что независимое ревью не выполнено, и не объявляйте полную приёмку. Подробности и шаблон — в указанном контракте.
+<a id="инварианты-изменений"></a>
 
-Отделяйте дефект продукта от ошибки fixture или окружения. Связывайте результат с source snapshot, командами, target/features и фактическим артефактом; отмечайте непройденное и непроверенное. Успех offscreen, prewarmed или маленького Puzzle-сценария не закрывает cold-start, аппаратный Linux или цель ARPG 60 FPS. При изменении поведения обновляйте тематический контракт и текущий статус; не копируйте всю историю в инструкции.
+## Change invariants
+
+- Keep the authored document separate from the Play copy. Rejecting a candidate preserves the last good version; Cancel and publication errors preserve the previous authored data and state. Account explicitly for permitted recovery files.
+- Preserve exact JSON keys, unknown payloads, null, stable IDs, and other namespaces. A no-op Apply must not create local overrides or break prefab inheritance.
+- Distinguish authored values from effective defaults, ComponentSchema from PropertySchema, and unknown live IDs from a known empty set. Use shared Core ownership and availability rules; respect exact owner/schema/SDK pins. See [schemas](docs/component-schemas.md) and the [asset API](docs/asset-workspace-api.md).
+- Do not bypass Full/Team restrictions or source checks to make a test pass. Selected native features, the working graph, and Player assets must match the project; an absent optional module must not activate implicitly.
+- Reusing compiled code does not imply shared state: Custom instances have independent state and workers. Release only processes and files owned by the operation. See the [Custom store](docs/custom-program-store.md).
+
+<a id="проверки-и-результат"></a>
+
+## Verification and delivery
+
+Choose checks by the affected contracts: UI, persistence, runtime, and export may depend on the same schema. The [verification registry and routes](docs/verification.md) describe the explicit `quick`, `contracts`, `native`, `native-tools`, and `package` profiles, and the preserved no-argument legacy `verify.ps1`/`verify.sh` calls. Inspect `--plan` first; a profile's scope is not full acceptance. Run native/GPU/timing checks sequentially, without competing builds. Do not repeat the full suite after every small step without a new reason.
+
+Before completing substantial changes, send them to an [independent reviewer](docs/review.md): an agent with a clean context or a person who did not write the implementation. The reviewer checks the goal, diff, new files, and evidence; the author fixes findings and repeats checks, and the reviewer verifies the fix. Bind the conclusion to HEAD and a source digest covering tracked and untracked files; after source changes, review the changed scope again. The author's own review or a successful snapshot check does not replace an independent conclusion. If a reviewer is unavailable, explicitly state that independent review was not performed and do not claim full acceptance. Details and the template are in the linked contract.
+
+Distinguish product defects from fixture or environment failures. Tie results to the source snapshot, commands, target/features, and actual artifact; identify failed and unverified checks. Offscreen, prewarmed, or small Puzzle results do not establish cold-start behavior, hardware Linux support, or the ARPG 60 FPS goal. When behavior changes, update the relevant contract and current status; do not copy the entire history into these instructions.
+
+## Documentation languages
+
+English is the primary language of public documentation: root and crate `README.md` files, `AGENTS.md`, and `docs/*.md`. Maintain complete Russian counterparts in root and crate `README.ru.md` files and `docs/ru/*.md`; the Russian copy of this guide is `docs/ru/agent-guide.md`. Keep language links visible on both versions.
+
+Update both language versions in the same change when adding or changing documentation. Translate the full meaning, including limitations and evidence, without turning the counterpart into a summary. Keep commands, code, file paths, API and JSON identifiers, exact diagnostic/UI literals, and historical evidence accurate; explain technical literals in the surrounding language. Verify relative links and heading anchors in both versions. Conversation language follows the user's preference.

@@ -1,5 +1,7 @@
 # Optional gameplay packages
 
+[English](optional-gameplay.md) | [Русский](ru/optional-gameplay.md) | [Documentation](README.md)
+
 Engine contracts, reusable ARPG rules and the concrete Two Arenas project have
 separate source boundaries. The shared Host has been extracted from the Editor;
 ARPG and audio are optional native packages. An independent Puzzle and a separate,
