@@ -100,3 +100,9 @@ system-state pins. Ordinary loading and saving validate these exact contracts;
 Full profile publication and known legacy migration are explicit operations.
 See [Engine profiles](engine-profiles.md). The editor source_modules test module
 exercises the same shared registration rather than installing a second catalog.
+
+Inspector's internal JSON paths retain exact object keys separately from array
+indices. Literal dotted keys can coexist with nested fields without being renamed
+by Apply. Unchanged inherited fields do not create local prefab aggregates;
+changed opaque fields retain their complete top-level aggregate and siblings.
+See the [authoring fixes and verification](remaining-authoring-fixes-20261016.md).
