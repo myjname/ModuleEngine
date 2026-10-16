@@ -45,7 +45,7 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         os: [windows-2022, ubuntu-24.04]
     runs-on: ${{ matrix.os }}

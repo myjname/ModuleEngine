@@ -372,11 +372,15 @@ def main(argv=None, root=None):
             raise VerificationError("Output root must stay under this checkout's outputs directory")
         output = output_root / run_id
         output.mkdir(parents=True, exist_ok=False)
-        temp = root / "work/verification" / run_id / "tmp"
+        # MSVC object paths in nested Cargo fixtures can exceed its path limit.
+        # Keep disposable input paths short; reports retain the full run ID.
+        temp = (root / ".work/v" / run_id.rsplit("-", 1)[1]).resolve()
+        if not temp.is_relative_to(root):
+            raise VerificationError("Temporary directory escapes this checkout")
         temp.mkdir(parents=True, exist_ok=False)
         runner = Runner(root, data, selected, output, temp, args.timeout)
         implementation = {name: digest(root / name) if (root / name).is_file() else None for name in ["scripts/verify.py", "scripts/verification.json", "verify.ps1", "verify.sh"]}
-        report = {"schema_version": 1, "run_id": run_id, "profile": args.profile, "scope": selected["scope"], "started_at": utc(), "platform": PLATFORM, "status": "failed", "implementation_sha256": implementation, "registry_sha256": implementation["scripts/verification.json"], "source": source_snapshot(root), "protected_author_files": runner.baseline, "steps": [{"id": s["id"], "status": "not_run"} for s in selected["steps"]]}
+        report = {"schema_version": 1, "run_id": run_id, "profile": args.profile, "scope": selected["scope"], "started_at": utc(), "platform": PLATFORM, "status": "failed", "temporary_directory": str(temp), "implementation_sha256": implementation, "registry_sha256": implementation["scripts/verification.json"], "source": source_snapshot(root), "protected_author_files": runner.baseline, "steps": [{"id": s["id"], "status": "not_run"} for s in selected["steps"]]}
         try:
             with run_lease(root / "work/verification/launcher.lock"):
                 report["steps"], failed = runner.run()

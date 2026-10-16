@@ -28,14 +28,21 @@ Linux full `native` запускает offscreen tests с software Vulkan, бе�
 интерактивную desktop приёмку. `package` использует минимальные Cargo fixtures,
 не настоящий game export.
 
-Матрица и команды внутри runner выполняются последовательно. Каждый job получает
-новый hosted checkout; авторский рабочий каталог разработчика не используется.
+Две платформы выполняются параллельно на отдельных hosted VM; команды внутри
+каждой VM выполняются последовательно. Каждый job получает новый hosted checkout
+и отдельные caches/TEMP; авторский рабочий каталог разработчика не используется.
 Rust version/native target берутся из существующих Windows/Linux manifests.
 Перед offline launcher CI явно устанавливает pinned Rust/rustfmt и делает
 `cargo fetch --locked`. Linux явно устанавливает системные link библиотеки;
 native маршрут дополнительно устанавливает Mesa и восстанавливает DXC по
 существующему archive SHA и всем file SHA из `scripts/linux-toolchain.json`.
 Сбой установки, fetch, компиляции или теста — отказ CI, без fallback версии.
+
+Launcher использует короткий checkout-local `.work/v/<run-token>` и записывает
+его resolved путь в отчёт. Первый Windows hosted run обнаружил LNK1181 в nested
+snapshot fixture на длинном TEMP; тест и его критерии сохранены. Точное имя
+проблемного object скрыто Cargo, поэтому причина path length — проверяемая гипотеза,
+а подтверждение исправления требует нового успешного `package` на hosted Windows.
 
 Отчёты и command logs из `outputs/verification` публикуются как artifact для
 каждой платформы даже после отказа; если проверка не стартовала, GitHub job log
@@ -64,6 +71,17 @@ Aggregate с `if: always()` явно отвергает `failure`, `cancelled`, 
 Нет secrets, `pull_request_target`, привилегированного PR исполнения или
 неподготовленного self-hosted job. Все внешние actions закреплены full commit SHA.
 Загрузка fresh CI tools выполняется только внутри явно запущенного hosted job.
+
+Для [myjname/ModuleEngine](https://github.com/myjname/ModuleEngine) включён public
+доступ по решению владельца. На `main` применены required PR, актуальная ветка,
+**`CI required` с GitHub Actions app ID 15368**, защита администратора и завершение
+review-обсуждений; force push и удаление ветки запрещены. Required human approvals = 0:
+отдельное независимое AI-ревью не выдаётся за approval другого GitHub-аккаунта.
+В [служебном PR #2](https://github.com/myjname/ModuleEngine/pull/2) неверный base SHA
+дал failure планирования, skipped matrix и failed aggregate; GitHub показал
+`mergeable_state=blocked`. PR закрыт без слияния. Это доказательство отказа
+prerequisite, а не отдельный искусственный отказ Rust-теста. Реальные результаты
+каждой версии нужно смотреть в её [CI run](https://github.com/myjname/ModuleEngine/actions).
 
 ## Локальная проверка политики
 

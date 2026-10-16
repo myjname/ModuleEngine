@@ -164,9 +164,11 @@ Registry не даёт произвольного `--step`, который не�
 
 Каждый запуск создаёт новый `outputs/verification/<UTC-time>-<nonce>/` с
 `result.json` и отдельными stdout/stderr logs каждой команды. Launcher-owned
-TEMP/TMP/TMPDIR указывают на `work/verification/<run-id>/tmp` только в дочернем
+TEMP/TMP/TMPDIR указывают на уникальный короткий `.work/v/<run-token>` только в дочернем
 окружении. Существующие tests могут создавать собственные изолированные fixtures
-в `.work/test-temp` и использовать caches согласно своему контракту. `--output-root` допускается только внутри `outputs`
+в `.work/test-temp` и использовать caches согласно своему контракту. Короткий TEMP
+уменьшает вложенные MSVC object paths; resolved путь обязан оставаться в checkout,
+фактический `temporary_directory` записывается в отчёт. `--output-root` допускается только внутри `outputs`
 этого checkout; существующие отчёты не перезаписываются.
 
 Один OS file lock `work/verification/launcher.lock` сериализует все исполнения
