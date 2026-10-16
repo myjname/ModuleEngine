@@ -1,0 +1,137 @@
+name: ModuleEngine CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: module-engine-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  plan:
+    name: Select verification routes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      native: ${{ steps.routes.outputs.native }}
+      package: ${{ steps.routes.outputs.package }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - id: routes
+        env:
+          CI_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: python scripts/ci_plan.py --base "$CI_BASE"
+
+  checks:
+    name: Contracts and selected routes (${{ matrix.os }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install Linux link dependencies (no desktop or GPU claim)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan1
+      - name: Install and select pinned native Rust
+        shell: pwsh
+        run: |
+          $pinFile = if ($IsWindows) { 'toolchain-manifest.json' } else { 'scripts/linux-toolchain.json' }
+          $pin = (Get-Content -Raw -LiteralPath $pinFile | ConvertFrom-Json).rust
+          $toolchain = "$($pin.version)-$($pin.target)"
+          rustup toolchain install $toolchain --profile minimal --component rustfmt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned native toolchain restoration failed' }
+          "RUSTUP_TOOLCHAIN=$toolchain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $cache = Join-Path $env:RUNNER_TEMP 'module-engine-cargo'
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          "CARGO_HOME=$cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Fetch locked dependencies before offline verification
+        run: cargo fetch --locked
+      - name: Launcher and CI policy unit checks
+        run: python -B -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Inspect contracts plan
+        run: python scripts/verify.py --profile contracts --plan
+      - name: Contracts
+        run: python scripts/verify.py --profile contracts --timeout 1800
+      - name: Windows native toolchain contracts (no GPU acceptance)
+        if: runner.os == 'Windows' && needs.plan.outputs.native == 'true'
+        run: python scripts/verify.py --profile native-tools --timeout 1800
+      - name: Restore pinned Linux DXC and software Vulkan
+        if: runner.os == 'Linux' && needs.plan.outputs.native == 'true'
+        run: |
+          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers vulkan-tools
+          python scripts/ci_linux_dxc.py
+          echo "MODULE_ENGINE_DXC=$GITHUB_WORKSPACE/.tools/ci-dxc/bin/dxc" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.tools/ci-dxc/lib" >> "$GITHUB_ENV"
+          icd=$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+      - name: Linux software Vulkan environment
+        if: runner.os == 'Linux' && needs.plan.outputs.native == 'true'
+        run: |
+          "$MODULE_ENGINE_DXC" --version
+          vulkaninfo --summary
+      - name: Linux native offscreen contracts (Mesa software device)
+        if: runner.os == 'Linux' && needs.plan.outputs.native == 'true'
+        run: python scripts/verify.py --profile native --timeout 1800
+      - name: Native package fixture contracts
+        if: needs.plan.outputs.package == 'true'
+        run: python scripts/verify.py --profile package --timeout 1800
+      - name: Upload current-run reports even after failure
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: verification-${{ matrix.os }}-${{ github.run_attempt }}
+          path: outputs/verification/
+          if-no-files-found: warn
+          retention-days: 14
+
+  required:
+    name: CI required
+    if: always()
+    needs: [plan, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Reject failed, cancelled or skipped prerequisite jobs
+        env:
+          CI_PLAN_RESULT: ${{ needs.plan.result }}
+          CI_CHECKS_RESULT: ${{ needs.checks.result }}
+          CI_NATIVE: ${{ needs.plan.outputs.native }}
+          CI_PACKAGE: ${{ needs.plan.outputs.package }}
+        run: python scripts/ci_plan.py --gate

@@ -2,6 +2,11 @@
 # Full native Linux suite, including offscreen Vulkan/GameUI tests; no package
 # manager, tool installation or native desktop-window acceptance in this script.
 set -eu
+if [ "$#" -gt 0 ]; then
+    verification_script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    verification_python=${MODULE_ENGINE_VERIFY_PYTHON:-python3}
+    exec "$verification_python" "$verification_script_root/scripts/verify.py" "$@"
+fi
 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 if [ "$(uname -s)" != Linux ]; then echo 'Use verify.ps1 on Windows.' >&2; exit 2; fi
 python3 scripts/linux_prerequisites.py --require build

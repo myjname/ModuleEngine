@@ -5571,6 +5571,346 @@ pub fn update(ctx: &mut ScriptContext) {
         }
     }
 
+    // Bounded contract cases, not a second implementation of merge/ownership.
+    fn inspector_json_property_cases() -> Vec<(String, &'static str, Value)> {
+        let keys = ["literal.key", "0", "", "/~", "a/b", "a~b"];
+        let payloads = [
+            ("null", Value::Null),
+            ("bool", json!(false)),
+            ("number", json!(17)),
+            ("string", json!("opaque asset://not-a-typed-reference")),
+            ("empty-object", json!({})),
+            ("empty-array", json!([])),
+            (
+                "members",
+                json!({"a.b":3,"a":{"b":4},"0":{"01":null},"":null}),
+            ),
+            (
+                "array",
+                json!([{"a.b":3,"a":{"b":4}},null,[false,{"/~":null}]]),
+            ),
+        ];
+        let mut cases = Vec::new();
+        for (index, key) in keys.into_iter().enumerate() {
+            for (label, payload) in &payloads {
+                cases.push((format!("key-{index}-{label}"), key, payload.clone()));
+            }
+        }
+        assert_eq!(cases.len(), 48);
+        cases
+    }
+
+    fn inspector_json_property_fixture(
+        key: &str,
+        payload: &Value,
+    ) -> (
+        CompositionContext,
+        GraphDocument,
+        module_engine_project::EngineProfile,
+    ) {
+        let (composition, mut document, profile) = exact_member_inspector_fixture();
+        let game = document.game.as_mut().unwrap();
+        let foo = game
+            .prefabs
+            .get_mut("exact")
+            .unwrap()
+            .components
+            .get_mut("foo")
+            .unwrap();
+        foo.as_object_mut()
+            .unwrap()
+            .insert(key.into(), payload.clone());
+        foo["literal"] = json!({"key":"distinct nested member"});
+        foo["bar"]["opaque"] = payload.clone();
+        game.scenes.get_mut("empty").unwrap().objects[0]
+            .components
+            .insert(
+                "archive.unavailable".into(),
+                json!({"payload":payload,"path":"asset://not-a-typed-reference"}),
+            );
+        validate_inspector_fixture(&document, &composition, &profile);
+        (composition, document, profile)
+    }
+
+    fn save_reopen_inspector_property(
+        path: &Path,
+        document: &GraphDocument,
+        composition: &CompositionContext,
+        profile: &module_engine_project::EngineProfile,
+    ) -> GraphDocument {
+        module_engine_project::save_document_with_backup(path, document).unwrap();
+        let reopened = module_engine_project::read_document_strict(path).unwrap();
+        assert_eq!(&reopened, document, "{}", path.display());
+        validate_inspector_fixture(&reopened, composition, profile);
+        reopened
+    }
+
+    #[test]
+    fn inspector_generated_noop_apply_preserves_authored_json_after_save() {
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-generated-noop",
+        )
+        .unwrap();
+        for (case, key, payload) in inspector_json_property_cases() {
+            let (composition, mut document, profile) =
+                inspector_json_property_fixture(key, &payload);
+            // This member is deliberately local and absent from the prefab;
+            // otherwise an unchanged inherited payload need not be serialized
+            // by Apply, leaving exact-key reconstruction untested.
+            let authored_local = Value::Object(serde_json::Map::from_iter([(
+                key.to_owned(),
+                payload.clone(),
+            )]));
+            {
+                let game = document.game.as_mut().unwrap();
+                game.prefabs
+                    .get_mut("exact")
+                    .unwrap()
+                    .components
+                    .get_mut("foo")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(key);
+                game.scenes.get_mut("empty").unwrap().objects[0]
+                    .components
+                    .insert("foo".into(), authored_local.clone());
+            }
+            validate_inspector_fixture(&document, &composition, &profile);
+            let before = document.clone();
+            // foo is the first visible component in this fixture. The positive
+            // edit control below proves that this helper executes its Apply.
+            click_inspector_apply(&mut document, &composition, "foo", |_| {});
+            assert_eq!(document, before, "no authored delta: {case}");
+            let reopened = save_reopen_inspector_property(
+                &artifacts.path().join(format!("{case}.json")),
+                &document,
+                &composition,
+                &profile,
+            );
+            let game = reopened.game.as_ref().unwrap();
+            let object = &game.scenes["empty"].objects[0];
+            let entity = game
+                .resolve_scene_with_registry("empty", &composition.systems)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                object.components.get("foo"),
+                Some(&authored_local),
+                "{case}"
+            );
+            assert!(object.overrides.is_empty(), "{case}");
+            // get() distinguishes a present null from an absent member.
+            assert_eq!(entity.components["foo"].get(key), Some(&payload), "{case}");
+            assert_eq!(
+                entity.components["foo"]["bar"].get("opaque"),
+                Some(&payload),
+                "{case}"
+            );
+            assert_eq!(
+                entity.components["foo"]["literal"]["key"],
+                json!("distinct nested member")
+            );
+            assert_eq!(entity.components["foo.bar"], json!({"value":8.}), "{case}");
+            assert_eq!(
+                object.components["archive.unavailable"].get("payload"),
+                Some(&payload),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspector_generated_noop_apply_keeps_future_prefab_inheritance_after_save() {
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-generated-inheritance",
+        )
+        .unwrap();
+        for (case, key, payload) in inspector_json_property_cases() {
+            let (composition, mut document, profile) =
+                inspector_json_property_fixture(key, &payload);
+            let before = document.clone();
+            click_inspector_apply(&mut document, &composition, "foo", |_| {});
+            assert_eq!(document, before, "no authored delta: {case}");
+            let future = json!({"future.marker":case,"present-null":null});
+            let foo = document
+                .game
+                .as_mut()
+                .unwrap()
+                .prefabs
+                .get_mut("exact")
+                .unwrap()
+                .components
+                .get_mut("foo")
+                .unwrap();
+            foo.as_object_mut()
+                .unwrap()
+                .insert(key.into(), future.clone());
+            foo["value"] = json!(11.);
+            foo["settings"] = json!({"value":6});
+            foo["bar"]["value"] = json!(11.);
+            foo["bar"]["opaque"] = future.clone();
+            let reopened = save_reopen_inspector_property(
+                &artifacts.path().join(format!("{case}.json")),
+                &document,
+                &composition,
+                &profile,
+            );
+            let game = reopened.game.as_ref().unwrap();
+            let object = &game.scenes["empty"].objects[0];
+            let entity = game
+                .resolve_scene_with_registry("empty", &composition.systems)
+                .unwrap()
+                .remove(0);
+            assert!(!object.components.contains_key("foo"), "{case}");
+            assert!(object.overrides.is_empty(), "{case}");
+            assert_eq!(entity.components["foo"].get(key), Some(&future), "{case}");
+            assert_eq!(
+                entity.components["foo"]["bar"].get("opaque"),
+                Some(&future),
+                "{case}"
+            );
+            assert_eq!(entity.components["foo"]["value"], json!(11.), "{case}");
+            assert_eq!(
+                entity.components["foo"]["settings"]["value"],
+                json!(6),
+                "{case}"
+            );
+            assert_eq!(
+                entity.components["foo"]["bar"]["value"],
+                json!(11.),
+                "{case}"
+            );
+            assert_eq!(
+                entity.components["foo"]["bar"]["sibling"],
+                json!(7),
+                "{case}"
+            );
+            assert_eq!(entity.components["foo.bar"], json!({"value":8.}), "{case}");
+            assert_eq!(
+                object.components["archive.unavailable"].get("payload"),
+                Some(&payload),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspector_generated_apply_positive_controls_keep_intentional_local_values() {
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-generated-controls",
+        )
+        .unwrap();
+        let payload = json!({"exact.key":[null,{"0":null}],"exact":{"key":false}});
+        for action in ["edit-field", "existing-override", "edit-opaque"] {
+            let (composition, mut document, profile) =
+                inspector_json_property_fixture("literal.key", &payload);
+            if action == "existing-override" {
+                document
+                    .game
+                    .as_mut()
+                    .unwrap()
+                    .scenes
+                    .get_mut("empty")
+                    .unwrap()
+                    .objects[0]
+                    .overrides
+                    .insert("foo.value".into(), json!(7.));
+            }
+            let before = document.clone();
+            click_inspector_apply(&mut document, &composition, "foo", |draft| match action {
+                "edit-field" => draft["value"] = json!(9.),
+                "edit-opaque" => draft["bar"]["value"] = json!(3.),
+                _ => {}
+            });
+            validate_inspector_fixture(&document, &composition, &profile);
+            if action == "existing-override" {
+                assert_eq!(
+                    document, before,
+                    "existing local override is not a new edit"
+                );
+            } else {
+                assert_ne!(
+                    document, before,
+                    "real Inspector Apply must execute: {action}"
+                );
+            }
+            let future = json!({"new.key":null});
+            let foo = document
+                .game
+                .as_mut()
+                .unwrap()
+                .prefabs
+                .get_mut("exact")
+                .unwrap()
+                .components
+                .get_mut("foo")
+                .unwrap();
+            foo["value"] = json!(11.);
+            foo["bar"]["value"] = json!(11.);
+            foo["bar"]["opaque"] = future.clone();
+            foo["literal.key"] = future.clone();
+            let reopened = save_reopen_inspector_property(
+                &artifacts.path().join(format!("{action}.json")),
+                &document,
+                &composition,
+                &profile,
+            );
+            let game = reopened.game.as_ref().unwrap();
+            let object = &game.scenes["empty"].objects[0];
+            let entity = game
+                .resolve_scene_with_registry("empty", &composition.systems)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                entity.components["foo"].get("literal.key"),
+                Some(&future),
+                "{action}"
+            );
+            assert_eq!(
+                entity.components["foo.bar"],
+                json!({"value":8.}),
+                "{action}"
+            );
+            assert_eq!(
+                object.components["archive.unavailable"].get("payload"),
+                Some(&payload),
+                "{action}"
+            );
+            match action {
+                "edit-opaque" => {
+                    let local_bar = json!({"value":3.,"sibling":7,"opaque":payload});
+                    assert_eq!(
+                        object.components["foo"],
+                        json!({"bar":local_bar}),
+                        "{action}"
+                    );
+                    assert_eq!(entity.components["foo"]["bar"], local_bar, "{action}");
+                    assert_eq!(entity.components["foo"]["value"], json!(11.));
+                    assert!(object.overrides.is_empty());
+                }
+                _ => {
+                    let expected = json!(if action == "edit-field" { 9. } else { 7. });
+                    assert!(!object.components.contains_key("foo"), "{action}");
+                    assert_eq!(
+                        object.overrides.get("foo.value"),
+                        Some(&expected),
+                        "{action}"
+                    );
+                    assert_eq!(entity.components["foo"]["value"], expected, "{action}");
+                    assert_eq!(
+                        entity.components["foo"]["bar"].get("opaque"),
+                        Some(&future),
+                        "{action}"
+                    );
+                }
+            }
+        }
+    }
+
     fn exact_member_inspector_fixture() -> (
         CompositionContext,
         GraphDocument,

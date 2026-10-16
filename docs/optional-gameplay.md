@@ -1,11 +1,17 @@
 # Optional gameplay packages
 
-Stage 4 has passed its source checks. Engine contracts, reusable ARPG rules and the concrete
-Two Arenas project now have separate source boundaries. Workspace tests and
-Clippy passed; their exact scope is recorded in the progress log. The
-interactive host remains in the editor, and the current editor/Player build
-still installs ARPG. Host extraction, independent puzzle acceptance and a Player
-build that omits ARPG belong to later stages.
+Engine contracts, reusable ARPG rules and the concrete Two Arenas project have
+separate source boundaries. The shared Host has been extracted from the Editor;
+ARPG and audio are optional native packages. An independent Puzzle and a separate,
+feature-selected Player without ARPG have passed their recorded acceptance.
+The Editor installs its authoring packages; this does not require every exported
+Player to install them.
+
+See the completed stages 4–8 in the [migration record](modular-runtime-progress.md)
+and the [Player package](../crates/player/README.md). Those results belong to the
+snapshots stated in their reports. The [current status](current-status.md) tracks
+remaining performance, Linux service and hardware-validation limits; this page
+is not a new acceptance run.
 
 | Boundary | Source responsibility |
 | --- | --- |
