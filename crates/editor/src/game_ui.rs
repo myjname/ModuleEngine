@@ -2180,7 +2180,7 @@ impl GameWorkbench {
                     for name in visible{let schema=schemas.schema(&name).unwrap();ui.push_id(&name,|ui|{egui::CollapsingHeader::new(&schema.label).default_open(true).show(ui,|ui|{
                         let draft=self.component_drafts.get_mut(&name).unwrap();component_editor(ui,schema,draft,&attached,&fields);let value=draft.clone();
                         ui.horizontal(|ui|{
-                            if ui.button("Apply fields").clicked(){apply_component(object,prefab,&name,value);self.field_key=None;}
+                            if ui.button("Apply fields").clicked(){apply_component_with_defaults(object,prefab,&name,value,Some(&schema.defaults));self.field_key=None;}
                             if prefab.is_some_and(|prefab|prefab.components.contains_key(&name)){
                                 if ui.button("Inherit defaults").clicked(){reset_component(object,prefab,&name);self.field_key=None;}
                             }else if ui.button("Remove component").clicked(){reset_component(object,prefab,&name);self.component_drafts.remove(&name);self.field_key=None;}
@@ -3384,6 +3384,15 @@ fn put_field(value: &mut Value, path: &str, new: Value) {
     }
 }
 fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &str, value: Value) {
+    apply_component_with_defaults(object, prefab, name, value, None);
+}
+fn apply_component_with_defaults(
+    object: &mut AuthoredObject,
+    prefab: Option<&Prefab>,
+    name: &str,
+    value: Value,
+    schema_defaults: Option<&Value>,
+) {
     let mut attachments = component_attachments(object, prefab);
     attachments.insert(name.into());
     reset_component(object, prefab, name);
@@ -3391,23 +3400,41 @@ fn apply_component(object: &mut AuthoredObject, prefab: Option<&Prefab>, name: &
         object.components.insert(name.into(), value);
         return;
     };
+    // Scene resolution fills schema defaults before applying instance overrides.
+    // Comparing only with the raw prefab invents local fields for unchanged
+    // defaults; a partial local aggregate would then replace the prefab's whole
+    // aggregate at the authored shallow-merge boundary.
+    let mut inherited = base.clone();
+    if let Some(defaults) = schema_defaults {
+        merge_component_defaults(&mut inherited, defaults);
+    }
     let mut defaults = BTreeMap::new();
     let mut edited = BTreeMap::new();
-    value_leaves(base, "", &mut defaults);
+    value_leaves(&inherited, "", &mut defaults);
     value_leaves(&value, "", &mut edited);
     let mut local = json!({});
-    for (field, value) in edited {
+    for (field, edited_value) in edited {
         let path = format!("{name}.{field}");
         if component_override_owner(&path, attachments.iter().map(String::as_str)) != Some(name) {
             // An opaque aggregate field can share another attachment's namespace.
             // A dot override would edit that component, so retain it locally.
-            put_field(&mut local, &field, value);
+            put_field(&mut local, &field, edited_value);
         } else if let Some(default) = defaults.get(&field) {
-            if &value != default {
-                object.overrides.insert(path, value);
+            if &edited_value != default {
+                object.overrides.insert(path, edited_value);
             }
         } else {
-            put_field(&mut local, &field, value);
+            put_field(&mut local, &field, edited_value);
+        }
+    }
+    if let (Some(local_fields), Some(edited_fields)) = (local.as_object_mut(), value.as_object()) {
+        // A local top-level member replaces that entire prefab member. Keep the
+        // complete edited aggregate, including inherited and unknown siblings,
+        // whenever one of its leaves cannot be represented by a dot override.
+        for (field, aggregate) in local_fields {
+            if let Some(edited) = edited_fields.get(field) {
+                aggregate.clone_from(edited);
+            }
         }
     }
     if local.as_object().is_some_and(|m| !m.is_empty()) {
@@ -5087,6 +5114,289 @@ pub fn update(ctx: &mut ScriptContext) {
         assert!(
             (session.state().world.object(1).unwrap().transform.rotation[1] - 0.05).abs() < 0.00001
         );
+    }
+
+    #[test]
+    fn inspector_apply_preserves_partial_prefab_aggregates_and_effective_defaults_after_save() {
+        struct Noop;
+        impl ExecutableSystem for Noop {
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let component = "audit.stats";
+        let owner = "audit.stats.owner";
+        let mut systems = SystemRegistry::builtin();
+        systems
+            .components_mut()
+            .register(ComponentSchema {
+                id: component.into(),
+                owner_module: owner.into(),
+                version: "1".into(),
+                label: "Partial prefab stats".into(),
+                defaults: json!({"stats":{"speed":1.,"weight":3.},"slots":[{"speed":1.,"weight":3.},{"speed":1.,"weight":3.}],"target":1}),
+                fields: [
+                    ("stats.speed", 1.),
+                    ("stats.weight", 3.),
+                    ("slots.0.speed", 1.),
+                    ("slots.0.weight", 3.),
+                    ("slots.1.speed", 1.),
+                    ("slots.1.weight", 3.),
+                ]
+                    .into_iter()
+                    .map(|(path, default)| PropertySchema {
+                        id: format!("{component}.{path}"),
+                        label: path.into(),
+                        scope: PropertyScope::Component {
+                            component: component.into(),
+                        },
+                        value_type: PropertyType::Number { min: 0., max: 20. },
+                        default: json!(default),
+                        requires_modules: vec![],
+                        requires_components: vec![],
+                    })
+                    .chain(std::iter::once(PropertySchema {
+                        id: format!("{component}.target"),
+                        label: "Nullable target".into(),
+                        scope: PropertyScope::Component {
+                            component: component.into(),
+                        },
+                        value_type: PropertyType::ObjectReference {
+                            required_components: vec![],
+                            optional: true,
+                        },
+                        default: json!(1),
+                        requires_modules: vec![],
+                        requires_components: vec![],
+                    }))
+                    .collect(),
+                requires_modules: vec![],
+                requires_components: vec![],
+            })
+            .unwrap();
+        systems
+            .register(
+                SystemDescriptor {
+                    id: owner.into(),
+                    state_schema: "audit.stats/1".into(),
+                    components: vec![component.into()],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(Noop)),
+            )
+            .unwrap();
+        let composition = CompositionContext::new(ModuleRegistry::builtin(), systems).unwrap();
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-partial-prefab",
+        )
+        .unwrap();
+        for change in [
+            "unchanged",
+            "default-leaf",
+            "local-aggregate",
+            "array-local-aggregate",
+            "valid-null",
+        ] {
+            let mut document = source_document();
+            let game = document.game.as_mut().unwrap();
+            game.execution.stages[0].nodes = vec![SystemNode {
+                id: "stats".into(),
+                module: owner.into(),
+                params: json!({}),
+                bindings: BTreeMap::new(),
+                after: vec![],
+            }];
+            game.prefabs.insert(
+                "partial".into(),
+                Prefab {
+                    color: [255; 4],
+                    components: BTreeMap::from([(
+                        component.into(),
+                        json!({"stats":{"speed":2.},"slots":[{"speed":2.},{"speed":5.}],"target":1,"archive":{"preserved":[9,8,7]}}),
+                    )]),
+                },
+            );
+            game.scenes.get_mut("empty").unwrap().objects[0].prefab = Some("partial".into());
+            let profile = crate::engine_profiles::from_blueprint(
+                &document,
+                &composition,
+                crate::engine_profiles::ProfileKind::Neutral,
+            )
+            .unwrap();
+            crate::engine_profiles::attach(&mut document, &composition, &profile).unwrap();
+            let validate = |document: &GraphDocument| {
+                profile
+                    .validate_with_sdk(document, &composition, Some(&SdkIdentity::current()))
+                    .unwrap();
+                let errors: Vec<_> = composition
+                    .validate_document(document)
+                    .into_iter()
+                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                    .collect();
+                assert!(errors.is_empty(), "{errors:?}");
+                composition.validate_game(document).unwrap();
+            };
+            validate(&document);
+            let authored_before = document.clone();
+            let mut workbench = GameWorkbench::default();
+            workbench.scene = "empty".into();
+            workbench.select(Some(1));
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.);
+            let frame = |workbench: &mut GameWorkbench, document: &mut GraphDocument, events| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(1200., 1600.),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        workbench.inspector_ui_with_composition(ui, document, &composition);
+                    },
+                )
+            };
+            let output = frame(&mut workbench, &mut document, vec![]);
+            assert!(workbench.error.is_none(), "{:?}", workbench.error);
+            let draft = &workbench.component_drafts[component];
+            assert_eq!(draft["stats"], json!({"speed":2.,"weight":3.}));
+            assert_eq!(
+                draft["slots"],
+                json!([{"speed":2.,"weight":3.},{"speed":5.,"weight":3.}])
+            );
+            assert_eq!(draft["target"], json!(1));
+            let point = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Apply fields" => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("ordinary Inspector Apply action");
+            output.drop_without_applying_deltas();
+            if matches!(change, "default-leaf" | "local-aggregate") {
+                set_component_field(
+                    workbench.component_drafts.get_mut(component).unwrap(),
+                    "stats.weight",
+                    json!(4.),
+                )
+                .unwrap();
+            }
+            if change == "local-aggregate" {
+                workbench.component_drafts.get_mut(component).unwrap()["stats"]["note"] =
+                    json!({"keep":[7,8]});
+            }
+            if change == "array-local-aggregate" {
+                // A leaf at index 1 used to build [null, {"note": null}] locally,
+                // replacing the inherited array and losing all its siblings.
+                workbench.component_drafts.get_mut(component).unwrap()["slots"][1]["note"] =
+                    Value::Null;
+            }
+            if change == "valid-null" {
+                set_component_field(
+                    workbench.component_drafts.get_mut(component).unwrap(),
+                    "target",
+                    Value::Null,
+                )
+                .unwrap();
+            }
+            for pressed in [true, false] {
+                frame(
+                    &mut workbench,
+                    &mut document,
+                    vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(workbench.error.is_none(), "{:?}", workbench.error);
+            validate(&document);
+            if change == "unchanged" {
+                assert_eq!(document, authored_before, "Apply must not author a delta");
+            }
+            let path = artifacts.path().join(format!("{change}.json"));
+            module_engine_project::save_document_with_backup(&path, &document).unwrap();
+            let reopened = module_engine_project::read_document_strict(&path).unwrap();
+            validate(&reopened);
+            assert_eq!(reopened.engine_profile, authored_before.engine_profile);
+            assert_eq!(reopened.engine_lock, authored_before.engine_lock);
+            let game = reopened.game.as_ref().unwrap();
+            assert_eq!(game.prefabs, authored_before.game.as_ref().unwrap().prefabs);
+            let object = &game.scenes["empty"].objects[0];
+            let entity = game
+                .resolve_scene_with_registry("empty", &composition.systems)
+                .unwrap()
+                .remove(0);
+            assert_eq!(entity.components[component]["stats"]["speed"], json!(2.));
+            assert_eq!(
+                entity.components[component]["stats"]["weight"],
+                json!(if matches!(change, "default-leaf" | "local-aggregate") {
+                    4.
+                } else {
+                    3.
+                })
+            );
+            assert_eq!(
+                entity.components[component]["target"],
+                if change == "valid-null" {
+                    Value::Null
+                } else {
+                    json!(1)
+                }
+            );
+            assert_eq!(
+                entity.components[component]["archive"],
+                json!({"preserved":[9,8,7]})
+            );
+            if change == "local-aggregate" {
+                assert_eq!(
+                    object.components[component]["stats"],
+                    json!({"speed":2.,"weight":4.,"note":{"keep":[7,8]}})
+                );
+                assert_eq!(
+                    entity.components[component]["stats"],
+                    object.components[component]["stats"]
+                );
+            } else if change == "array-local-aggregate" {
+                let expected =
+                    json!([{"speed":2.,"weight":3.},{"speed":5.,"weight":3.,"note":null}]);
+                assert_eq!(object.components[component], json!({"slots":expected}));
+                assert_eq!(entity.components[component]["slots"], expected);
+                assert_eq!(
+                    component_field(&entity.components[component], "slots.1.note"),
+                    Some(&Value::Null),
+                    "explicit null remains a present value, not a missing-field tombstone"
+                );
+                assert!(object.overrides.is_empty());
+            } else {
+                assert!(!object.components.contains_key(component));
+                if change == "default-leaf" {
+                    assert_eq!(
+                        object.overrides,
+                        BTreeMap::from([("audit.stats.stats.weight".into(), json!(4.))])
+                    );
+                } else if change == "valid-null" {
+                    assert_eq!(
+                        object.overrides,
+                        BTreeMap::from([("audit.stats.target".into(), Value::Null)])
+                    );
+                }
+            }
+            assert!(workbench.host.is_none() && workbench.preview_host.is_none());
+        }
     }
 
     #[test]
