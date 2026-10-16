@@ -506,19 +506,25 @@ impl Editor {
             .as_ref()
             .map(|distribution| distribution.package_root.clone())
             .unwrap_or_else(project::source_root);
-        let preparation = crate::host::asset_workspace_at(&root, protected.clone(), &backend_root)
-            .and_then(|workspace| {
-                let mut candidate = self.document.clone();
-                workspace.synchronize(&mut candidate)?;
-                self.validate_candidate(&candidate, self.can_author_engine())?;
-                if candidate != self.document {
-                    self.accept_asset_index(candidate);
-                }
-                if !self.save_workflow() {
-                    return Err(self.status.clone());
-                }
-                Ok(())
-            });
+        let property_object_ids = self.asset_property_object_ids();
+        let preparation = crate::host::asset_workspace_at(
+            &root,
+            protected.clone(),
+            &backend_root,
+            property_object_ids.clone(),
+        )
+        .and_then(|workspace| {
+            let mut candidate = self.document.clone();
+            workspace.synchronize(&mut candidate)?;
+            self.validate_candidate(&candidate, self.can_author_engine())?;
+            if candidate != self.document {
+                self.accept_asset_index(candidate);
+            }
+            if !self.save_workflow() {
+                return Err(self.status.clone());
+            }
+            Ok(())
+        });
         if let Err(error) = preparation {
             self.report_error(error);
             return;
@@ -527,7 +533,7 @@ impl Editor {
         let before = self.document.clone();
         let project_path = PathBuf::from(&self.path);
         self.spawn_job("Изменение ресурсов…", ctx, move || {
-            let workspace = crate::host::asset_workspace_at(&root, protected.clone(), &backend_root)?;
+            let workspace = crate::host::asset_workspace_at(&root, protected.clone(), &backend_root, property_object_ids)?;
             let manifest = AssetManifest::from_value(&before.asset_manifest)?;
             let operation = match action {
                 BrowserAction::NewFolder { path } => workspace.create_folder(&before, &path)?,

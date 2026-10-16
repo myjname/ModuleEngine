@@ -307,6 +307,24 @@ impl Runtime {
         self.provider.objects()
     }
 
+    /// Whether this provider still belongs to the author's selected world source.
+    /// This metadata-only check never constructs a provider or renderer. Hosts
+    /// must not use an old provider's IDs while a different world is preparing.
+    pub fn world_source_matches(&self, document: &GraphDocument) -> bool {
+        let Ok(route) = self.registry.render_route(document) else {
+            return false;
+        };
+        route.world.id == self.world_node_id
+            && route.world.module == self.world_module_id
+            && self
+                .document
+                .root
+                .nodes
+                .iter()
+                .find(|node| node.id == self.world_node_id)
+                .is_some_and(|accepted| accepted.params == route.world.params)
+    }
+
     /// The project boundary uses the same gate for native UI and compiled Rust.
     /// Engine-authoring apply_controls remains available for trusted tooling.
     pub fn apply_project_controls(&mut self, commands: &[ControlCommand]) -> Result<(), String> {
@@ -705,6 +723,45 @@ mod tests {
     use crate::{
         Mesh, RenderItem, Transform, demo_document, make_edge, make_node, world_descriptor,
     };
+
+    #[test]
+    fn live_property_ids_are_bound_to_the_accepted_world_source() {
+        let registry = ModuleRegistry::builtin();
+        let document = demo_document(WorldKind::Objects);
+        let runtime = Runtime::from_document(&document, &registry).unwrap();
+        let mut candidate = document.clone();
+        candidate.name = "Renamed project".into();
+        candidate.root.nodes[0].position = [100., 200.];
+        candidate
+            .properties
+            .active
+            .global
+            .insert("unrelated".into(), serde_json::json!(9));
+        assert!(runtime.world_source_matches(&candidate));
+        let world = candidate
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "world")
+            .unwrap();
+        world.module = "world.ecs".into();
+        assert!(!runtime.world_source_matches(&candidate));
+        candidate = document.clone();
+        candidate
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "world")
+            .unwrap()
+            .params = serde_json::json!({"changed": true});
+        assert!(!runtime.world_source_matches(&candidate));
+        candidate = document;
+        candidate
+            .root
+            .edges
+            .retain(|edge| edge.to_node != "extract");
+        assert!(!runtime.world_source_matches(&candidate));
+    }
 
     #[test]
     fn graph_selects_world_and_speed_source_and_renders_identically() {

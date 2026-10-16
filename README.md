@@ -18,6 +18,8 @@
 
 [Функциональный аудит и исправления стабильности](docs/stability-audit.md): проверяемые сценарии, обработка отказов, Git-история и полный повтор через `verify.ps1`.
 
+[Дополнительные исправления авторских данных](docs/remaining-authoring-fixes-20261016.md): PropertySchema defaults в ссылках на ресурсы, точные JSON-ключи Inspector и сохранение наследования шаблонов.
+
 [Подготовка Linux](docs/linux-support.md): WGPU/Vulkan, Wayland/X11, native DXC и пакеты. Windows сохраняет WGPU/DX12. Точные результаты native проверок и границы поддержки — в [отчёте](docs/linux-support-20261015.md).
 
 [Схемы компонентов и общий реестр](docs/component-schemas.md): поля Inspector, defaults, ссылки, зависимости и установка исходного модуля. [Хранение игрового мира и время жизни объектов](docs/ecs-world.md). [Ход изменения архитектуры и проверенные границы](docs/modular-runtime-progress.md).

@@ -137,6 +137,28 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// Bind legacy PropertySchema dependency scans to the accepted live world.
+    /// A pending world replacement cannot borrow the previous provider's IDs.
+    pub(super) fn asset_property_object_ids(&self) -> Option<std::collections::BTreeSet<u64>> {
+        let runtime = self.runtime.as_ref()?;
+        if !runtime.world_source_matches(&self.document) {
+            return None;
+        }
+        Some(
+            runtime
+                .objects()
+                .map(|objects| objects.into_iter().map(|object| object.id).collect())
+                .unwrap_or_else(|_| {
+                    runtime
+                        .snapshot()
+                        .items
+                        .into_iter()
+                        .map(|item| item.id)
+                        .collect()
+                }),
+        )
+    }
+
     pub fn show_custom(&mut self) {
         self.reveal_editor(EditorType::RustCustom);
         self.tab = Tab::Custom;
@@ -2851,6 +2873,34 @@ mod tests {
 
     use super::*;
     use module_engine_core::demo_document;
+
+    #[test]
+    fn asset_property_scan_uses_live_ids_and_rejects_a_pending_world_change() {
+        let document = demo_document(WorldKind::Objects);
+        let mut editor = Editor::new(document, project::source_root().join("project.json"));
+        let expected = editor
+            .runtime
+            .as_ref()
+            .unwrap()
+            .objects()
+            .unwrap()
+            .into_iter()
+            .map(|object| object.id)
+            .collect();
+        editor.authored_object_ids = [999_999].into();
+        assert_eq!(editor.asset_property_object_ids(), Some(expected));
+        editor
+            .document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "world")
+            .unwrap()
+            .module = "world.ecs".into();
+        assert_eq!(editor.asset_property_object_ids(), None);
+        editor.runtime = None;
+        assert_eq!(editor.asset_property_object_ids(), None);
+    }
 
     fn authoring_frame(
         editor: &mut Editor,

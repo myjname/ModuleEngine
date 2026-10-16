@@ -51,13 +51,16 @@ pub fn asset_workspace_at(
     asset_root: &std::path::Path,
     protected: Vec<String>,
     resource_root: &std::path::Path,
+    property_object_ids: Option<std::collections::BTreeSet<u64>>,
 ) -> Result<module_engine_project::AssetWorkspace, String> {
     let composition = composition_at(resource_root)?;
-    Ok(
-        module_engine_project::AssetWorkspace::new(asset_root, protected)?
-            .with_composition(composition.clone())
-            .with_validator(move |candidate| composition.validate_game(candidate)),
-    )
+    let workspace = module_engine_project::AssetWorkspace::new(asset_root, protected)?
+        .with_composition(composition.clone())
+        .with_validator(move |candidate| composition.validate_game(candidate));
+    Ok(match property_object_ids {
+        Some(ids) => workspace.with_property_object_ids(ids),
+        None => workspace,
+    })
 }
 
 /// Resolve the selected game's active data using the same schemas as the

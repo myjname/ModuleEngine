@@ -3,6 +3,7 @@ use module_engine_core::{
     ComponentRegistry, ComponentSchema, CompositionActivity, CompositionContext, GraphDocument,
     PropertyData, PropertyScope, PropertyType, SchemaPin, component_field,
     component_override_owner, merge_component_defaults, register_builtin_component_schemas,
+    visible_property_schemas,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,7 @@ impl AssetFields {
     pub fn collect(
         document: &GraphDocument,
         composition: Option<&CompositionContext>,
+        property_objects: Option<&BTreeSet<u64>>,
     ) -> Result<Self, String> {
         let mut builtin = ComponentRegistry::default();
         register_builtin_component_schemas(&mut builtin)?;
@@ -63,9 +65,9 @@ impl AssetFields {
                 "/properties/active",
                 document,
                 context,
-                activity.as_ref().expect("composition activity"),
+                property_objects,
                 &schema,
-            );
+            )?;
             // Inactive property payload is archived author data. Its paths are
             // deliberately opaque until the contract participates again.
         }
@@ -226,45 +228,87 @@ impl AssetFields {
         base: &str,
         document: &GraphDocument,
         composition: &CompositionContext,
-        activity: &CompositionActivity,
+        property_objects: Option<&BTreeSet<u64>>,
         schema: &impl Fn(&str) -> Option<&'a ComponentSchema>,
-    ) {
-        for module in composition.modules.descriptors() {
-            if !owner_matches(document, composition, &module.id)
-                || !activity.modules.contains(&module.id)
-            {
-                continue;
-            }
-            for field in &module.properties {
-                if let PropertyScope::Component { component } = &field.scope
-                    && !activity.components.contains(component)
+    ) -> Result<(), String> {
+        let mut contexts = vec![None];
+        if let Some(objects) = property_objects {
+            contexts.extend(objects.iter().copied().map(Some));
+        } else {
+            // Availability for unrestricted Object properties only needs a
+            // Some(object); attachment-dependent fields also need the stored
+            // per-object attachment map. These candidates establish whether
+            // a live-ID snapshot is necessary, never actual dependencies.
+            let candidates: BTreeSet<_> = data.components.keys().copied().chain([0]).collect();
+            for object in candidates {
+                if let Some((owner, field)) =
+                    visible_property_schemas(document, &composition.modules, Some(object))
+                        .into_iter()
+                        .find(|(owner, field)| {
+                            owner_matches(document, composition, owner)
+                                && matches!(field.value_type, PropertyType::AssetReference { .. })
+                        })
                 {
+                    return Err(format!(
+                        "Asset dependency collection needs a current live property-object ID snapshot for {owner}/{}; provide with_property_object_ids before scanning or changing assets",
+                        field.id
+                    ));
+                }
+            }
+        }
+        for object in contexts {
+            for (owner, field) in visible_property_schemas(document, &composition.modules, object) {
+                if !owner_matches(document, composition, &owner) {
                     continue;
                 }
-                let paths: Vec<_> = match &field.scope {
-                    PropertyScope::Global => vec![child(&format!("{base}/global"), &field.id)],
-                    PropertyScope::Module => vec![child(
-                        &child(&format!("{base}/modules"), &module.id),
-                        &field.id,
-                    )],
-                    PropertyScope::Object => data
-                        .objects
-                        .keys()
-                        .map(|id| child(&format!("{base}/objects/{id}"), &field.id))
-                        .collect(),
-                    PropertyScope::Component { component } => data
-                        .components
-                        .keys()
-                        .map(|id| {
+                let (path, authored) = match &field.scope {
+                    PropertyScope::Global => (
+                        child(&format!("{base}/global"), &field.id),
+                        data.global.get(&field.id),
+                    ),
+                    PropertyScope::Module => (
+                        child(&child(&format!("{base}/modules"), &owner), &field.id),
+                        data.modules
+                            .get(&owner)
+                            .and_then(|values| values.get(&field.id)),
+                    ),
+                    PropertyScope::Object => {
+                        let id = object.expect("Core returned an object-scoped property");
+                        (
+                            child(&format!("{base}/objects/{id}"), &field.id),
+                            data.objects
+                                .get(&id)
+                                .and_then(|values| values.get(&field.id)),
+                        )
+                    }
+                    PropertyScope::Component { component } => {
+                        let id = object.expect("Core returned a component-scoped property");
+                        (
                             child(
                                 &child(&format!("{base}/components/{id}"), component),
                                 &field.id,
-                            )
-                        })
-                        .collect(),
+                            ),
+                            data.components
+                                .get(&id)
+                                .and_then(|components| components.get(component))
+                                .and_then(|values| values.get(&field.id)),
+                        )
+                    }
                 };
-                for path in paths {
-                    self.add(path, field);
+                // Core already applied root module/per-object requirements;
+                // CompositionActivity's game ComponentSchema set is a separate
+                // contract and must not suppress legacy property attachments.
+                self.known.insert(path.clone());
+                if matches!(field.value_type, PropertyType::AssetReference { .. }) {
+                    self.references.insert(path.clone());
+                    if authored.is_none()
+                        && let Some(reference) = field.default.as_str()
+                    {
+                        self.default_references.insert(
+                            format!("property-default:{owner}/{} at {path}", field.id),
+                            reference.into(),
+                        );
+                    }
                 }
             }
         }
@@ -289,6 +333,7 @@ impl AssetFields {
                 }
             }
         }
+        Ok(())
     }
     /// Warn on an exact old reference in opaque data; never infer writable
     /// semantics from its spelling. Known Text fields are not dependencies.

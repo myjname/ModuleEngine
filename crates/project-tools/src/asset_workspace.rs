@@ -202,6 +202,7 @@ pub struct AssetWorkspace {
     protected: Vec<String>,
     validator: Option<DocumentValidator>,
     composition: Option<CompositionContext>,
+    property_objects: Option<BTreeSet<u64>>,
 }
 type DocumentValidator = Arc<dyn Fn(&GraphDocument) -> Result<(), String> + Send + Sync + 'static>;
 fn reject_schema_default_rewrites(
@@ -216,7 +217,7 @@ fn reject_schema_default_rewrites(
         .collect();
     if !dependencies.is_empty() {
         return Err(format!(
-            "Asset is supplied by an immutable installed schema default; author explicit component values before moving, replacing or detaching it: {}",
+            "Asset is supplied by an immutable installed schema default; author explicit project values before moving, replacing or detaching it: {}",
             dependencies.join(", ")
         ));
     }
@@ -246,6 +247,7 @@ impl AssetWorkspace {
             protected,
             validator: None,
             composition: None,
+            property_objects: None,
         })
     }
     /// Add the host's installed schema/policy validation to every candidate
@@ -262,6 +264,15 @@ impl AssetWorkspace {
     /// callback alone cannot establish which arbitrary strings are resources.
     pub fn with_composition(mut self, composition: CompositionContext) -> Self {
         self.composition = Some(composition);
+        self
+    }
+    /// Supply the current graph Runtime's live IDs without constructing or
+    /// executing a world provider during dependency collection. The caller must
+    /// reject a stale snapshot whose world source no longer matches the graph.
+    /// Some(empty) means there are no live objects; omission is unknown and
+    /// refuses applicable object/component asset contracts rather than guessing.
+    pub fn with_property_object_ids(mut self, objects: BTreeSet<u64>) -> Self {
+        self.property_objects = Some(objects);
         self
     }
     fn validate_candidate(&self, document: &GraphDocument) -> Result<(), String> {
@@ -665,7 +676,11 @@ impl AssetWorkspace {
         #[cfg(test)]
         USAGE_DOCUMENT_WALKS.with(|walks| walks.set(walks.get() + 1));
         let value = serde_json::to_value(document).map_err(|e| e.to_string())?;
-        let fields = AssetFields::collect(document, self.composition.as_ref())?;
+        let fields = AssetFields::collect(
+            document,
+            self.composition.as_ref(),
+            self.property_objects.as_ref(),
+        )?;
         let mut add_usage = |location: String, text: &str| {
             let id = if let Some(id) = text.strip_prefix("asset://") {
                 manifest.assets.contains_key(id).then(|| id.to_owned())
@@ -1085,7 +1100,11 @@ impl AssetWorkspace {
         replacement: Option<&str>,
         rewrite_id: bool,
     ) -> Result<(GraphDocument, Vec<String>), String> {
-        let fields = AssetFields::collect(document, self.composition.as_ref())?;
+        let fields = AssetFields::collect(
+            document,
+            self.composition.as_ref(),
+            self.property_objects.as_ref(),
+        )?;
         let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
         let matches =
             |text: &str| same_path(text, old) || (rewrite_id && text == asset_reference(id));
@@ -1123,7 +1142,11 @@ impl AssetWorkspace {
         // Detaching an authored value may expose the same deleted asset from
         // its schema default. Preflight this effective dependency as well, so
         // neither a missing pointer nor field removal can bypass the guard.
-        let candidate_fields = AssetFields::collect(&candidate, self.composition.as_ref())?;
+        let candidate_fields = AssetFields::collect(
+            &candidate,
+            self.composition.as_ref(),
+            self.property_objects.as_ref(),
+        )?;
         reject_schema_default_rewrites(&candidate_fields, matches)?;
         Ok((candidate, diagnostics))
     }
@@ -1943,6 +1966,719 @@ mod tests {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 248, 15, 4, 0, 9,
         251, 3, 253, 251, 94, 107, 43, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
+    fn property_asset_workspace(
+        workspace: AssetWorkspace,
+        doc: &mut GraphDocument,
+        properties: Vec<module_engine_core::PropertySchema>,
+    ) -> AssetWorkspace {
+        property_asset_workspace_with_world(workspace, doc, properties, None)
+    }
+    fn property_asset_workspace_with_world(
+        workspace: AssetWorkspace,
+        doc: &mut GraphDocument,
+        properties: Vec<module_engine_core::PropertySchema>,
+        world_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> AssetWorkspace {
+        use module_engine_core::{
+            CompositionContext, ModuleDescriptor, ModuleRegistry, SdkIdentity, SystemRegistry,
+        };
+        let mut modules = ModuleRegistry::builtin();
+        if let Some(calls) = world_calls {
+            modules
+                .register_world(
+                    module_engine_core::world_descriptor(
+                        "audit.property.world",
+                        "Property fixture world",
+                        "IDs differ from the authoring scene",
+                    ),
+                    move |_| {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let objects = [17, 29]
+                            .into_iter()
+                            .map(|id| module_engine_core::WorldObject {
+                                id,
+                                parent: None,
+                                transform: module_engine_core::Transform::default(),
+                                color: [255; 4],
+                            })
+                            .collect();
+                        Ok(Box::new(module_engine_core::ObjectsWorld::from_objects(
+                            objects,
+                        )?))
+                    },
+                )
+                .unwrap();
+            doc.root
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == "world")
+                .unwrap()
+                .module = "audit.property.world".into();
+        }
+        modules
+            .register_module(ModuleDescriptor {
+                id: "audit.property.assets".into(),
+                label: "Property asset contracts".into(),
+                description: String::new(),
+                inputs: vec![],
+                outputs: vec![],
+                properties,
+            })
+            .unwrap();
+        modules
+            .set_module_version("audit.property.assets", "1")
+            .unwrap();
+        let composition = CompositionContext::new(modules, SystemRegistry::builtin()).unwrap();
+        doc.engine.initialized = true;
+        doc.engine
+            .enabled_modules
+            .insert("audit.property.assets".into());
+        let profile = crate::EngineProfile::new(
+            "audit-property-assets",
+            "1",
+            crate::EngineBlueprint {
+                root: doc.root.clone(),
+                engine: doc.engine.clone(),
+                custom_sources: doc.custom_sources.clone(),
+                shader_sources: doc.shader_sources.clone(),
+                default_execution: doc.game.as_ref().unwrap().execution.clone(),
+                available_modules: composition.module_versions().into_keys().collect(),
+            },
+        )
+        .unwrap();
+        doc.engine_profile = Some(profile.document_value().unwrap());
+        composition
+            .capture_lock(doc, profile.identity.clone(), Some(SdkIdentity::current()))
+            .unwrap()
+            .apply_to(doc);
+        let validator = composition.clone();
+        workspace
+            .with_composition(composition)
+            .with_validator(move |candidate| {
+                profile.validate_with_sdk(candidate, &validator, Some(&SdkIdentity::current()))?;
+                let errors: Vec<_> = validator
+                    .validate_document(candidate)
+                    .into_iter()
+                    .filter(|d| d.severity == module_engine_core::Severity::Error)
+                    .map(|d| d.message)
+                    .collect();
+                if !errors.is_empty() {
+                    return Err(errors.join("; "));
+                }
+                validator.validate_game(candidate)
+            })
+    }
+    fn property_asset_field(
+        scope: module_engine_core::PropertyScope,
+        default: Value,
+        optional: bool,
+    ) -> module_engine_core::PropertySchema {
+        module_engine_core::PropertySchema {
+            id: "audit.property.logo".into(),
+            label: "Logo".into(),
+            scope,
+            value_type: module_engine_core::PropertyType::AssetReference {
+                kinds: vec!["png".into()],
+                optional,
+            },
+            default,
+            requires_modules: vec![],
+            requires_components: vec![],
+        }
+    }
+    fn property_values<'a>(
+        data: &'a mut module_engine_core::PropertyData,
+        scope: &module_engine_core::PropertyScope,
+        object: u64,
+    ) -> &'a mut module_engine_core::PropertyValues {
+        use module_engine_core::PropertyScope;
+        match scope {
+            PropertyScope::Global => &mut data.global,
+            PropertyScope::Module => data
+                .modules
+                .entry("audit.property.assets".into())
+                .or_default(),
+            PropertyScope::Object => data.objects.entry(object).or_default(),
+            PropertyScope::Component { component } => data
+                .components
+                .entry(object)
+                .or_default()
+                .entry(component.clone())
+                .or_default(),
+        }
+    }
+    fn resolved_property_value(
+        workspace: &AssetWorkspace,
+        document: &GraphDocument,
+        objects: &BTreeSet<u64>,
+        scope: &module_engine_core::PropertyScope,
+        object: u64,
+    ) -> Option<Value> {
+        use module_engine_core::PropertyScope;
+        let composition = workspace.composition.as_ref().unwrap();
+        let resolved =
+            module_engine_core::resolved_properties(document, &composition.modules, objects);
+        match scope {
+            PropertyScope::Global => resolved.global.get("audit.property.logo"),
+            PropertyScope::Module => resolved
+                .modules
+                .get("audit.property.assets")
+                .and_then(|v| v.get("audit.property.logo")),
+            PropertyScope::Object => resolved
+                .objects
+                .get(&object)
+                .and_then(|v| v.get("audit.property.logo")),
+            PropertyScope::Component { component } => resolved
+                .components
+                .get(&object)
+                .and_then(|v| v.get(component))
+                .and_then(|v| v.get("audit.property.logo")),
+        }
+        .cloned()
+    }
+
+    #[test]
+    fn property_global_and_module_defaults_prevent_asset_mutations_before_disk_commit() {
+        use module_engine_core::{PropertyScope, resolved_properties};
+        for scope in [PropertyScope::Global, PropertyScope::Module] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            write(&root, "assets/textures/b.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let replacement = id(&doc, "assets/textures/b.png");
+            let workspace = property_asset_workspace(
+                workspace,
+                &mut doc,
+                vec![property_asset_field(
+                    scope.clone(),
+                    json!("assets/textures/a.png"),
+                    false,
+                )],
+            );
+            workspace.validate_candidate(&doc).unwrap();
+            let composition = workspace.composition.as_ref().unwrap();
+            let effective = resolved_properties(&doc, &composition.modules, &BTreeSet::new());
+            let reference = match scope {
+                PropertyScope::Global => &effective.global["audit.property.logo"],
+                _ => &effective.modules["audit.property.assets"]["audit.property.logo"],
+            };
+            assert_eq!(reference, "assets/textures/a.png");
+            let properties_before = composition
+                .modules
+                .descriptor("audit.property.assets")
+                .unwrap()
+                .properties
+                .clone();
+            let usages = workspace.usages(&doc, &asset).unwrap();
+            assert_eq!(usages.len(), 1, "{scope:?}: {usages:?}");
+            assert!(usages[0].location.starts_with("property-default:"));
+            assert_eq!(usages[0].reference, "assets/textures/a.png");
+            let project = root.join("project.json");
+            crate::save_document_with_backup(&project, &doc).unwrap();
+            let before = fs::read(&project).unwrap();
+            let error = workspace
+                .move_asset(&doc, &asset, "assets/textures/moved.png")
+                .unwrap_err();
+            assert!(
+                error.contains("immutable installed schema default"),
+                "{error}"
+            );
+            for policy in [
+                DeletePolicy::RefuseUsed,
+                DeletePolicy::Detach,
+                DeletePolicy::ReplaceWith(replacement),
+            ] {
+                assert!(
+                    workspace
+                        .delete_asset(&doc, &asset, policy)
+                        .unwrap_err()
+                        .contains("property-default:")
+                );
+            }
+            assert_eq!(
+                fs::read(root.join("assets/textures/a.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            assert_eq!(
+                fs::read(root.join("assets/textures/b.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            assert!(!root.join("assets/textures/moved.png").exists());
+            assert!(!root.join(".asset-history").exists());
+            assert!(!root.join(".asset-trash").exists());
+            assert_eq!(fs::read(project).unwrap(), before);
+            assert_eq!(
+                composition
+                    .modules
+                    .descriptor("audit.property.assets")
+                    .unwrap()
+                    .properties,
+                properties_before
+            );
+            workspace.validate_candidate(&doc).unwrap();
+            AssetManifest::from_value(&doc.asset_manifest)
+                .unwrap()
+                .verify(&root)
+                .unwrap();
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn property_object_defaults_use_live_ids_and_legacy_attachments_without_creating_worlds() {
+        use module_engine_core::{PropertyScope, PropertyType};
+        for scope in [
+            PropertyScope::Object,
+            PropertyScope::Component {
+                component: "legacy.logo".into(),
+            },
+        ] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let mut field =
+                property_asset_field(scope.clone(), json!("assets/textures/a.png"), false);
+            field.requires_modules = vec!["clock.time".into()];
+            field.requires_components = vec!["legacy.gate".into()];
+            let mut gate = property_asset_field(
+                PropertyScope::Component {
+                    component: "legacy.gate".into(),
+                },
+                json!(true),
+                false,
+            );
+            gate.id = "audit.property.gate".into();
+            gate.value_type = PropertyType::Boolean;
+            doc.properties
+                .active
+                .components
+                .entry(17)
+                .or_default()
+                .insert("legacy.gate".into(), BTreeMap::new());
+            if let PropertyScope::Component { component } = &scope {
+                for id in [17, 29] {
+                    doc.properties
+                        .active
+                        .components
+                        .entry(id)
+                        .or_default()
+                        .insert(component.clone(), BTreeMap::new());
+                }
+            }
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut properties = vec![field, gate];
+            if let PropertyScope::Component { component } = &scope {
+                // Keep this attachment valid on object29 independently of the
+                // gated asset field; otherwise Core correctly rejects the
+                // fixture before we can test per-object field availability.
+                let mut attached = property_asset_field(
+                    PropertyScope::Component {
+                        component: component.clone(),
+                    },
+                    json!(true),
+                    false,
+                );
+                attached.id = "audit.property.attached".into();
+                attached.value_type = PropertyType::Boolean;
+                properties.push(attached);
+            }
+            let workspace = property_asset_workspace_with_world(
+                workspace,
+                &mut doc,
+                properties,
+                Some(calls.clone()),
+            );
+            let runtime = module_engine_core::Runtime::from_document(
+                &doc,
+                &workspace.composition.as_ref().unwrap().modules,
+            )
+            .unwrap();
+            let objects: BTreeSet<_> = runtime
+                .objects()
+                .unwrap()
+                .into_iter()
+                .map(|object| object.id)
+                .collect();
+            assert_eq!(objects, BTreeSet::from([17, 29]));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                doc.game.as_ref().unwrap().scenes["arena"]
+                    .objects
+                    .iter()
+                    .map(|object| object.object.id)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([1, 2])
+            );
+            assert!(doc.properties.active.objects.is_empty());
+            let error = workspace.usages(&doc, &asset).unwrap_err();
+            assert!(
+                error.contains("current live property-object ID snapshot"),
+                "{error}"
+            );
+            assert!(
+                workspace
+                    .move_asset(&doc, &asset, "assets/textures/moved.png")
+                    .unwrap_err()
+                    .contains("current live property-object ID snapshot")
+            );
+            let workspace = workspace.with_property_object_ids(objects.clone());
+            workspace.validate_candidate(&doc).unwrap();
+            assert_eq!(
+                resolved_property_value(&workspace, &doc, &objects, &scope, 17),
+                Some(json!("assets/textures/a.png"))
+            );
+            assert_eq!(
+                resolved_property_value(&workspace, &doc, &objects, &scope, 29),
+                None,
+                "requirements are per-object"
+            );
+            let usages = workspace.usages(&doc, &asset).unwrap();
+            assert_eq!(usages.len(), 1, "{scope:?}: {usages:?}");
+            assert!(usages[0].location.starts_with("property-default:"));
+            assert!(usages[0].location.contains("/17/"));
+            assert!(!usages[0].location.contains("/29/"));
+            for error in [
+                workspace
+                    .move_asset(&doc, &asset, "assets/textures/moved.png")
+                    .unwrap_err(),
+                workspace
+                    .delete_asset(&doc, &asset, DeletePolicy::RefuseUsed)
+                    .unwrap_err(),
+                workspace
+                    .delete_asset(&doc, &asset, DeletePolicy::Detach)
+                    .unwrap_err(),
+            ] {
+                assert!(error.contains("property-default:"), "{error}");
+            }
+            assert_eq!(
+                fs::read(root.join("assets/textures/a.png")).unwrap(),
+                DEFAULT_ASSET_PNG
+            );
+            assert!(!root.join("assets/textures/moved.png").exists());
+            assert!(!root.join(".asset-history").exists());
+            assert!(!root.join(".asset-trash").exists());
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "dependency collection must not instantiate a provider"
+            );
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
+    #[test]
+    fn property_defaults_preserve_null_stable_ids_and_guard_detach_resurrection_in_every_scope() {
+        use module_engine_core::PropertyScope;
+        for scope in [
+            PropertyScope::Global,
+            PropertyScope::Module,
+            PropertyScope::Object,
+            PropertyScope::Component {
+                component: "legacy.logo".into(),
+            },
+        ] {
+            for mode in ["stable-id", "null", "detach-fallback"] {
+                let (root, workspace, mut doc) = fixture();
+                write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+                write(&root, "assets/textures/b.png", DEFAULT_ASSET_PNG);
+                workspace.synchronize(&mut doc).unwrap();
+                let asset = id(&doc, "assets/textures/a.png");
+                let replacement = id(&doc, "assets/textures/b.png");
+                if let PropertyScope::Component { component } = &scope {
+                    doc.properties
+                        .active
+                        .components
+                        .entry(1)
+                        .or_default()
+                        .insert(component.clone(), BTreeMap::new());
+                }
+                if mode == "null" || mode == "detach-fallback" {
+                    property_values(&mut doc.properties.active, &scope, 1).insert(
+                        "audit.property.logo".into(),
+                        if mode == "null" {
+                            Value::Null
+                        } else {
+                            json!("assets/textures/a.png")
+                        },
+                    );
+                }
+                // Object defaults are resolved for every live ID, including
+                // those without an authored object-value map. Suppress the
+                // other live participants explicitly for this one-object test.
+                if scope == PropertyScope::Object {
+                    for object in [2, 3, 4] {
+                        property_values(&mut doc.properties.active, &scope, object)
+                            .insert("audit.property.logo".into(), Value::Null);
+                    }
+                }
+                let default = if mode == "stable-id" {
+                    json!(asset_reference(&asset))
+                } else {
+                    json!("assets/textures/a.png")
+                };
+                let workspace = property_asset_workspace(
+                    workspace,
+                    &mut doc,
+                    vec![property_asset_field(scope.clone(), default.clone(), true)],
+                );
+                let runtime = module_engine_core::Runtime::from_document(
+                    &doc,
+                    &workspace.composition.as_ref().unwrap().modules,
+                )
+                .unwrap();
+                let objects: BTreeSet<_> = runtime
+                    .objects()
+                    .unwrap()
+                    .into_iter()
+                    .map(|object| object.id)
+                    .collect();
+                assert_eq!(objects, BTreeSet::from([1, 2, 3, 4]));
+                let workspace = workspace.with_property_object_ids(objects.clone());
+                workspace.validate_candidate(&doc).unwrap();
+                let expected = if mode == "null" { Value::Null } else { default };
+                assert_eq!(
+                    resolved_property_value(&workspace, &doc, &objects, &scope, 1),
+                    Some(expected.clone())
+                );
+                let contract = workspace
+                    .composition
+                    .as_ref()
+                    .unwrap()
+                    .modules
+                    .descriptor("audit.property.assets")
+                    .unwrap()
+                    .clone();
+                if mode == "detach-fallback" {
+                    assert_eq!(workspace.usages(&doc, &asset).unwrap().len(), 1);
+                    let error = workspace
+                        .delete_asset(&doc, &asset, DeletePolicy::Detach)
+                        .unwrap_err();
+                    assert!(
+                        error.contains("immutable installed schema default")
+                            && error.contains("property-default:"),
+                        "{scope:?}: {error}"
+                    );
+                    assert!(!root.join(".asset-history").exists());
+                    assert!(!root.join(".asset-trash").exists());
+                    // An explicit replacement remains authored, suppresses the
+                    // old default, and can safely publish files and references.
+                    let replaced = workspace
+                        .delete_asset(&doc, &asset, DeletePolicy::ReplaceWith(replacement.clone()))
+                        .unwrap();
+                    workspace.validate_candidate(&replaced.document).unwrap();
+                    assert_eq!(
+                        resolved_property_value(
+                            &workspace,
+                            &replaced.document,
+                            &objects,
+                            &scope,
+                            1
+                        ),
+                        Some(json!(asset_reference(&replacement)))
+                    );
+                    assert_eq!(
+                        replaced.record.undo(&root, &replaced.document).unwrap(),
+                        doc
+                    );
+                } else {
+                    let usages = workspace.usages(&doc, &asset).unwrap();
+                    assert_eq!(usages.len(), usize::from(mode == "stable-id"));
+                    let moved = workspace
+                        .move_asset(&doc, &asset, "assets/textures/moved.png")
+                        .unwrap();
+                    workspace.validate_candidate(&moved.document).unwrap();
+                    assert_eq!(moved.document.properties, doc.properties);
+                    assert_eq!(
+                        resolved_property_value(&workspace, &moved.document, &objects, &scope, 1),
+                        Some(expected)
+                    );
+                    if mode == "stable-id" {
+                        for policy in [
+                            DeletePolicy::RefuseUsed,
+                            DeletePolicy::Detach,
+                            DeletePolicy::ReplaceWith(replacement.clone()),
+                        ] {
+                            assert!(
+                                workspace
+                                    .delete_asset(&moved.document, &asset, policy)
+                                    .unwrap_err()
+                                    .contains("property-default:")
+                            );
+                        }
+                        assert_eq!(moved.record.undo(&root, &moved.document).unwrap(), doc);
+                    } else {
+                        let deleted = workspace
+                            .delete_asset(&moved.document, &asset, DeletePolicy::RefuseUsed)
+                            .unwrap();
+                        assert_eq!(
+                            resolved_property_value(
+                                &workspace,
+                                &deleted.document,
+                                &objects,
+                                &scope,
+                                1
+                            ),
+                            Some(Value::Null)
+                        );
+                        let restored = deleted.record.undo(&root, &deleted.document).unwrap();
+                        assert_eq!(restored, moved.document);
+                        assert_eq!(moved.record.undo(&root, &restored).unwrap(), doc);
+                    }
+                }
+                assert_eq!(
+                    workspace
+                        .composition
+                        .as_ref()
+                        .unwrap()
+                        .modules
+                        .descriptor("audit.property.assets")
+                        .unwrap(),
+                    &contract
+                );
+                AssetManifest::from_value(&doc.asset_manifest)
+                    .unwrap()
+                    .verify(&root)
+                    .unwrap();
+                crate::history::remove_test_directory(&root);
+            }
+        }
+    }
+
+    #[test]
+    fn property_context_is_required_only_for_relevant_active_scopes_and_pinned_owners() {
+        use module_engine_core::{PropertyScope, PropertyType};
+        for mode in [
+            "unknown-object",
+            "unknown-component",
+            "known-empty",
+            "no-attachment",
+            "missing-module",
+            "text",
+            "stale-owner",
+            "missing-owner",
+            "inactive-owner",
+        ] {
+            let (root, workspace, mut doc) = fixture();
+            write(&root, "assets/textures/a.png", DEFAULT_ASSET_PNG);
+            workspace.synchronize(&mut doc).unwrap();
+            let asset = id(&doc, "assets/textures/a.png");
+            let scope = if matches!(mode, "unknown-component" | "no-attachment") {
+                PropertyScope::Component {
+                    component: "legacy.logo".into(),
+                }
+            } else if matches!(mode, "stale-owner" | "missing-owner" | "inactive-owner") {
+                PropertyScope::Global
+            } else {
+                PropertyScope::Object
+            };
+            let mut field =
+                property_asset_field(scope.clone(), json!("assets/textures/a.png"), true);
+            if mode == "missing-module" {
+                field.requires_modules = vec!["audit.not_enabled".into()];
+            }
+            if mode == "text" {
+                field.value_type = PropertyType::Text { max_len: 1024 };
+                property_values(&mut doc.properties.active, &scope, 1)
+                    .insert(field.id.clone(), json!("assets/textures/a.png"));
+            }
+            if mode == "unknown-component" {
+                doc.properties
+                    .active
+                    .components
+                    .entry(1)
+                    .or_default()
+                    .insert("legacy.logo".into(), BTreeMap::new());
+            }
+            let mut workspace = property_asset_workspace(workspace, &mut doc, vec![field]);
+            if mode == "known-empty" {
+                let mut runtime = module_engine_core::Runtime::from_document(
+                    &doc,
+                    &workspace.composition.as_ref().unwrap().modules,
+                )
+                .unwrap();
+                let mut ids: Vec<_> = runtime
+                    .objects()
+                    .unwrap()
+                    .into_iter()
+                    .map(|object| object.id)
+                    .collect();
+                ids.sort_unstable_by(|a, b| b.cmp(a));
+                let commands: Vec<_> = ids
+                    .into_iter()
+                    .map(|id| {
+                        module_engine_core::ControlCommand::World(
+                            module_engine_core::WorldCommand::Remove { id },
+                        )
+                    })
+                    .collect();
+                runtime.apply_controls(&commands).unwrap();
+                let actual: BTreeSet<_> = runtime
+                    .objects()
+                    .unwrap()
+                    .into_iter()
+                    .map(|object| object.id)
+                    .collect();
+                assert!(actual.is_empty());
+                workspace = workspace.with_property_object_ids(actual);
+            } else if matches!(mode, "stale-owner" | "missing-owner") {
+                doc.properties
+                    .active
+                    .global
+                    .insert("audit.property.logo".into(), json!("assets/textures/a.png"));
+                if mode == "stale-owner" {
+                    doc.module_versions
+                        .insert("audit.property.assets".into(), "archived".into());
+                } else {
+                    doc.module_versions.remove("audit.property.assets");
+                }
+                // The source caller deliberately skips full-lock validation to
+                // exercise preservation of archived/mismatched contract bytes.
+                workspace.validator = None;
+            } else if mode == "inactive-owner" {
+                doc.engine.enabled_modules.remove("audit.property.assets");
+                doc.properties
+                    .inactive
+                    .global
+                    .insert("audit.property.logo".into(), json!("assets/textures/a.png"));
+            }
+            if mode.starts_with("unknown-") {
+                for error in [
+                    workspace.usages(&doc, &asset).unwrap_err(),
+                    workspace
+                        .move_asset(&doc, &asset, "assets/textures/moved.png")
+                        .unwrap_err(),
+                    workspace
+                        .delete_asset(&doc, &asset, DeletePolicy::RefuseUsed)
+                        .unwrap_err(),
+                ] {
+                    assert!(
+                        error.contains("current live property-object ID snapshot"),
+                        "{mode}: {error}"
+                    );
+                }
+                assert_eq!(
+                    fs::read(root.join("assets/textures/a.png")).unwrap(),
+                    DEFAULT_ASSET_PNG
+                );
+                assert!(!root.join(".asset-history").exists());
+                assert!(!root.join(".asset-trash").exists());
+            } else {
+                assert!(workspace.usages(&doc, &asset).unwrap().is_empty(), "{mode}");
+                let moved = workspace
+                    .move_asset(&doc, &asset, "assets/textures/moved.png")
+                    .unwrap();
+                assert_eq!(moved.document.properties, doc.properties, "{mode}");
+                assert_eq!(moved.document.engine_profile, doc.engine_profile);
+                assert_eq!(moved.document.engine_lock, doc.engine_lock);
+                assert_eq!(moved.document.module_versions, doc.module_versions);
+                assert_eq!(moved.record.undo(&root, &moved.document).unwrap(), doc);
+            }
+            crate::history::remove_test_directory(&root);
+        }
+    }
+
     fn schema_default_workspace(
         workspace: AssetWorkspace,
         doc: &mut GraphDocument,

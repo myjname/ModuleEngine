@@ -19,9 +19,49 @@ use std::{
 const THUMBNAIL_EDGE: usize = 192;
 const MAX_CACHED_THUMBNAILS: usize = 256;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogContext {
+    backend_root: Option<PathBuf>,
+    property_object_ids: Option<BTreeSet<u64>>,
+}
+impl CatalogContext {
+    fn selected(
+        backend_root: &Path,
+        property_object_ids: Option<BTreeSet<u64>>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            backend_root: Some(
+                backend_root
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?,
+            ),
+            property_object_ids,
+        })
+    }
+    #[cfg(test)]
+    fn source_only() -> Self {
+        Self {
+            backend_root: None,
+            property_object_ids: None,
+        }
+    }
+    fn service(&self, root: &Path, protected: Vec<String>) -> Result<AssetWorkspace, String> {
+        match &self.backend_root {
+            Some(backend) => crate::host::asset_workspace_at(
+                root,
+                protected,
+                backend,
+                self.property_object_ids.clone(),
+            ),
+            None => AssetWorkspace::new(root, protected),
+        }
+    }
+}
+
 struct CatalogScanJob {
     root: PathBuf,
     protected: Vec<String>,
+    context: CatalogContext,
     document: GraphDocument,
     results: mpsc::Receiver<Result<CatalogScan, String>>,
 }
@@ -38,6 +78,7 @@ pub struct AssetsWorkbench {
     browsers: BTreeMap<(String, u64), BrowserState>,
     root: Option<PathBuf>,
     protected: Vec<String>,
+    context: Option<CatalogContext>,
     service: Option<AssetWorkspace>,
     pub tiles: Vec<AssetTile>,
     pub folders: Vec<String>,
@@ -86,30 +127,65 @@ impl AssetsWorkbench {
     pub fn browser(&self, workspace: &str, pane_id: u64) -> Option<&BrowserState> {
         self.browsers.get(&(workspace.into(), pane_id))
     }
+    #[cfg(test)]
     pub fn needs_synchronization(&self, root: &Path, protected: &[String]) -> bool {
+        self.needs_synchronization_with_context(root, protected, &CatalogContext::source_only())
+    }
+    fn needs_synchronization_with_context(
+        &self,
+        root: &Path,
+        protected: &[String],
+        context: &CatalogContext,
+    ) -> bool {
         self.scan.is_some()
             || self.scan_needed
             || !self.initialized
             || self.root.as_deref() != Some(root)
             || self.protected != protected
+            || self.context.as_ref() != Some(context)
     }
     /// Returns a candidate only when indexing changed the manifest. Caller owns
     /// policy validation, dirty state and the document-history boundary.
+    #[cfg(test)]
     pub fn synchronize_cache(
         &mut self,
         document: &GraphDocument,
         root: &Path,
         protected: Vec<String>,
     ) -> Result<Option<GraphDocument>, String> {
+        self.synchronize_cache_with_context(
+            document,
+            root,
+            protected,
+            CatalogContext::source_only(),
+        )
+    }
+    fn synchronize_cache_with_context(
+        &mut self,
+        document: &GraphDocument,
+        root: &Path,
+        protected: Vec<String>,
+        context: CatalogContext,
+    ) -> Result<Option<GraphDocument>, String> {
         let root = root
             .canonicalize()
             .map_err(|error| format!("Папка ресурсов: {error}"))?;
-        let service = AssetWorkspace::new(&root, protected.clone())?;
+        let service = context.service(&root, protected.clone())?;
+        self.synchronize_cache_with_service(document, &root, protected, context, service)
+    }
+    fn synchronize_cache_with_service(
+        &mut self,
+        document: &GraphDocument,
+        root: &Path,
+        protected: Vec<String>,
+        context: CatalogContext,
+        service: AssetWorkspace,
+    ) -> Result<Option<GraphDocument>, String> {
         let mut candidate = document.clone();
         let infos = service.synchronize(&mut candidate)?;
         let mut folders = vec![];
         collect_folders(
-            &root,
+            root,
             "assets",
             &protected,
             &mut BTreeSet::new(),
@@ -132,7 +208,7 @@ impl AssetsWorkbench {
             }
             if kind == AssetKind::Audio
                 && !info.missing
-                && let Ok(path) = resolve_relative(&root, &info.path)
+                && let Ok(path) = resolve_relative(root, &info.path)
             {
                 match wav_metadata(&path) {
                     Ok(audio) => metadata.extend(audio),
@@ -176,15 +252,20 @@ impl AssetsWorkbench {
                 })
             })
             .collect();
-        if self.root.as_ref().is_some_and(|previous| previous != &root) {
+        if self
+            .root
+            .as_deref()
+            .is_some_and(|previous| previous != root)
+        {
             self.browsers.clear();
         }
         self.invalidate();
         self.tiles = tiles;
         self.folders = folders;
         self.trash = trash;
-        self.root = Some(root);
+        self.root = Some(root.to_path_buf());
         self.protected = protected;
+        self.context = Some(context);
         self.service = Some(service);
         self.worker = None;
         self.scan_needed = false;
@@ -193,7 +274,23 @@ impl AssetsWorkbench {
         self.error = None;
         Ok((candidate != *document).then_some(candidate))
     }
-    pub fn refresh_usages(&mut self, document: &GraphDocument) -> Result<(), String> {
+    fn clear_stale_usages(&mut self, context: &CatalogContext) {
+        if self.context.as_ref() != Some(context) {
+            for tile in &mut self.tiles {
+                tile.usages.clear();
+            }
+            self.usages_dirty = true;
+        }
+    }
+    fn refresh_usages(
+        &mut self,
+        document: &GraphDocument,
+        context: &CatalogContext,
+    ) -> Result<(), String> {
+        self.clear_stale_usages(context);
+        if self.context.as_ref() != Some(context) {
+            return Ok(());
+        }
         if let Some(service) = &self.service {
             let mut all_usages = service.usages_batch(document)?;
             for tile in &mut self.tiles {
@@ -211,6 +308,7 @@ impl AssetsWorkbench {
 
     /// Hashing/scanning runs outside the native UI. Only metadata from the
     /// matching project/index request is adopted; concurrent scene edits stay.
+    #[cfg(test)]
     fn synchronize_in_background(
         &mut self,
         document: &GraphDocument,
@@ -218,11 +316,26 @@ impl AssetsWorkbench {
         protected: Vec<String>,
         ctx: &egui::Context,
     ) -> Result<Option<GraphDocument>, String> {
-        if self
-            .scan
-            .as_ref()
-            .is_some_and(|job| job.root != root || job.protected != protected)
-        {
+        self.synchronize_in_background_with_context(
+            document,
+            root,
+            protected,
+            CatalogContext::source_only(),
+            ctx,
+        )
+    }
+    fn synchronize_in_background_with_context(
+        &mut self,
+        document: &GraphDocument,
+        root: &Path,
+        protected: Vec<String>,
+        context: CatalogContext,
+        ctx: &egui::Context,
+    ) -> Result<Option<GraphDocument>, String> {
+        self.clear_stale_usages(&context);
+        if self.scan.as_ref().is_some_and(|job| {
+            job.root != root || job.protected != protected || job.context != context
+        }) {
             self.scan = None;
         }
         if let Some(job) = &self.scan {
@@ -266,6 +379,7 @@ impl AssetsWorkbench {
             self.trash = catalog.trash;
             self.root = Some(job.root);
             self.protected = job.protected;
+            self.context = Some(job.context);
             self.service = Some(catalog.service);
             self.scan_needed = false;
             self.initialized = true;
@@ -277,13 +391,19 @@ impl AssetsWorkbench {
         let worker_root = root.clone();
         let worker_protected = protected.clone();
         let worker_document = document.clone();
+        let worker_context = context.clone();
         let ctx = ctx.clone();
         let (sender, results) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
                 let mut cache = AssetsWorkbench::default();
                 let candidate = cache
-                    .synchronize_cache(&worker_document, &worker_root, worker_protected)?
+                    .synchronize_cache_with_context(
+                        &worker_document,
+                        &worker_root,
+                        worker_protected,
+                        worker_context,
+                    )?
                     .unwrap_or(worker_document);
                 Ok(CatalogScan {
                     manifest: candidate.asset_manifest,
@@ -299,6 +419,7 @@ impl AssetsWorkbench {
         self.scan = Some(CatalogScanJob {
             root,
             protected,
+            context,
             document: document.clone(),
             results,
         });
@@ -459,15 +580,35 @@ impl super::Editor {
         let root = self.project_asset_root();
         let protected = self.asset_protected_paths();
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let backend_root = self
+            .distribution
+            .as_ref()
+            .map(|distribution| distribution.package_root.clone())
+            .unwrap_or_else(crate::project::source_root);
+        let context =
+            match CatalogContext::selected(&backend_root, self.asset_property_object_ids()) {
+                Ok(context) => context,
+                Err(error) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, &error);
+                    self.assets.error = Some(error);
+                    return;
+                }
+            };
+        self.assets.clear_stale_usages(&context);
         let busy = self.playing
             || self.game_workbench.is_play_session()
             || self.workflow.blocks_document_edits()
             || self.json_dirty;
-        if !busy && self.assets.needs_synchronization(&canonical, &protected) {
-            match self.assets.synchronize_in_background(
+        if !busy
+            && self
+                .assets
+                .needs_synchronization_with_context(&canonical, &protected, &context)
+        {
+            match self.assets.synchronize_in_background_with_context(
                 &self.document,
                 &canonical,
                 protected.clone(),
+                context.clone(),
                 ui.ctx(),
             ) {
                 Ok(Some(candidate)) => {
@@ -482,6 +623,7 @@ impl super::Editor {
                     self.assets.service = None;
                     self.assets.root = Some(canonical.clone());
                     self.assets.protected = protected;
+                    self.assets.context = Some(context.clone());
                     self.assets.initialized = true;
                     self.assets.scan_needed = false;
                     self.assets.error = Some(error);
@@ -489,7 +631,7 @@ impl super::Editor {
             }
         }
         if self.assets.usages_dirty
-            && let Err(error) = self.assets.refresh_usages(&self.document)
+            && let Err(error) = self.assets.refresh_usages(&self.document, &context)
         {
             self.assets.error = Some(error);
         }
@@ -941,6 +1083,175 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn catalog_keeps_selected_property_contracts_and_refreshes_default_usages() {
+        use module_engine_core::{
+            CompositionContext, ModuleDescriptor, ModuleRegistry, PropertySchema, PropertyScope,
+            PropertyType, SystemRegistry, WorldKind,
+        };
+        let fixture = Fixture::new();
+        fixture.png("logo.png", [10, 20, 30, 255]);
+        let mut document = module_engine_core::demo_document(WorldKind::Objects);
+        let mut modules = ModuleRegistry::builtin();
+        modules
+            .register_module(ModuleDescriptor {
+                id: "audit.catalog".into(),
+                label: "Catalog contract".into(),
+                description: String::new(),
+                inputs: vec![],
+                outputs: vec![],
+                properties: vec![PropertySchema {
+                    id: "audit.catalog.image".into(),
+                    label: "Logo".into(),
+                    scope: PropertyScope::Global,
+                    value_type: PropertyType::AssetReference {
+                        kinds: vec!["png".into()],
+                        optional: true,
+                    },
+                    default: serde_json::json!("assets/logo.png"),
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                }],
+            })
+            .unwrap();
+        modules.set_module_version("audit.catalog", "1").unwrap();
+        document
+            .engine
+            .enabled_modules
+            .insert("audit.catalog".into());
+        document
+            .module_versions
+            .insert("audit.catalog".into(), "1".into());
+        let composition = CompositionContext::new(modules, SystemRegistry::builtin()).unwrap();
+        let source_only = AssetWorkspace::new(&fixture.root, Vec::<String>::new()).unwrap();
+        source_only.synchronize(&mut document).unwrap();
+        assert!(
+            source_only
+                .usages_batch(&document)
+                .unwrap()
+                .values()
+                .all(Vec::is_empty)
+        );
+        let service = AssetWorkspace::new(&fixture.root, Vec::<String>::new())
+            .unwrap()
+            .with_composition(composition);
+        let context =
+            CatalogContext::selected(&crate::project::source_root(), Some(BTreeSet::new()))
+                .unwrap();
+        let mut cache = AssetsWorkbench::default();
+        cache
+            .synchronize_cache_with_service(
+                &document,
+                &fixture.root.canonicalize().unwrap(),
+                vec![],
+                context.clone(),
+                service,
+            )
+            .unwrap();
+        assert_eq!(cache.context.as_ref(), Some(&context));
+        assert_eq!(cache.tiles.len(), 1);
+        assert_eq!(cache.tiles[0].usages.len(), 1);
+        assert!(cache.tiles[0].usages[0].contains("audit.catalog.image"));
+        document
+            .properties
+            .active
+            .global
+            .insert("audit.catalog.image".into(), serde_json::Value::Null);
+        cache.invalidate_usages();
+        cache.refresh_usages(&document, &context).unwrap();
+        assert!(
+            cache.tiles[0].usages.is_empty(),
+            "explicit optional null suppresses the installed default"
+        );
+        assert!(!cache.usages_dirty);
+    }
+
+    #[test]
+    fn background_catalog_rejects_ready_results_from_other_backend_or_property_objects() {
+        let fixture = Fixture::new();
+        fixture.png("logo.png", [10, 20, 30, 255]);
+        let initial = module_engine_core::demo_document(module_engine_core::WorldKind::Objects);
+        let first = CatalogContext {
+            backend_root: None,
+            property_object_ids: Some(BTreeSet::from([1])),
+        };
+        let mut cache = AssetsWorkbench::default();
+        let document = cache
+            .synchronize_cache_with_context(&initial, &fixture.root, vec![], first.clone())
+            .unwrap()
+            .unwrap();
+        let ctx = egui::Context::default();
+        cache
+            .synchronize_in_background_with_context(
+                &document,
+                &fixture.root,
+                vec![],
+                first.clone(),
+                &ctx,
+            )
+            .unwrap();
+        for next in [
+            CatalogContext {
+                backend_root: None,
+                property_object_ids: Some(BTreeSet::from([2])),
+            },
+            CatalogContext {
+                backend_root: None,
+                property_object_ids: None,
+            },
+            CatalogContext::selected(&crate::project::source_root(), None).unwrap(),
+        ] {
+            // Queue an already completed old result: a wrong adoption would be
+            // immediate and would publish its stale context rather than submit.
+            let prepared = cache
+                .scan
+                .as_ref()
+                .unwrap()
+                .results
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let (sender, results) = mpsc::channel();
+            sender.send(prepared).unwrap();
+            cache.scan.as_mut().unwrap().results = results;
+            cache.tiles[0].usages = vec!["old-context-only".into()];
+            assert!(cache.needs_synchronization_with_context(&fixture.root, &[], &next));
+            assert!(
+                cache
+                    .synchronize_in_background_with_context(
+                        &document,
+                        &fixture.root,
+                        vec![],
+                        next.clone(),
+                        &ctx
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(cache.scan.as_ref().unwrap().context, next);
+            assert_eq!(
+                cache.context.as_ref(),
+                Some(&first),
+                "stale ready result was not adopted"
+            );
+            assert!(cache.tiles[0].usages.is_empty());
+            cache.refresh_usages(&document, &next).unwrap();
+            assert!(
+                cache.tiles[0].usages.is_empty(),
+                "refresh must not reuse the old service"
+            );
+            assert!(cache.usages_dirty);
+        }
+        // Wait for our final metadata worker before deleting its owned fixture.
+        let final_result = cache
+            .scan
+            .take()
+            .unwrap()
+            .results
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(final_result.is_ok());
+    }
+
     #[test]
     fn background_catalog_keeps_latest_scene_edits_and_rejects_an_obsolete_index() {
         let fixture = Fixture::new();

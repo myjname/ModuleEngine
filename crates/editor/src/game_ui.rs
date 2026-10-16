@@ -3307,27 +3307,48 @@ fn component_value(object: &AuthoredObject, prefab: Option<&Prefab>, name: &str)
     }
     value
 }
-fn value_leaves(value: &Value, prefix: &str, result: &mut BTreeMap<String, Value>) {
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ComponentValueSegment {
+    Member(String),
+    Index(usize),
+}
+fn value_leaves(
+    value: &Value,
+    prefix: &mut Vec<ComponentValueSegment>,
+    result: &mut BTreeMap<Vec<ComponentValueSegment>, Value>,
+) {
     if let Value::Object(fields) = value
         && !fields.is_empty()
     {
         for (field, v) in fields {
-            let path = if prefix.is_empty() {
-                field.clone()
-            } else {
-                format!("{prefix}.{field}")
-            };
-            value_leaves(v, &path, result);
+            prefix.push(ComponentValueSegment::Member(field.clone()));
+            value_leaves(v, prefix, result);
+            prefix.pop();
         }
     } else if let Value::Array(values) = value
         && !values.is_empty()
     {
         for (index, value) in values.iter().enumerate() {
-            value_leaves(value, &format!("{prefix}.{index}"), result);
+            prefix.push(ComponentValueSegment::Index(index));
+            value_leaves(value, prefix, result);
+            prefix.pop();
         }
     } else {
-        result.insert(prefix.into(), value.clone());
+        result.insert(prefix.clone(), value.clone());
     }
+}
+fn override_field_path(segments: &[ComponentValueSegment]) -> Option<String> {
+    let mut fields = Vec::with_capacity(segments.len());
+    for segment in segments {
+        fields.push(match segment {
+            ComponentValueSegment::Member(field) if !field.is_empty() && !field.contains('.') => {
+                field.clone()
+            }
+            ComponentValueSegment::Index(index) => index.to_string(),
+            _ => return None,
+        });
+    }
+    (!fields.is_empty()).then(|| fields.join("."))
 }
 fn put_field(value: &mut Value, path: &str, new: Value) {
     let (head, tail) = path
@@ -3410,32 +3431,39 @@ fn apply_component_with_defaults(
     }
     let mut defaults = BTreeMap::new();
     let mut edited = BTreeMap::new();
-    value_leaves(&inherited, "", &mut defaults);
-    value_leaves(&value, "", &mut edited);
+    value_leaves(&inherited, &mut vec![], &mut defaults);
+    value_leaves(&value, &mut vec![], &mut edited);
     let mut local = json!({});
-    for (field, edited_value) in edited {
-        let path = format!("{name}.{field}");
-        if component_override_owner(&path, attachments.iter().map(String::as_str)) != Some(name) {
-            // An opaque aggregate field can share another attachment's namespace.
-            // A dot override would edit that component, so retain it locally.
-            put_field(&mut local, &field, edited_value);
-        } else if let Some(default) = defaults.get(&field) {
-            if &edited_value != default {
+    for (segments, edited_value) in edited {
+        // Equality precedes ownership: unchanged inherited opaque data must not
+        // become local merely because a longer component owns its dot namespace.
+        if defaults.get(&segments) == Some(&edited_value) {
+            continue;
+        }
+        if defaults.contains_key(&segments)
+            && let Some(field) = override_field_path(&segments)
+        {
+            let path = format!("{name}.{field}");
+            if component_override_owner(&path, attachments.iter().map(String::as_str)) == Some(name)
+            {
                 object.overrides.insert(path, edited_value);
-            }
-        } else {
-            put_field(&mut local, &field, edited_value);
-        }
-    }
-    if let (Some(local_fields), Some(edited_fields)) = (local.as_object_mut(), value.as_object()) {
-        // A local top-level member replaces that entire prefab member. Keep the
-        // complete edited aggregate, including inherited and unknown siblings,
-        // whenever one of its leaves cannot be represented by a dot override.
-        for (field, aggregate) in local_fields {
-            if let Some(edited) = edited_fields.get(field) {
-                aggregate.clone_from(edited);
+                continue;
             }
         }
+        // Save-format dot paths cannot express literal dots/empty keys, and a
+        // longer attachment may own an otherwise valid path. Copy the original
+        // top-level member exactly; reconstructing its leaves would rename keys
+        // or turn numeric object members into sparse array indices. Its whole
+        // aggregate also preserves siblings at the authored shallow-merge boundary.
+        let Some(ComponentValueSegment::Member(field)) = segments.first() else {
+            object.components.insert(name.into(), value);
+            return;
+        };
+        local
+            .as_object_mut()
+            .unwrap()
+            .entry(field.clone())
+            .or_insert_with(|| value.as_object().unwrap()[field].clone());
     }
     if local.as_object().is_some_and(|m| !m.is_empty()) {
         object.components.insert(name.into(), local);
@@ -5397,6 +5425,333 @@ pub fn update(ctx: &mut ScriptContext) {
             }
             assert!(workbench.host.is_none() && workbench.preview_host.is_none());
         }
+    }
+
+    #[test]
+    fn inspector_apply_preserves_exact_opaque_members_after_save() {
+        let (composition, mut document, profile) = exact_member_inspector_fixture();
+        let object = &mut document
+            .game
+            .as_mut()
+            .unwrap()
+            .scenes
+            .get_mut("empty")
+            .unwrap()
+            .objects[0];
+        object.components.insert(
+            "foo".into(),
+            json!({
+                "value":4.,
+                "future.key":9,
+                "future":{"key":10,"x.y":11,"x":{"y":12}},
+                "settings.value":99,
+                "settings":{"value":6},
+                "same":{"key":6},
+                "0":{"01":null,"1":"numeric object member"},
+                "/~":{"":null,"a/b":"slash","a~b":"tilde"},
+                "":null,
+                "array":[{"a.b":3,"a":{"b":4}},null,{"0":null}]
+            }),
+        );
+        object.components.insert(
+            "archive.unavailable".into(),
+            json!({"literal.key":[null,{"0":"preserved"}]}),
+        );
+        let archive = object.components["archive.unavailable"].clone();
+        validate_inspector_fixture(&document, &composition, &profile);
+        let before = document
+            .game
+            .as_ref()
+            .unwrap()
+            .resolve_scene_with_registry("empty", &composition.systems)
+            .unwrap()
+            .remove(0);
+        click_inspector_apply(&mut document, &composition, "foo", |_| {});
+        validate_inspector_fixture(&document, &composition, &profile);
+        let artifacts = module_engine_script::TestArtifactGuard::new(
+            &crate::project::source_root().join(".work/test-temp"),
+            "inspector-exact-members",
+        )
+        .unwrap();
+        let path = artifacts.path().join("opaque.json");
+        module_engine_project::save_document_with_backup(&path, &document).unwrap();
+        let reopened = module_engine_project::read_document_strict(&path).unwrap();
+        validate_inspector_fixture(&reopened, &composition, &profile);
+        let game = reopened.game.as_ref().unwrap();
+        let after = game
+            .resolve_scene_with_registry("empty", &composition.systems)
+            .unwrap()
+            .remove(0);
+        assert_eq!(after.components["foo"], before.components["foo"]);
+        assert_eq!(after.components["foo"]["future.key"], json!(9));
+        assert_eq!(after.components["foo"]["future"]["key"], json!(10));
+        assert_eq!(after.components["foo"]["settings.value"], json!(99));
+        assert_eq!(after.components["foo"]["settings"]["value"], json!(6));
+        assert_eq!(
+            game.scenes["empty"].objects[0].overrides["foo.settings.value"],
+            json!(6)
+        );
+        assert_eq!(after.components["foo"]["same.key"], json!(5));
+        assert_eq!(after.components["foo"]["same"]["key"], json!(6));
+        assert_eq!(after.components["foo"]["0"]["01"], Value::Null);
+        assert_eq!(after.components["foo"]["/~"][""], Value::Null);
+        assert_eq!(after.components["foo"]["array"][0]["a.b"], json!(3));
+        assert_eq!(after.components["foo.bar"], before.components["foo.bar"]);
+        assert_eq!(
+            game.scenes["empty"].objects[0].components["archive.unavailable"],
+            archive
+        );
+        assert_eq!(reopened.engine_profile, document.engine_profile);
+        assert_eq!(reopened.engine_lock, document.engine_lock);
+    }
+
+    #[test]
+    fn inspector_unchanged_owner_collision_preserves_prefab_inheritance_after_save() {
+        for edit in [false, true] {
+            let (composition, mut document, profile) = exact_member_inspector_fixture();
+            let authored_before = document.clone();
+            assert!(
+                document.game.as_ref().unwrap().scenes["empty"].objects[0]
+                    .components
+                    .is_empty()
+            );
+            click_inspector_apply(&mut document, &composition, "foo", |draft| {
+                if edit {
+                    draft["bar"]["value"] = json!(3.);
+                }
+            });
+            validate_inspector_fixture(&document, &composition, &profile);
+            let object = &document.game.as_ref().unwrap().scenes["empty"].objects[0];
+            if edit {
+                assert_eq!(
+                    object.components["foo"],
+                    json!({"bar":{"value":3.,"sibling":7}})
+                );
+                assert!(object.overrides.is_empty());
+            } else {
+                assert_eq!(
+                    document, authored_before,
+                    "no-op Apply must preserve inheritance"
+                );
+                assert!(object.components.is_empty());
+            }
+            document
+                .game
+                .as_mut()
+                .unwrap()
+                .prefabs
+                .get_mut("exact")
+                .unwrap()
+                .components
+                .get_mut("foo")
+                .unwrap()["bar"]["value"] = json!(11.);
+            let artifacts = module_engine_script::TestArtifactGuard::new(
+                &crate::project::source_root().join(".work/test-temp"),
+                "inspector-owner-inheritance",
+            )
+            .unwrap();
+            let path = artifacts.path().join(format!("edit-{edit}.json"));
+            module_engine_project::save_document_with_backup(&path, &document).unwrap();
+            let reopened = module_engine_project::read_document_strict(&path).unwrap();
+            validate_inspector_fixture(&reopened, &composition, &profile);
+            let game = reopened.game.as_ref().unwrap();
+            let resolved = game
+                .resolve_scene_with_registry("empty", &composition.systems)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                resolved.components["foo"]["bar"]["value"],
+                json!(if edit { 3. } else { 11. })
+            );
+            assert_eq!(resolved.components["foo"]["bar"]["sibling"], json!(7));
+            assert_eq!(resolved.components["foo.bar"], json!({"value":8.}));
+            if !edit {
+                assert!(game.scenes["empty"].objects[0].components.is_empty());
+            }
+        }
+    }
+
+    fn exact_member_inspector_fixture() -> (
+        CompositionContext,
+        GraphDocument,
+        module_engine_project::EngineProfile,
+    ) {
+        struct Noop;
+        impl ExecutableSystem for Noop {
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut systems = SystemRegistry::builtin();
+        for (id, owner, default) in [
+            ("foo", "review.exact.foo", 1.),
+            ("foo.bar", "review.exact.bar", 8.),
+        ] {
+            let mut defaults = json!({"value":default});
+            let mut fields = vec![PropertySchema {
+                id: format!("{id}.value"),
+                label: "Value".into(),
+                scope: PropertyScope::Component {
+                    component: id.into(),
+                },
+                value_type: PropertyType::Number { min: 0., max: 100. },
+                default: json!(default),
+                requires_modules: vec![],
+                requires_components: vec![],
+            }];
+            if id == "foo" {
+                defaults["settings"] = json!({"value":2});
+                fields.push(PropertySchema {
+                    id: "foo.settings.value".into(),
+                    label: "Registered nested value".into(),
+                    scope: PropertyScope::Component {
+                        component: id.into(),
+                    },
+                    value_type: PropertyType::Number { min: 0., max: 100. },
+                    default: json!(2),
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                });
+            }
+            systems
+                .components_mut()
+                .register(ComponentSchema {
+                    id: id.into(),
+                    owner_module: owner.into(),
+                    version: "1".into(),
+                    label: id.into(),
+                    defaults,
+                    fields,
+                    requires_modules: vec![],
+                    requires_components: vec![],
+                })
+                .unwrap();
+            systems
+                .register(
+                    SystemDescriptor {
+                        id: owner.into(),
+                        state_schema: format!("{owner}/1"),
+                        components: vec![id.into()],
+                        ports: vec![],
+                        requires: vec![],
+                    },
+                    |_| Ok(Box::new(Noop)),
+                )
+                .unwrap();
+        }
+        let composition = CompositionContext::new(ModuleRegistry::builtin(), systems).unwrap();
+        let mut document = source_document();
+        let game = document.game.as_mut().unwrap();
+        game.execution.stages[0].nodes = ["review.exact.foo", "review.exact.bar"]
+            .into_iter()
+            .map(|owner| SystemNode {
+                id: owner.into(),
+                module: owner.into(),
+                params: Value::Null,
+                bindings: BTreeMap::new(),
+                after: vec![],
+            })
+            .collect();
+        game.prefabs.insert(
+            "exact".into(),
+            Prefab {
+                color: [255; 4],
+                components: BTreeMap::from([
+                    (
+                        "foo".into(),
+                        json!({"value":1.,"bar":{"value":2.,"sibling":7},"same.key":5}),
+                    ),
+                    ("foo.bar".into(), json!({"value":8.})),
+                ]),
+            },
+        );
+        game.scenes.get_mut("empty").unwrap().objects[0].prefab = Some("exact".into());
+        let profile = crate::engine_profiles::from_blueprint(
+            &document,
+            &composition,
+            crate::engine_profiles::ProfileKind::Neutral,
+        )
+        .unwrap();
+        crate::engine_profiles::attach(&mut document, &composition, &profile).unwrap();
+        validate_inspector_fixture(&document, &composition, &profile);
+        (composition, document, profile)
+    }
+
+    fn validate_inspector_fixture(
+        document: &GraphDocument,
+        composition: &CompositionContext,
+        profile: &module_engine_project::EngineProfile,
+    ) {
+        profile
+            .validate_with_sdk(document, composition, Some(&SdkIdentity::current()))
+            .unwrap();
+        let errors: Vec<_> = composition
+            .validate_document(document)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        composition.validate_game(document).unwrap();
+    }
+
+    fn click_inspector_apply(
+        document: &mut GraphDocument,
+        composition: &CompositionContext,
+        component: &str,
+        edit: impl FnOnce(&mut Value),
+    ) {
+        let mut workbench = GameWorkbench::default();
+        workbench.scene = "empty".into();
+        workbench.select(Some(1));
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.);
+        let frame = |workbench: &mut GameWorkbench, document: &mut GraphDocument, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1200., 1600.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    workbench.inspector_ui_with_composition(ui, document, composition);
+                },
+            )
+        };
+        let output = frame(&mut workbench, document, vec![]);
+        assert!(workbench.error.is_none(), "{:?}", workbench.error);
+        let point = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Apply fields" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("ordinary Inspector Apply button");
+        output.drop_without_applying_deltas();
+        edit(workbench.component_drafts.get_mut(component).unwrap());
+        for pressed in [true, false] {
+            frame(
+                &mut workbench,
+                document,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(workbench.error.is_none(), "{:?}", workbench.error);
+        assert!(workbench.host.is_none() && workbench.preview_host.is_none());
     }
 
     #[test]
