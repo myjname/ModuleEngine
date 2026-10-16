@@ -464,6 +464,7 @@ impl NativeEditorBenchmark {
             "game_frame_evidence":"Completed worker snapshot contains real Game pixels and last_render_ms > 0; GameWorkbench uploads that snapshot without waiting for simulation",
             "pan_input_attempts":self.drag_attempts,"actual_pan_changes":self.graph_pan_changes,
             "host_custom_slot_arc_identities_preserved":self.identities_preserved,
+            "custom_program_store":self.editor.game_workbench.program_store_stats(),
             "game_simulation_advanced_during_play_samples":simulation_advanced,
             "play_stop":{
                 "verified":stop_verified,

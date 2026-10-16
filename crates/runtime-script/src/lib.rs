@@ -21,7 +21,14 @@ use thiserror::Error;
 
 mod persistent;
 pub use persistent::StateDeclaration;
+mod cache_context;
 mod cargo_build;
+mod dep_info;
+mod freshness;
+mod native_tools;
+mod program_store;
+mod sdk_cache;
+pub use program_store::{CompiledProgramStore, ProgramStoreLimits, ProgramStoreStats};
 mod cleanup;
 pub use cleanup::{
     TestArtifactGuard, TestArtifactLease, finish_artifact_cleanup, retain_test_artifacts,
@@ -94,6 +101,9 @@ pub struct ScriptCompiler {
     pub sdk_identity: SdkIdentity,
     // Retain only a fresh test fixture's owner, never an existing project/cache.
     artifact_scope: Option<Arc<cleanup::TestArtifacts>>,
+    program_store: Option<Arc<CompiledProgramStore>>,
+    owned_target: Option<Arc<cleanup::OwnedTarget>>,
+    effective_environment: Option<Arc<cache_context::FrozenEnvironment>>,
 }
 
 impl ScriptCompiler {
@@ -127,6 +137,9 @@ impl ScriptCompiler {
             rustup_home: pinned_rustup.then(|| tool_root.join(".tools/rustup")),
             rustup_toolchain: pinned_rustup.then(|| project_toolchain(&tool_root)),
             artifact_scope: cleanup::fixture_for(&work_dir),
+            program_store: None,
+            owned_target: None,
+            effective_environment: None,
             project_root,
             work_dir,
             compile_timeout: Duration::from_secs(180),
@@ -138,6 +151,13 @@ impl ScriptCompiler {
         validate_supported_sdk(&sdk)?;
         self.sdk_identity = sdk;
         Ok(self)
+    }
+
+    /// The owner decides cache lifetime; clones share immutable programs only.
+    /// No filesystem work or compiler process runs in this builder.
+    pub fn with_program_store(mut self, store: Arc<CompiledProgramStore>) -> Self {
+        self.program_store = Some(store);
+        self
     }
 
     /// Select an explicit update or speed function by parsing syntax, then let
@@ -179,6 +199,20 @@ impl ScriptCompiler {
         kind: ScriptKind,
         cancelled: &AtomicBool,
     ) -> Result<CompiledScript, ScriptError> {
+        if let Some(store) = &self.program_store {
+            return store.compile(self, source, kind, cancelled);
+        }
+        self.compile_uncached(source, kind, cancelled, None, None)
+    }
+
+    fn compile_uncached(
+        &self,
+        source: &str,
+        kind: ScriptKind,
+        cancelled: &AtomicBool,
+        mut capture: Option<&mut Option<freshness::BuildFacts>>,
+        build_counter: Option<&AtomicU64>,
+    ) -> Result<CompiledScript, ScriptError> {
         if cancelled.load(Ordering::Acquire) {
             return Err(ScriptError::Worker("compilation cancelled".into()));
         }
@@ -215,7 +249,7 @@ impl ScriptCompiler {
         let json_version = &json_versions[0].version;
         fs::create_dir_all(&self.work_dir).map_err(|e| ScriptError::Setup(e.to_string()))?;
         let name = format!(
-            "module_engine_worker_{}_{}_{}",
+            "module_engine_worker_{:x}_{:x}_{:x}",
             std::process::id(),
             NEXT_WORKER.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
@@ -241,6 +275,9 @@ impl ScriptCompiler {
             )
             .map_err(ScriptError::Setup)?,
         );
+        artifacts
+            .retain_owned_target(self.owned_target.clone())
+            .map_err(ScriptError::Setup)?;
         let directory = &artifacts.directory;
         let result = (|| {
             fs::create_dir_all(directory.join("src"))
@@ -284,8 +321,11 @@ impl ScriptCompiler {
                         .as_deref()
                         .unwrap_or_else(|| Path::new("cargo")),
                 );
+                if let Some(environment) = &self.effective_environment {
+                    command.env_clear().envs(environment.iter());
+                }
                 command
-                    .env("CARGO_TARGET_DIR", &target)
+                    .env("CARGO_TARGET_DIR", cargo_target_argument(&target))
                     .env("CARGO_INCREMENTAL", "0")
                     .env_remove("CARGO_HOME")
                     .current_dir(directory);
@@ -311,6 +351,9 @@ impl ScriptCompiler {
                     .as_deref()
                     .unwrap_or_else(|| Path::new("rustc")),
             );
+            if let Some(environment) = &self.effective_environment {
+                rustc.env_clear().envs(environment.iter());
+            }
             let environment = make_command();
             for (key, value) in environment.get_envs() {
                 if let Some(value) = value {
@@ -372,6 +415,28 @@ impl ScriptCompiler {
                 &fs::read_to_string(&worker_lock).map_err(|e| ScriptError::Setup(e.to_string()))?,
                 &name,
             )?;
+            // Capture the bytes before Cargo executes, then let the proof
+            // compare these authoritative inputs after the build.
+            let generated_inputs = if capture.is_some() {
+                [
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "build.rs",
+                    "source.rs",
+                    "src/main.rs",
+                    "src/user_program.rs",
+                ]
+                .into_iter()
+                .map(|path| {
+                    let path = directory.join(path);
+                    fs::read(&path)
+                        .map(|bytes| (path, bytes))
+                        .map_err(|e| ScriptError::Setup(e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
             let mut command = make_command();
             command
                 .arg("build")
@@ -380,11 +445,14 @@ impl ScriptCompiler {
                 .arg("--message-format=json-render-diagnostics")
                 .arg("--manifest-path")
                 .arg(directory.join("Cargo.toml"))
-                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_TARGET_DIR", cargo_target_argument(&target))
                 .env("CARGO_INCREMENTAL", "0")
                 .current_dir(directory);
             if let Some(home) = &self.cargo_home {
                 command.env("CARGO_HOME", home);
+            }
+            if let Some(counter) = build_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
             }
             let output = run_bounded_capture(
                 command,
@@ -414,7 +482,24 @@ impl ScriptCompiler {
             let executable = artifacts.executable_path();
             fs::copy(&built_executable, &executable)
                 .map_err(|error| ScriptError::Setup(error.to_string()))?;
-            artifacts.trim_build_outputs();
+            if let Some(capture) = &mut capture {
+                let build = output.cargo.as_ref().unwrap();
+                **capture = Some(freshness::BuildFacts {
+                    target_directory: target.clone(),
+                    executable: executable.clone(),
+                    native_host: native_host.clone(),
+                    native_target: native_host.clone(),
+                    metadata: resolved.stdout.clone(),
+                    worker_lock: fs::read_to_string(&worker_lock)
+                        .map_err(|e| ScriptError::Setup(e.to_string()))?,
+                    worker_package: name.clone(),
+                    units: build.units.clone(),
+                    root_dep_info: build.root_dep_info.clone(),
+                    generated_inputs,
+                });
+            } else {
+                artifacts.trim_build_outputs();
+            }
             // Query only the generated harness: no user entry point or simulation
             // runs. This verifies the API actually linked from the selected sources,
             // including same-version metadata/source mismatches, before hot apply.
@@ -460,6 +545,91 @@ impl ScriptCompiler {
             artifacts.failed(&error.to_string());
         }
         result
+    }
+    /// Revalidate Cargo's actual retained root products before returning cached
+    /// code. A rebuild is observable in JSON and is a miss, never a fake hit.
+    fn check_cargo_fresh(
+        &self,
+        previous: &freshness::BuildFacts,
+        directory: &Path,
+        artifacts: Option<&cleanup::CandidateArtifacts>,
+        cancelled: &AtomicBool,
+        build_counter: &AtomicU64,
+    ) -> Result<Option<freshness::BuildFacts>, ScriptError> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(ScriptError::Worker("compilation cancelled".into()));
+        }
+        let target = self
+            .target_dir
+            .as_ref()
+            .ok_or_else(|| ScriptError::Setup("Cached Cargo target is missing".into()))?;
+        let selector = cargo_build::Selector::from_metadata(
+            &previous.metadata,
+            &directory.join("Cargo.toml"),
+            &previous.worker_package,
+        )?;
+        let mut command = Command::new(self.cargo_binary.as_deref().unwrap_or(Path::new("cargo")));
+        if let Some(environment) = &self.effective_environment {
+            command.env_clear().envs(environment.iter());
+        }
+        command
+            .current_dir(directory)
+            .env("CARGO_TARGET_DIR", cargo_target_argument(target))
+            .env("CARGO_INCREMENTAL", "0")
+            .env_remove("CARGO_HOME");
+        if let Some(home) = &self.cargo_home {
+            command.env("CARGO_HOME", home);
+        }
+        if let Some(rustc) = &self.rustc_binary {
+            command.env("RUSTC", rustc);
+        }
+        if let Some(home) = &self.rustup_home {
+            command.env("RUSTUP_HOME", home);
+        }
+        if let Some(toolchain) = &self.rustup_toolchain {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
+        command
+            .args([
+                "build",
+                "--offline",
+                "--locked",
+                "--message-format=json-render-diagnostics",
+                "--manifest-path",
+            ])
+            .arg(directory.join("Cargo.toml"));
+        build_counter.fetch_add(1, Ordering::Relaxed);
+        let output = run_bounded_capture(
+            command,
+            vec![],
+            self.compile_timeout,
+            cancelled,
+            artifacts.map(|artifacts| (artifacts, "Cargo freshness verification")),
+            Some(selector),
+        )?;
+        if !output.success {
+            return Ok(None);
+        }
+        let Some(build) = output.cargo else {
+            return Ok(None);
+        };
+        if build.executable(&previous.native_host, target).is_err() {
+            return Ok(None);
+        }
+        let worker_lock = fs::read_to_string(directory.join("Cargo.lock"))
+            .map_err(|e| ScriptError::Setup(e.to_string()))?;
+        Ok(Some(freshness::BuildFacts {
+            target_directory: target.clone(),
+            metadata: previous.metadata.clone(),
+            worker_lock,
+            worker_package: previous.worker_package.clone(),
+            executable: previous.executable.clone(),
+            native_host: previous.native_host.clone(),
+            native_target: previous.native_host.clone(),
+            units: build.units,
+            root_dep_info: build.root_dep_info,
+            generated_inputs: previous.generated_inputs.clone(),
+        }))
     }
 }
 
@@ -521,6 +691,29 @@ fn validate_sdk_match(actual: &SdkIdentity, expected: &SdkIdentity) -> Result<()
         )));
     }
     Ok(())
+}
+
+/// Cargo/MSVC command spelling is distinct from canonical ownership identity.
+fn cargo_target_argument(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let prefix = [92, 92, 63, 92];
+        if wide.starts_with(&prefix) {
+            let rest = &wide[4..];
+            let value = if rest.starts_with(&[85, 78, 67, 92]) {
+                [92, 92]
+                    .into_iter()
+                    .chain(rest[4..].iter().copied())
+                    .collect::<Vec<_>>()
+            } else {
+                rest.to_vec()
+            };
+            return std::ffi::OsString::from_wide(&value).into();
+        }
+    }
+    path.into()
 }
 
 /// Keep worker artifacts apart from the outer workspace's native build, even

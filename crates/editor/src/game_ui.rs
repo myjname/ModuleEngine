@@ -11,7 +11,9 @@ use eframe::egui::{self, Color32, Vec2};
 #[cfg(test)]
 use module_engine_arpg::{ArpgInput, ExecutionGraphExt, GameInputExt};
 use module_engine_core::*;
-use module_engine_script::{CompiledScript, JobLease, ScriptCompiler, ScriptKind};
+use module_engine_script::{
+    CompiledProgramStore, CompiledScript, JobLease, ProgramStoreStats, ScriptCompiler, ScriptKind,
+};
 #[cfg(test)]
 use module_engine_two_arenas::ProjectExt;
 use serde_json::{Value, json};
@@ -149,6 +151,8 @@ impl GameFrameCache {
 }
 
 pub struct GameWorkbench {
+    // Code outlives Stop; mutable script instances and Game actors do not.
+    programs: Arc<CompiledProgramStore>,
     pub host: Option<GameHost>,
     // Accepted authored baseline is separate from GameHost's live graphics
     // document: sync_document intentionally does not replace GameSession.
@@ -230,6 +234,7 @@ pub struct GameWorkbench {
 impl Default for GameWorkbench {
     fn default() -> Self {
         Self {
+            programs: Arc::default(),
             host: None,
             game_document: None,
             preview_host: None,
@@ -337,6 +342,11 @@ impl GameWorkbench {
     }
     pub fn performance(&self) -> WorkbenchPerformance {
         self.performance
+    }
+    /// Atomic counter snapshot only; native diagnostics never hash files or
+    /// wait for Cargo on the UI thread.
+    pub fn program_store_stats(&self) -> ProgramStoreStats {
+        self.programs.stats()
     }
     /// Most views use the authored entry scene and can borrow the document.
     /// Clone only when Scene intentionally previews another authored scene.
@@ -935,16 +945,20 @@ impl GameWorkbench {
             "Подготовка Game"
         });
         let worker_progress = progress.clone();
+        let programs = self.programs.clone();
         let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
         let (receiver, job) = module_engine_script::spawn_job(move |cancelled| {
-            crate::game_host::new_at_with_progress_cancellable(
+            crate::game_host::new_at_with_controls(
                 worker_document,
                 &root,
                 &backend,
                 compile.as_deref(),
                 kind,
-                Some(&worker_progress),
-                cancelled,
+                game_host::PreparationControls {
+                    progress: Some(&worker_progress),
+                    cancelled,
+                    programs,
+                },
             )
             .map(|mut host| {
                 host.services.set_enabled(false);
@@ -1319,8 +1333,14 @@ impl GameWorkbench {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| game_host::backend_root_for(root, compile_root))?;
-        let mut host =
-            crate::game_host::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
+        let mut host = crate::game_host::new_at_with_store(
+            candidate.clone(),
+            root,
+            &backend,
+            compile_root,
+            kind,
+            self.programs.clone(),
+        )?;
         Self::frame_game_start(&mut host);
         self.host = Some(host);
         self.game_document = Some(candidate);
@@ -1353,9 +1373,11 @@ impl GameWorkbench {
         let source = source.to_owned();
         let progress = BuildProgress::new(format!("Rust Custom {id}"));
         let worker_progress = progress.clone();
+        let programs = self.programs.clone();
         let (receive, job) = module_engine_script::spawn_job(move |cancelled| {
-            worker_progress.stage("Компиляция Rust; текущая версия продолжает работать");
-            let compiler = ScriptCompiler::new(root.clone(), root.join(".work/game-scripts"));
+            worker_progress.stage("Проверка и подготовка Rust; текущая версия продолжает работать");
+            let compiler = ScriptCompiler::new(root.clone(), root.join(".work/game-scripts"))
+                .with_program_store(programs);
             compiler
                 .compile_kind_cancellable(&source, ScriptKind::Update, cancelled)
                 .map_err(|e| e.to_string())
@@ -1658,8 +1680,14 @@ impl GameWorkbench {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| game_host::backend_root_for(root, compile_root))?;
-        let mut host =
-            crate::game_host::new_at(candidate.clone(), root, &backend, compile_root, kind)?;
+        let mut host = crate::game_host::new_at_with_store(
+            candidate.clone(),
+            root,
+            &backend,
+            compile_root,
+            kind,
+            self.programs.clone(),
+        )?;
         host.services.set_enabled(false);
         self.preview_host = Some(host);
         self.preview_document = Some(candidate);
@@ -2845,12 +2873,13 @@ if ui.button("+ Resource").clicked(){let name=unique_name("resource",draft.resou
         {
             runtime_document.game.as_mut().unwrap().entry_scene = self.scene.clone();
         }
-        match crate::game_host::new_at(
+        match crate::game_host::new_at_with_store(
             runtime_document.clone(),
             root,
             &backend,
             compile.as_deref(),
             self.world_kind,
+            self.programs.clone(),
         ) {
             Ok(mut host) => {
                 let changed = candidate.game != document.game;
@@ -3664,6 +3693,105 @@ mod tests {
             document.game.as_mut().unwrap().audio_cues.clear();
         }
         document
+    }
+
+    #[test]
+    #[ignore = "native cache acceptance: run the compiled test binary with the normal native loader environment"]
+    fn scene_and_game_reuse_code_after_stop_with_independent_initial_state_and_workers() {
+        let root = crate::project::source_root();
+        let mut document = native_test_document();
+        document.custom_sources.insert(
+            "game-controller".into(),
+            r#"// module-engine-state: {"schema":"workbench.reuse.v1","initial":{"ticks":0,"pid":0}}
+pub fn update(ctx: &mut ScriptContext) {
+    ctx.state["ticks"] = serde_json::json!(ctx.state["ticks"].as_u64().unwrap() + 1);
+    ctx.state["pid"] = serde_json::json!(std::process::id());
+}
+"#
+            .into(),
+        );
+        let before = serde_json::to_vec(&document).unwrap();
+        let mut workbench = GameWorkbench::default();
+        let programs = workbench.programs.clone();
+        let original_environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
+            .unwrap();
+        let game_programs = workbench.program_store_stats();
+        let game_environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        let old_slot = workbench.host.as_ref().unwrap().slots["game-controller"].clone();
+        for _ in 0..4 {
+            workbench.tick(0.02, true).unwrap();
+        }
+        let old_state = old_slot.lock().unwrap().state().unwrap();
+        assert!(old_state["ticks"].as_u64().unwrap() > 0);
+        let old_pid = old_state["pid"].as_u64().unwrap();
+        assert_ne!(old_pid, 0);
+        workbench
+            .ensure_preview(&document, &root, Some(&root), WorldKind::Ecs)
+            .unwrap();
+        let scene_programs = workbench.program_store_stats();
+        let scene_environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        let preview_slot =
+            workbench.preview_host.as_ref().unwrap().slots["game-controller"].clone();
+        assert!(!Arc::ptr_eq(&old_slot, &preview_slot));
+        let initial = json!({"ticks":0,"pid":0});
+        assert_eq!(preview_slot.lock().unwrap().state().unwrap(), initial);
+        workbench.stop();
+        assert!(Arc::ptr_eq(&programs, &workbench.programs));
+        assert!(workbench.host.is_none());
+        assert!(!workbench.is_play_session());
+        let stopped_environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        assert!(scene_environment == stopped_environment);
+        workbench
+            .ensure(&document, &root, Some(&root), WorldKind::Ecs)
+            .unwrap();
+        let new_slot = workbench.host.as_ref().unwrap().slots["game-controller"].clone();
+        assert!(!Arc::ptr_eq(&old_slot, &new_slot));
+        assert!(!Arc::ptr_eq(&preview_slot, &new_slot));
+        assert_eq!(new_slot.lock().unwrap().state().unwrap(), initial);
+        assert_eq!(workbench.host.as_ref().unwrap().session.state().time, 0.);
+        workbench.tick(0.02, true).unwrap();
+        let new_state = new_slot.lock().unwrap().state().unwrap();
+        assert!(new_state["ticks"].as_u64().unwrap() > 0);
+        assert_ne!(new_state["pid"].as_u64().unwrap(), old_pid);
+        assert_eq!(old_slot.lock().unwrap().state().unwrap(), old_state);
+        assert_eq!(preview_slot.lock().unwrap().state().unwrap(), initial);
+        assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+        let stats = workbench.program_store_stats();
+        let changed_environment_keys = |left: &BTreeMap<_, _>, right: &BTreeMap<_, _>| {
+            left.keys()
+                .chain(right.keys())
+                .filter(|key| left.get(*key) != right.get(*key))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(game_programs.root_artifacts_built, 1);
+        // Native graphics initialization can change the inherited environment
+        // (Windows drivers may add a per-drive current-directory entry). That
+        // is a different compile context, which must not be silently ignored.
+        if original_environment == game_environment {
+            assert_eq!(scene_programs.root_artifacts_built, 1);
+            assert_eq!(scene_programs.program_hits, 1);
+        } else {
+            assert!(scene_programs.root_artifacts_built <= 2);
+        }
+        assert_eq!(
+            stats.root_artifacts_built,
+            scene_programs.root_artifacts_built,
+            "after Game={game_programs:?}; after Scene={scene_programs:?}; after Stop/Game={stats:?}; changed env keys after Game={:?}, after Scene={:?}",
+            changed_environment_keys(&original_environment, &game_environment),
+            changed_environment_keys(&game_environment, &scene_environment)
+        );
+        assert!(
+            stats.program_hits > scene_programs.program_hits,
+            "program hits: {}",
+            stats.program_hits
+        );
+        println!(
+            "Workbench native reuse: after Game={game_programs:?}; after Scene={scene_programs:?}; after Stop/Game={stats:?}; changed environment keys after Game={:?}",
+            changed_environment_keys(&original_environment, &game_environment)
+        );
     }
 
     #[test]

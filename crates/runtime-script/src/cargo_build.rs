@@ -1,11 +1,12 @@
 //! Cargo's product paths are authoritative. A target triple is proven by the
 //! root build script, not inferred from a filename or compiler-artifact.target.
-use crate::ScriptError;
+use crate::{ScriptError, freshness::BuildUnit};
 use serde_json::Value;
 #[cfg(windows)]
 use std::io::{Seek, SeekFrom};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -66,6 +67,8 @@ pub(crate) struct BuildOutput {
     finished: Option<bool>,
     error: Option<String>,
     pub(crate) diagnostics: String,
+    pub(crate) units: Vec<BuildUnit>,
+    pub(crate) root_dep_info: Vec<PathBuf>,
 }
 
 impl BuildOutput {
@@ -130,7 +133,7 @@ impl Collector {
     }
 
     /// Drain indefinitely, but retain at most one bounded line and a bounded
-    /// set of root products. Dependency artifact streams need no retained list.
+    /// set of root products and dependency unit facts.
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if byte == b'\n' {
@@ -157,7 +160,111 @@ impl Collector {
         if !self.dropping_line && !self.line.is_empty() {
             self.parse_line();
         }
+        for unit in &mut self.output.units {
+            unit.dep_info = dependency_info_paths(&unit.artifacts, &unit.kinds);
+            if unit.package_id == self.selector.package {
+                self.output
+                    .root_dep_info
+                    .extend(unit.dep_info.iter().cloned());
+            }
+        }
+        self.output.root_dep_info.sort();
+        self.output.root_dep_info.dedup();
         self.output
+    }
+
+    fn facts(&mut self, value: &Value) {
+        let Some(package) = value["package_id"].as_str() else {
+            return;
+        };
+        if !matches!(
+            value["reason"].as_str(),
+            Some("compiler-artifact" | "build-script-executed")
+        ) {
+            return;
+        }
+        if package.len() > 16384 || self.output.units.len() >= 256 {
+            self.output
+                .error
+                .get_or_insert_with(|| "Cargo dependency fact limit exceeded".into());
+            return;
+        }
+        let is_artifact = value["reason"] == "compiler-artifact";
+        let kinds: Vec<String> = value["target"]["kind"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect();
+        let index = self.output.units.iter().position(|unit| {
+            unit.package_id == package
+                && (!is_artifact && unit.kinds.iter().any(|k| k == "custom-build")
+                    || is_artifact && (unit.kinds == kinds || unit.kinds.is_empty()))
+        });
+        let index = index.unwrap_or_else(|| {
+            self.output.units.push(BuildUnit {
+                package_id: package.into(),
+                manifest_path: PathBuf::new(),
+                kinds: vec![],
+                artifacts: vec![],
+                dep_info: vec![],
+                out_dir: None,
+                environment: BTreeMap::new(),
+                fresh: false,
+            });
+            self.output.units.len() - 1
+        });
+        let unit = &mut self.output.units[index];
+        if is_artifact {
+            unit.kinds = kinds;
+            unit.manifest_path = value["manifest_path"].as_str().unwrap_or("").into();
+            unit.fresh = value["fresh"].as_bool().unwrap_or(false);
+            let files = value["filenames"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if files.len() > 64
+                || files
+                    .iter()
+                    .any(|v| v.as_str().is_none_or(|s| s.len() > 16384))
+            {
+                self.output
+                    .error
+                    .get_or_insert_with(|| "Cargo dependency artifact limit exceeded".into());
+                return;
+            }
+            unit.artifacts = files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from)
+                .collect();
+        } else {
+            unit.kinds = vec!["custom-build".into()];
+            if let Some(out) = value["out_dir"].as_str().filter(|s| s.len() <= 16384) {
+                unit.out_dir = Some(out.into());
+            }
+            if let Some(env) = value["env"].as_array() {
+                if env.len() > 128 {
+                    self.output.error.get_or_insert_with(|| {
+                        "Cargo dependency environment limit exceeded".into()
+                    });
+                    return;
+                }
+                for pair in env {
+                    if let (Some(key), Some(val)) = (pair[0].as_str(), pair[1].as_str()) {
+                        if key.len() + val.len() > 32768 {
+                            self.output.error.get_or_insert_with(|| {
+                                "Cargo dependency environment value limit exceeded".into()
+                            });
+                            return;
+                        }
+                        unit.environment
+                            .insert(OsString::from(key), OsString::from(val));
+                    }
+                }
+            }
+        }
     }
 
     fn parse_line(&mut self) {
@@ -196,6 +303,7 @@ impl Collector {
             }
             return;
         }
+        self.facts(&value);
         if value["package_id"].as_str() != Some(&self.selector.package) {
             return;
         }
@@ -276,6 +384,39 @@ impl Collector {
     }
 }
 
+fn dependency_info_paths(artifacts: &[PathBuf], kinds: &[String]) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for artifact in artifacts {
+        let Some(parent) = artifact.parent() else {
+            continue;
+        };
+        let Some(stem) = artifact.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let candidate = parent.join(format!("{stem}.d"));
+        if candidate.is_file() {
+            paths.insert(candidate);
+        }
+        if let Some(stem) = stem.strip_prefix("lib") {
+            let candidate = parent.join(format!("{stem}.d"));
+            if candidate.is_file() {
+                paths.insert(candidate);
+            }
+        }
+        if kinds.iter().any(|k| k == "custom-build")
+            && let Ok(entries) = fs::read_dir(parent)
+        {
+            for entry in entries.take(64).flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "d") && path.is_file() {
+                    paths.insert(path);
+                }
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
 fn setup(error: std::io::Error) -> ScriptError {
     ScriptError::Setup(error.to_string())
 }
@@ -307,6 +448,9 @@ pub(crate) fn native_host(verbose: &str) -> Result<String, ScriptError> {
 pub(crate) fn build_script(host: &str) -> String {
     format!(
         r#"fn main() {{
+    // This guard reads no package files beyond itself. Without an explicit
+    // input Cargo treats diagnostic logs/ownership markers as build inputs.
+    println!("cargo:rerun-if-changed=build.rs");
     let host = std::env::var("HOST").expect("Cargo HOST");
     let target = std::env::var("TARGET").expect("Cargo TARGET");
     assert!(host == {host:?} && target == host,

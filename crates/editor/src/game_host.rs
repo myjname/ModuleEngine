@@ -4,6 +4,7 @@ use module_engine_core::*;
 pub use module_engine_host::{GameHost, ScriptSlot, script_ids};
 use module_engine_host::{HostOptions, RenderMode};
 use module_engine_host_services::{HostServiceRegistry, install_audio};
+use module_engine_script::CompiledProgramStore;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -47,13 +48,63 @@ pub fn new_at_with_progress(
     )
 }
 pub fn new_at_with_progress_cancellable(
-    mut document: GraphDocument,
+    document: GraphDocument,
     root: &Path,
     backend_root: &Path,
     compile_root: Option<&Path>,
     kind: WorldKind,
     progress: Option<&crate::activity::BuildProgress>,
     cancelled: &AtomicBool,
+) -> Result<GameHost, String> {
+    new_at_with_controls(
+        document,
+        root,
+        backend_root,
+        compile_root,
+        kind,
+        PreparationControls {
+            progress,
+            cancelled,
+            programs: Arc::default(),
+        },
+    )
+}
+
+pub fn new_at_with_store(
+    document: GraphDocument,
+    root: &Path,
+    backend_root: &Path,
+    compile_root: Option<&Path>,
+    kind: WorldKind,
+    programs: Arc<CompiledProgramStore>,
+) -> Result<GameHost, String> {
+    new_at_with_controls(
+        document,
+        root,
+        backend_root,
+        compile_root,
+        kind,
+        PreparationControls {
+            progress: None,
+            cancelled: &AtomicBool::new(false),
+            programs,
+        },
+    )
+}
+
+pub struct PreparationControls<'a> {
+    pub progress: Option<&'a crate::activity::BuildProgress>,
+    pub cancelled: &'a AtomicBool,
+    pub programs: Arc<CompiledProgramStore>,
+}
+
+pub fn new_at_with_controls(
+    mut document: GraphDocument,
+    root: &Path,
+    backend_root: &Path,
+    compile_root: Option<&Path>,
+    kind: WorldKind,
+    controls: PreparationControls<'_>,
 ) -> Result<GameHost, String> {
     // Compatibility for the existing world selector: make its selection an
     // explicit graph change before entering the shared host.
@@ -77,7 +128,7 @@ pub fn new_at_with_progress_cancellable(
     let composition = crate::host::composition_at(backend_root)?;
     let mut services = HostServiceRegistry::new();
     install_audio(&mut services)?;
-    GameHost::build_cancellable(
+    GameHost::build_cancellable_with_store(
         document,
         composition,
         HostOptions {
@@ -88,8 +139,9 @@ pub fn new_at_with_progress_cancellable(
             services,
             services_enabled: true,
         },
-        progress,
-        cancelled,
+        controls.progress,
+        controls.cancelled,
+        Some(controls.programs),
     )
 }
 

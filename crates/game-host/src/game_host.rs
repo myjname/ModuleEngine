@@ -9,7 +9,9 @@ use crate::activity::{ActivitySnapshot, BuildProgress};
 use module_engine_content::ContentLibrary;
 use module_engine_core::*;
 use module_engine_host_services::{HostServiceContext, HostServiceRegistry, HostServices};
-use module_engine_script::{CompiledScript, JobLease, ScriptCompiler, ScriptKind, ScriptTick};
+use module_engine_script::{
+    CompiledProgramStore, CompiledScript, JobLease, ScriptCompiler, ScriptKind, ScriptTick,
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -656,6 +658,25 @@ impl GameHost {
         progress: Option<&BuildProgress>,
         cancelled: &AtomicBool,
     ) -> Result<Self, String> {
+        Self::build_cancellable_with_store(
+            document,
+            composition,
+            options,
+            progress,
+            cancelled,
+            None,
+        )
+    }
+    /// Reuse immutable compiled code while this host always creates fresh
+    /// instances, state and owned workers. The application owns store lifetime.
+    pub fn build_cancellable_with_store(
+        document: GraphDocument,
+        composition: CompositionContext,
+        options: HostOptions,
+        progress: Option<&BuildProgress>,
+        cancelled: &AtomicBool,
+        programs: Option<Arc<CompiledProgramStore>>,
+    ) -> Result<Self, String> {
         check_preparation_cancelled(cancelled)?;
         validate_host_contracts(&composition, &document, &options.render)?;
         let root = options
@@ -718,12 +739,16 @@ impl GameHost {
                     .custom_sources
                     .get(&id)
                     .ok_or_else(|| format!("Missing game Custom '{id}'"))?;
-                ScriptCompiler::new(
+                let mut compiler = ScriptCompiler::new(
                     compile_root.to_path_buf(),
                     compile_root.join(".work/game-scripts"),
-                )
-                .compile_kind_cancellable(source, ScriptKind::Update, cancelled)
-                .map_err(|e| e.to_string())?
+                );
+                if let Some(programs) = &programs {
+                    compiler = compiler.with_program_store(programs.clone());
+                }
+                compiler
+                    .compile_kind_cancellable(source, ScriptKind::Update, cancelled)
+                    .map_err(|e| e.to_string())?
             } else {
                 if id.is_empty()
                     || !id

@@ -1462,10 +1462,13 @@ dependencies = [
 name = "module-engine-script"
 version = "0.4.0"
 dependencies = [
+ "find-msvc-tools",
  "libc",
  "module-engine-core",
+ "proc-macro2",
  "serde",
  "serde_json",
+ "sha2",
  "syn 2.0.119",
  "thiserror 2.0.21",
 ]

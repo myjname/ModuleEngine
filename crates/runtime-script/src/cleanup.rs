@@ -16,6 +16,57 @@ const MARKER: &str = "module-engine-candidate.json";
 const FAILED_RETAIN: usize = 16;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+/// Only fresh temporary generations may own a complete Cargo target tree.
+/// Ordinary persistent SDK dependency namespaces never use this lease.
+#[derive(Debug)]
+pub(crate) struct OwnedTarget {
+    pub(crate) directory: PathBuf,
+    parent: PathBuf,
+    _fixture: Option<Arc<TestArtifacts>>,
+    moved: AtomicBool,
+}
+impl OwnedTarget {
+    pub(crate) fn create(parent: &Path, label: &str) -> Result<Arc<Self>, String> {
+        if label.is_empty()
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(
+                "Owned generation label must contain ASCII letters, numbers or hyphens".into(),
+            );
+        }
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+        let directory = parent.join(format!(
+            "{label}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).map_err(|e| e.to_string())?;
+        Ok(Arc::new(Self {
+            _fixture: fixture_for(&parent),
+            directory,
+            parent,
+            moved: AtomicBool::new(false),
+        }))
+    }
+    pub(crate) fn disarm_after_move(&self) {
+        self.moved.store(true, Ordering::Release);
+    }
+}
+impl Drop for OwnedTarget {
+    fn drop(&mut self) {
+        if !self.moved.load(Ordering::Acquire) {
+            remove_or_defer(self.directory.clone(), self.parent.clone());
+        }
+    }
+}
+
 type CleanupJob = Box<dyn FnOnce() + Send>;
 struct CleanupQueue {
     sender: mpsc::Sender<CleanupJob>,
@@ -228,6 +279,7 @@ pub(crate) struct CandidateArtifacts {
     target: PathBuf,
     build_profiles: Mutex<BTreeSet<PathBuf>>,
     build_products: Mutex<BTreeSet<PathBuf>>,
+    owned_target: Mutex<Option<Arc<OwnedTarget>>>,
     executable_directory: Option<PathBuf>,
     package: String,
     ready: AtomicBool,
@@ -254,6 +306,7 @@ impl CandidateArtifacts {
             parent,
             build_profiles: Mutex::new(BTreeSet::from([target.join("debug")])),
             build_products: Mutex::default(),
+            owned_target: Mutex::default(),
             target,
             executable_directory: None,
             package: package.into(),
@@ -290,6 +343,23 @@ impl CandidateArtifacts {
             .as_ref()
             .unwrap_or(&self.directory)
             .join(format!("worker{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    pub(crate) fn retain_owned_target(
+        &self,
+        target: Option<Arc<OwnedTarget>>,
+    ) -> Result<(), String> {
+        if target
+            .as_ref()
+            .is_some_and(|target| target.directory != self.target)
+        {
+            return Err("Owned target lease differs from this candidate's selected target".into());
+        }
+        *self
+            .owned_target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = target;
+        Ok(())
     }
 
     // Pre-register only the two supported layouts, so cancellation before a
@@ -460,6 +530,11 @@ impl Drop for CandidateArtifacts {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let owned_target = self
+            .owned_target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let executable_directory = self.executable_directory.clone();
         let package = self.package.clone();
         let ready = self.ready.load(Ordering::Acquire);
@@ -472,6 +547,7 @@ impl Drop for CandidateArtifacts {
                 target,
                 build_profiles: Mutex::new(build_profiles),
                 build_products: Mutex::new(build_products),
+                owned_target: Mutex::new(owned_target),
                 executable_directory,
                 package,
                 ready: AtomicBool::new(ready),
@@ -940,6 +1016,42 @@ mod tests {
         drop(candidate);
         finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
         assert!(!executable.exists());
+    }
+
+    #[test]
+    fn owned_unsupported_generation_waits_for_last_candidate_and_preserves_parent() {
+        let guard = TestArtifactGuard::new(&std::env::temp_dir(), "owned-generation").unwrap();
+        let parent = guard.path().join("targets");
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join("foreign-sentinel"), "other cache").unwrap();
+        assert!(OwnedTarget::create(&parent, "../outside").is_err());
+        let target = OwnedTarget::create(&parent, "unsupported").unwrap();
+        let directory = target.directory.clone();
+        let candidate = Arc::new(
+            CandidateArtifacts::create(
+                &guard.path().join("work"),
+                &directory,
+                "module_engine_worker_owned",
+                fixture_for(guard.path()),
+            )
+            .unwrap(),
+        );
+        candidate.retain_owned_target(Some(target.clone())).unwrap();
+        fs::write(candidate.executable_path(), "leased executable").unwrap();
+        candidate.ready();
+        let active = candidate.clone();
+        drop(target);
+        drop(candidate);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(directory.is_dir());
+        drop(active);
+        finish_artifact_cleanup(Duration::from_secs(5)).unwrap();
+        assert!(!directory.exists());
+        assert_eq!(
+            fs::read_to_string(parent.join("foreign-sentinel")).unwrap(),
+            "other cache"
+        );
+        assert!(parent.is_dir());
     }
 
     #[cfg(windows)]
