@@ -54,7 +54,9 @@ The initial 0.4 delivery results are preserved below. Current builds at the same
 
 ### Performance
 
-Reference: RTX 4080 SUPER, Windows, Vulkan + egui/OpenGL window presentation, 3440×1440 144 Hz monitor. Actual framebuffer and game canvas were **1920×1080**. The scene and health were normal; all 120 measured frames retained 20 living enemies and Playing status. Measurement followed 30 warmup frames.
+Reference for the 14 October 2026 measurement: RTX 4080 SUPER, Windows, Vulkan + egui/OpenGL window presentation, 3440×1440 144 Hz monitor. Actual framebuffer and game canvas were **1920×1080**. The scene and health were normal; all 120 measured frames retained 20 living enemies and Playing status. Measurement followed 30 warmup frames.
+
+The OpenGL setup and results below are historical evidence. The [current GUI policy](linux-support.md) is WGPU/DX12 on Windows and WGPU/Vulkan on Linux; these measurements do not establish results for those GUI backends or the current build.
 
 | Measurement | Mean | p95 | Maximum |
 | --- | --- | --- | --- |

@@ -12,7 +12,7 @@ This log separates the accepted product scope from selected implementation detai
 
 | Decision | Consequence |
 | --- | --- |
-| The first GPU backend is Vulkan. | Real raster/compute passes and resources, forward/deferred graphs. Other graphics APIs come later. |
+| The first GPU backend for game rendering is Vulkan. | Real raster/compute passes and resources, forward/deferred graphs. Other game-rendering graphics APIs come later. |
 | Custom HLSL is ordinary text for a standalone pass. | The manifest describes the stage, entry points, and resources; code is available in the project. |
 | Rust Custom really compiles and applies without restarting the editor. | rustc diagnostics, a separate candidate, and preservation of the previous working version. |
 | Rust controls execution through portable typed commands. | The same logic works with both worlds and a registered renderer; direct Vulkan calls from ScriptContext are not provided. |
@@ -26,7 +26,7 @@ This log separates the accepted product scope from selected implementation detai
 
 ## Selected Implementation Details
 
-- The GPU renders offscreen with synchronous readback for egui. Version 0.4 uses persistent buffers/images and cached readback memory; a swapchain and frames in flight remain separate work. Renderer, GameHost, and the real window loop are measured separately.
+- The game renderer runs offscreen with synchronous readback; egui presents its frames through WGPU/DX12 on Windows and WGPU/Vulkan on Linux. Version 0.4 uses persistent buffers/images and cached readback memory; a game-renderer swapchain and frames in flight remain separate work. Renderer, GameHost, and the real window loop are measured separately.
 - Rust compiles into a worker executable and exchanges owned JSON packets without a Rust DLL ABI. In 0.2/0.3, a worker was created on every tick. In 0.4, the process is persistent, state is explicitly declared and owned by the host; a timeout stops the worker, and the next tick restores the last accepted state. This does not isolate OS access or promise migration of globals.
 - The root Cargo.lock is authoritative for worker dependencies as well. The generated worker build checks package versions and sources before an offline --locked build; its own package has the technical version 0.0.0.
 - Tools are pinned in toolchain-manifest.json: Rust 1.99.0, DXC 1.9.2609.5. Doctor does not modify the system; explicit Restore installs tools into the project directory and verifies DXC hashes.

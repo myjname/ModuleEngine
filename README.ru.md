@@ -46,7 +46,7 @@
 .\outputs\ModuleEngine.exe
 ~~~
 
-Для сборки и редактируемого Rust Custom нужны Rust/Cargo 1.99.0, MSVC C++ build tools и Windows SDK; для компиляции HLSL — DXC. GPU требует совместимый Vulkan 1.3 адаптер/драйвер. Экспортированный Player использует готовые workers и SPIR-V и не требует Rust/Cargo/DXC. Точные требования — в [GPU/HLSL](docs/ru/gpu-hlsl.md).
+Для сборки и редактируемого Rust Custom нужны Rust/Cargo 1.99.0, MSVC C++ build tools и Windows SDK; для компиляции HLSL — DXC. GUI Windows использует WGPU/DX12 и требует совместимого DX12-адаптера/драйвера; выбранный игровой renderer Vulkan отдельно требует поддержки Vulkan 1.3. Экспортированный Player использует готовые workers и SPIR-V и не требует Rust/Cargo/DXC. Точные требования — в [GPU/HLSL](docs/ru/gpu-hlsl.md) и [политике GUI](docs/ru/linux-support.md).
 
 ~~~powershell
 .\scripts\bootstrap.ps1 -Json
@@ -136,7 +136,7 @@ Integration проверяет Vulkan forward/deferred, Custom compute/vertex/fr
 
 В 0.3 на RTX 4080 SUPER проверены равенство Object/ECS snapshots/GPU, реальное движение от game.motion.speed, влияние exposure/вариантов на пиксели и транзакционный отказ значения вне range. Full/Team проверки подтвердили modified source, отсутствие native файла/компилятора, forced Full отказ у Team и blueprint tamper отказ. Прошли 85 workspace тестов: core 21, custom 15, editor 29, project 9, script 3, GPU 8; строгие Clippy и rustdoc с -D warnings чистые. Full/Team экспорты созданы со своим manifest без ручного sealing и перенесены в отдельные каталоги. Relocated Team worker прочитал game asset относительно пакета и отрендерил 90 шагов: 171723 пикселя геометрии. Нативные окна Project и Engine осмотрены. Финальные отчёты — outputs/verification-v03. В новом Team каталоге Restore скачал 13 закреплённых зависимостей в собственный кеш; затем Team executable с очищенными CARGO_HOME/CARGO_TARGET_DIR скомпилировал Custom SDK и отрендерил сцену. Проверка использовала установленный Rust/MSVC и драйвер; холодная установка этих инструментов не проверялась.
 
-GPU использует synchronous offscreen readback для egui с повторным использованием ресурсов и cached memory; swapchain/кадры в полёте отсутствуют. Worker остаётся запущенным, а явно объявленное JSON-состояние сохраняется транзакционно между кадрами и при совместимом hot apply. Он имеет обычные права ОС. Визуальный Rust ограничен известными выражениями/командами. Скелетная анимация, прозрачность/полный PBR, dynamic rigid bodies, игровые сохранения, GPU buffer/geometry-порты, virtual geometry, live coediting и dynamic binary plugins ещё не реализованы. Производительность GameHost и настоящего Player window измеряется раздельно; результаты предыдущего 0.3 выше не являются результатами нового игрового этапа.
+Игровой renderer Vulkan использует synchronous offscreen readback для egui с повторным использованием ресурсов и cached memory; у этого renderer нет swapchain и кадров в полёте. Вывод GUI отделён: WGPU/DX12 на Windows и WGPU/Vulkan на Linux. Worker остаётся запущенным, а явно объявленное JSON-состояние сохраняется транзакционно между кадрами и при совместимом hot apply. Он имеет обычные права ОС. Визуальный Rust ограничен известными выражениями/командами. Скелетная анимация, прозрачность/полный PBR, dynamic rigid bodies, игровые сохранения, GPU buffer/geometry-порты, virtual geometry, live coediting и dynamic binary plugins ещё не реализованы. Производительность GameHost и настоящего Player window измеряется раздельно; результаты предыдущего 0.3 выше не являются результатами нового игрового этапа.
 
 ## Документация
 
