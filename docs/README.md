@@ -7,6 +7,7 @@ English is the primary documentation language. Every document below has a comple
 ## Start here
 
 - [Working with the ModuleEngine assistant](assistant-workflow.md)
+- [Debug ModuleEngine behavior](../.agents/skills/moduleengine-debug/SKILL.md)
 
 - [ModuleEngine 0.4](../README.md)
 - [Working on ModuleEngine](../AGENTS.md)

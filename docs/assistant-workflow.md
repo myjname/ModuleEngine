@@ -44,3 +44,24 @@ It prints scope, source identity, step totals, failures/incomplete work, skips a
 For a task that spans interruptions or compaction, keep a short checkpoint in its existing notes: goal and non-goals, decisions, current hypothesis, relevant paths/source state, completed or pending checks, and the next action. Update it when those facts materially change. On resumption, inspect the actual diff and evidence before trusting the checkpoint. Do not create another always-loaded architecture copy or require a new document for every small edit.
 
 Give a delegated task only the goal, relevant paths/contracts, source state and required output. Independent review keeps its required clean context and access to the complete relevant diff. Delegate when parallel work or independent judgment justifies its startup and coordination cost; do not spawn a second agent merely to repeat a trivial command. Measure output characters and elapsed time separately from tokens or account cost.
+
+## Debugging skill
+
+The repo-local [moduleengine-debug](../.agents/skills/moduleengine-debug/SKILL.md) skill is discovered from `.agents/skills/`. It covers observed bugs and regressions, not general planning. Its full instructions are loaded only when needed: establish the actual failure, test a distinguishing hypothesis, fix the demonstrated cause and verify the result. The [Russian manual copy](ru/debugging-skill.md) is not another discoverable skill. Do not duplicate this procedure into every prompt or the root instructions.
+
+## Adaptive task configuration
+
+The user authorizes the assistant to classify delegated work and choose its supported model and reasoning effort without asking about every launch. The policy normally keeps the current capable model and varies effort:
+
+| Task | Initial effort | Escalation signal |
+| --- | --- | --- |
+| Narrow read-only lookup or mechanical inventory | `low` | Ambiguous references or an unresolved cross-contract question |
+| Bounded ordinary implementation or structured analysis | `medium` | Evidence of interacting invariants or difficult failure paths |
+| Independent review, concurrency, transactions or data-sensitive debugging | `high` | A reasoning problem remains after obtaining the necessary evidence |
+| Especially demanding multi-step reasoning | Supported `xhigh`/`max`/`ultra` | Choose deliberately; more effort is not a substitute for a missing log, measurement or product decision |
+
+[`.codex/config.toml`](../.codex/config.toml) sets new subagents to `gpt-6.1-sol` / `medium` by default; the assistant explicitly selects a different supported effort when the task needs it. Available models and levels depend on the client/account. Keep a concrete reason for a non-routine choice in task evidence rather than adding a settings negotiation to every user message. Do not weaken tests or independent review to make a cheaper configuration appear successful.
+
+The current desktop parent turn already has its model/effort when it starts. A spawned task can have different settings, but does not alter that parent turn. Project defaults may require a new session to be loaded; explicit values on the available spawn tool are used for current delegations. This does not create an unsupported `auto` effort, change the user's global `config.toml`, or promise automatic switching of every future desktop answer. If a client lacks the required control, state the limitation instead of claiming it switched. The installed CLI's profile syntax must be checked before using it; do not assume legacy profile examples apply.
+
+Official references: [subagent settings](https://learn.chatgpt.com/docs/agent-configuration/subagents) and [skill discovery](https://learn.chatgpt.com/docs/build-skills). Compare accepted outcomes, rework, user interruptions, elapsed time and available usage telemetry before claiming savings.

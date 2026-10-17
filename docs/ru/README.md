@@ -7,6 +7,7 @@
 ## С чего начать
 
 - [Работа с ассистентом ModuleEngine](assistant-workflow.md)
+- [Диагностика поведения ModuleEngine](debugging-skill.md)
 
 - [ModuleEngine 0.4](../../README.ru.md)
 - [Работа над ModuleEngine](agent-guide.md)

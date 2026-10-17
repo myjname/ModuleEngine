@@ -1,0 +1,5 @@
+# Keep the parent chat's chosen model/effort; bound the default for new delegated work.
+# Explicit task settings take precedence. Review and complex debugging need deliberate routing.
+[agents]
+default_subagent_model = "gpt-6.1-sol"
+default_subagent_reasoning_effort = "medium"

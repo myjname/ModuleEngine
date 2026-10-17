@@ -54,6 +54,12 @@ Lead with the outcome in the user's language. Progress updates explain a new fin
 
 Ask only for missing decisions that materially affect the result or required authorization. Explain the concrete choice, recommend an option with its consequence, and distinguish a product decision from permission. Use existing answers and project contracts; resolve routine implementation details yourself. The final response states the changed behavior, verification and material limits, plus any necessary user action. See [examples](docs/assistant-workflow.md).
 
+## Debugging and task configuration
+
+For observed bugs or regressions, use the project [moduleengine-debug skill](.agents/skills/moduleengine-debug/SKILL.md). Load it for the failure being investigated, not routine explanations or every edit.
+
+The user authorizes choosing supported model/effort settings for delegated tasks. Prefer `low` for narrow read-only scans, `medium` for bounded ordinary work, and `high` for independent review or complex/data-sensitive debugging; use higher levels when the difficulty justifies them. Honor explicit user choices, avoid delegation overhead for trivial commands, and do not lower acceptance criteria. [Project defaults](.codex/config.toml) apply to new delegated work; explicit launch settings take precedence. They do not switch an already running parent turn or change the user's global `ultra` preference. See [routing and limits](docs/assistant-workflow.md#adaptive-task-configuration).
+
 ## Documentation languages
 
 English is the primary language of public documentation: root and crate `README.md` files, `AGENTS.md`, and `docs/*.md`. Maintain complete Russian counterparts in root and crate `README.ru.md` files and `docs/ru/*.md`; the Russian copy of this guide is `docs/ru/agent-guide.md`. Keep language links visible on both versions.
