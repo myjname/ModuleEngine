@@ -380,6 +380,14 @@ impl Editor {
         available
     }
     fn personal_path(&self, workspace: WorkspaceKind) -> PathBuf {
+        if let Some(root) = &self.diagnostic_personal_root {
+            let profile = match self.distribution.as_ref().map(|d| d.profile) {
+                Some(crate::distribution::DistributionProfile::Full) => "full",
+                Some(crate::distribution::DistributionProfile::Team) => "team",
+                None => "unavailable",
+            };
+            return root.join(profile).join(format!("{}.json", workspace.key()));
+        }
         #[cfg(test)]
         {
             let profile = match self.distribution.as_ref().map(|d| d.profile) {
@@ -1031,6 +1039,55 @@ pub fn participating_modules_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_personal_settings_preserve_other_editor_state_and_source_permissions() {
+        let root = crate::project::source_root();
+        let document = demo_document(WorldKind::Objects);
+        let path = root.join("unused-diagnostic-settings-isolation.json");
+        let first = Editor::new(document.clone(), path.clone());
+        let distribution = first.distribution.as_ref().unwrap().clone();
+        let compile_root = distribution.compile_root().unwrap();
+        let ordinary_recent = first
+            .test_personal_settings
+            .path()
+            .join(".user/editor-recent-projects.json");
+        let recent_before = std::fs::read(&ordinary_recent).unwrap();
+        let ordinary_layout = first.personal_path(WorkspaceKind::Project);
+        let isolated = module_engine_script::TestArtifactGuard::new(
+            &std::env::temp_dir().join("module-engine-diagnostic-settings"),
+            "editor-isolation",
+        )
+        .unwrap();
+        let mut diagnostic = Editor::new_with_diagnostic_personal_root(
+            document.clone(),
+            path.clone(),
+            distribution.clone(),
+            Some(isolated.path().into()),
+        );
+        assert!(
+            isolated
+                .path()
+                .join("editor-recent-projects.json")
+                .is_file()
+        );
+        assert_eq!(
+            diagnostic.personal_path(WorkspaceKind::Project),
+            isolated.path().join("full/project.json")
+        );
+        diagnostic.project_layout = DockLayout::single(EditorType::History);
+        diagnostic.personal_dirty = true;
+        diagnostic.save_personal_layouts();
+        assert!(isolated.path().join("full/project.json").is_file());
+        assert!(!ordinary_layout.exists());
+        assert_eq!(std::fs::read(ordinary_recent).unwrap(), recent_before);
+        assert_eq!(diagnostic.document, document);
+        let actual = diagnostic.distribution.as_ref().unwrap();
+        assert_eq!(actual.package_root, distribution.package_root);
+        assert_eq!(actual.profile, distribution.profile);
+        assert_eq!(actual.can_author_engine(), distribution.can_author_engine());
+        assert_eq!(actual.compile_root().unwrap(), compile_root);
+    }
 
     #[test]
     fn editor_personal_layouts_are_isolated_and_explicit_save_load_still_roundtrips() {

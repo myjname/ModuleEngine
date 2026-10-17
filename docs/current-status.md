@@ -85,6 +85,18 @@ preflight 0.592 s), using existing warm shared caches. Reports:
 These are not cold measurements or hardware acceptance. Hosted CI for this change
 is pending; previous acceptance boundaries remain.
 
+The [Editor diagnostics route](editor-diagnostics.md) uses a supplied normal executable,
+generated fixtures and isolated Recent/layout. Its
+[Windows both run](../outputs/ci-editor-builds-20261017/diagnostics/20261017T020938Z-e9e189aad466/result.json)
+passed workflow and native WGPU/Dx12 capture; unsupported window-system and timeout
+checks rejected their cases with preservation and owned-process cleanup evidence.
+Final Windows `contracts` passed 187 Rust tests in 16 steps, Clippy passed, and the
+full Python suite passed with 66 tests and two explicit platform skips; reports are
+linked in the guide. The both-run native Scene pane was still preparing; separate
+workflow PNGs verify the imported model, and the Puzzle capture shows its board.
+Linux native capture and hosted CI remain unconfirmed; these results do not establish
+Scene readiness, cold-start, compositor responsiveness or full delivery.
+
 [Independent review](review.md) is required for substantial changes under AGENTS.
 Another agent/person examines the diff, goal, actual paths, and evidence. The stdlib
 `review_snapshot.py` binds the conclusion to HEAD and tracked/untracked source bytes;

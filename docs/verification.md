@@ -9,6 +9,9 @@ The [scripts/verification.json](../scripts/verification.json) registry and stdli
 change Rust, Cargo profiles, product watchdogs, or performance criteria.
 The new route does not replace full acceptance from historical reports.
 
+[Editor diagnostics](editor-diagnostics.md) is a separate bounded route using a supplied
+normal executable, generated fixtures and validated native captures; it does not build an Editor.
+
 <a id="запуск-и-окружение"></a>
 
 ## Launch and Environment
@@ -55,7 +58,7 @@ arguments retain the previous heavy legacy suite**.
 | Profile | Scope | What it does not confirm |
 | --- | --- | --- |
 | `quick` | `cargo fmt --all -- --check`, all lib tests of `module-engine-core` and `module-engine-project`. | Not the workspace, Editor, Vulkan runtime, secondary Custom builds, or ignored acceptance. Cold compilation can still be slow. |
-| `contracts` | Quick plus `cargo_build::tests::`, four Inspector regressions, 99 Inspector property scenarios, four previous Save As tests, and 28 workflow preservation scenarios. | Not all UI, native dialogs, or the full authoring suite. |
+| `contracts` | Quick plus `cargo_build::tests::`, four Inspector regressions, 99 Inspector property scenarios, four previous Save As tests, 28 workflow preservation scenarios, and two `diagnostic_personal` tests for explicit-root validation and Recent/layout isolation with source permissions preserved. | Not all UI, native dialogs, or the full authoring suite. |
 | `clippy` | `cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings` on the pinned native toolchain. | No formatting, tests, or runtime checks; not engine or delivery acceptance. |
 | `native` | Five explicit ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context, and Windows executable spellings. | Not desktop benchmark, screen latency, Full export, or strict 60 FPS. A Windows-only test is marked `skipped` on Linux, not passed. |
 | `native-tools` | Three native linker/cache/executable-spelling checks from `native`, without GameUI or GPU. | Not full `native`; a Windows-only test is marked `skipped` on Linux. Used by Windows CI. |

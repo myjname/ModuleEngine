@@ -73,6 +73,18 @@ preflight 0.592 с) с существующими прогретыми общи�
 Это не холодные замеры и не аппаратная приёмка. Hosted CI этого изменения
 ещё не проверен; прежние границы приёмки сохраняются.
 
+[Маршрут диагностики Editor](editor-diagnostics.md) использует предоставленный обычный
+executable, сгенерированные fixtures и изолированные Recent/layout.
+[Windows-прогон both](../../outputs/ci-editor-builds-20261017/diagnostics/20261017T020938Z-e9e189aad466/result.json)
+прошёл workflow и native WGPU/Dx12 capture; проверки неподдерживаемой оконной системы
+и timeout отклонили свои случаи с доказательствами сохранности и owned-process cleanup.
+Финальный Windows `contracts` прошёл 187 Rust tests в 16 шагах, Clippy прошёл,
+полный Python suite прошёл с 66 тестами и двумя явными platform skips; ссылки на
+отчёты приведены в руководстве. Native панель Scene в both-прогоне ещё готовилась;
+отдельные workflow PNG проверяют импортированную модель, а Puzzle capture показывает поле.
+Linux native capture и hosted CI ещё не подтверждены; это не доказательство готовности
+Scene, cold-start, отзывчивости compositor или полной поставки.
+
 [Независимое ревью](review.md) обязательно для существенных изменений по AGENTS.
 Другой агент/человек проверяет diff, цель, реальные пути и evidence. Stdlib
 `review_snapshot.py` связывает заключение с HEAD и байтами tracked/untracked source;

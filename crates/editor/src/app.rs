@@ -119,6 +119,7 @@ pub struct Editor {
     panel_registry: Vec<panes::ModulePanelRegistration>,
     active_object: Option<u64>,
     authored_object_ids: std::collections::BTreeSet<u64>,
+    diagnostic_personal_root: Option<PathBuf>,
     #[cfg(test)]
     test_personal_settings: module_engine_script::TestArtifactGuard,
     personal_dirty: bool,
@@ -273,10 +274,28 @@ impl Editor {
     ) -> Self {
         Self::new_with_policy(document, path, Some(distribution))
     }
+    /// Isolate only personal UI state for an explicitly requested diagnostic run.
+    /// The distribution and its source/SDK permissions remain unchanged.
+    pub(crate) fn new_with_diagnostic_personal_root(
+        document: GraphDocument,
+        path: PathBuf,
+        distribution: crate::distribution::Distribution,
+        personal_root: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_policy_and_personal_root(document, path, Some(distribution), personal_root)
+    }
     fn new_with_policy(
         document: GraphDocument,
         path: PathBuf,
         distribution: Option<crate::distribution::Distribution>,
+    ) -> Self {
+        Self::new_with_policy_and_personal_root(document, path, distribution, None)
+    }
+    fn new_with_policy_and_personal_root(
+        document: GraphDocument,
+        path: PathBuf,
+        distribution: Option<crate::distribution::Distribution>,
+        diagnostic_personal_root: Option<PathBuf>,
     ) -> Self {
         let mut canvas = CanvasState::new("engine-graph");
         canvas.zoom = 0.82;
@@ -364,6 +383,7 @@ impl Editor {
             panel_registry: vec![],
             active_object: Some(1),
             authored_object_ids: std::collections::BTreeSet::new(),
+            diagnostic_personal_root,
             #[cfg(test)]
             test_personal_settings: module_engine_script::TestArtifactGuard::new(
                 &std::env::temp_dir().join("module-engine-editor-settings"),

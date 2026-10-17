@@ -7,6 +7,10 @@
 меняют Rust, Cargo profiles, продуктовые watchdogs или критерии производительности.
 Новый маршрут не заменяет полную приёмку из исторических отчётов.
 
+[Диагностика редактора](editor-diagnostics.md) — отдельный ограниченный маршрут с
+предоставленным обычным executable, сгенерированными fixtures и проверенными native
+captures; он не собирает Editor.
+
 ## Запуск и окружение
 
 Новые профили требуют Python 3.9+ без сторонних пакетов и уже настроенную native
@@ -49,7 +53,7 @@ python3 scripts/verify.py --profile native --plan
 | Профиль | Объём | Чего он не подтверждает |
 | --- | --- | --- |
 | `quick` | `cargo fmt --all -- --check`, все lib tests пакетов `module-engine-core` и `module-engine-project`. | Не workspace, Editor, Vulkan runtime, secondary Custom builds или ignored acceptance. Холодная компиляция всё равно может быть долгой. |
-| `contracts` | Quick плюс `cargo_build::tests::`, четыре Inspector-регрессии, 99 сценариев свойств Inspector, четыре прежних Save As tests и 28 сценариев сохранности workflow. | Не всё UI, native dialogs или полный authoring suite. |
+| `contracts` | Quick плюс `cargo_build::tests::`, четыре Inspector-регрессии, 99 сценариев свойств Inspector, четыре прежних Save As tests, 28 сценариев сохранности workflow и два теста `diagnostic_personal` для проверки явного root и изоляции Recent/layout с сохранением source permissions. | Не всё UI, native dialogs или полный authoring suite. |
 | `clippy` | `cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings` на закреплённом native toolchain. | Без formatting, tests или runtime-проверок; не приёмка движка или поставки. |
 | `native` | Пять явных ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context и Windows executable spellings. | Не desktop benchmark, screen latency, Full export или строгие 60 FPS. Windows-only test на Linux отмечается `skipped`, а не пройденным. |
 | `native-tools` | Три native linker/cache/executable-spelling проверки из `native`, без GameUI и GPU. | Не полный `native`; на Linux Windows-only test отмечается `skipped`. Используется Windows CI. |

@@ -53,6 +53,7 @@
 - [Закреплённые инструменты Windows](toolchain.md)
 - [CI ModuleEngine](ci.md)
 - [Маршруты проверок](verification.md)
+- [Диагностика редактора](editor-diagnostics.md)
 - [Независимое ревью изменений](review.md)
 - [Review: <задача>](review-template.md)
 - [Сквозная приёмка игры и доказательства замеров](game-verification.md)

@@ -521,6 +521,7 @@ fn run() -> Result<(), String> {
     if distribution.profile == distribution::DistributionProfile::Full {
         host::ensure_authoring_configuration(&mut document);
     }
+    let diagnostic_personal_root = ui_capture::diagnostic_personal_root()?;
     let options = module_engine_player::ui::native_options(
         eframe::egui::ViewportBuilder::default()
             .with_inner_size([1580.0, 940.0])
@@ -533,7 +534,12 @@ fn run() -> Result<(), String> {
         Box::new(move |cc| {
             module_engine_player::ui::report_graphics(cc);
             app::configure_style(&cc.egui_ctx);
-            let mut editor = app::Editor::new_with_distribution(document, path, distribution);
+            let mut editor = app::Editor::new_with_diagnostic_personal_root(
+                document,
+                path,
+                distribution,
+                diagnostic_personal_root,
+            );
             if open_custom {
                 editor.show_custom();
             }

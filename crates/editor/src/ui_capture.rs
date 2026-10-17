@@ -2,11 +2,33 @@
 //! Normal editor runs never request screenshots or additional repaints here.
 use eframe::egui;
 use std::{
+    ffi::OsStr,
     fs,
     io::BufWriter,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+/// Personal settings are the only redirected paths. This never substitutes
+/// package/source roots, Engine bindings, SDKs or authored scene data.
+pub(crate) fn diagnostic_personal_root() -> Result<Option<PathBuf>, String> {
+    parse_diagnostic_personal_root(
+        std::env::var_os("MODULE_ENGINE_DIAGNOSTIC_USER_ROOT").as_deref(),
+    )
+}
+
+fn parse_diagnostic_personal_root(value: Option<&OsStr>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let path = Path::new(value);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(
+            "MODULE_ENGINE_DIAGNOSTIC_USER_ROOT requires an existing absolute directory".into(),
+        );
+    }
+    path.canonicalize()
+        .map(Some)
+        .map_err(|error| format!("Diagnostic personal directory: {error}"))
+}
 
 pub struct Capture {
     destination: Option<PathBuf>,
@@ -120,4 +142,32 @@ fn write_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     writer
         .finish()
         .map_err(|e| format!("UI capture finish: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_personal_root_requires_an_explicit_existing_absolute_directory() {
+        assert_eq!(parse_diagnostic_personal_root(None).unwrap(), None);
+        for value in ["", "relative/personal", "."] {
+            assert!(parse_diagnostic_personal_root(Some(OsStr::new(value))).is_err());
+        }
+        let guard = module_engine_script::TestArtifactGuard::new(
+            &std::env::temp_dir().join("module-engine-diagnostic-settings"),
+            "personal-root",
+        )
+        .unwrap();
+        let root = guard.path().canonicalize().unwrap();
+        assert_eq!(
+            parse_diagnostic_personal_root(Some(root.as_os_str())).unwrap(),
+            Some(root.clone())
+        );
+        assert!(parse_diagnostic_personal_root(Some(root.join("missing").as_os_str())).is_err());
+        let file = root.join("not-a-directory");
+        fs::write(&file, b"keep").unwrap();
+        assert!(parse_diagnostic_personal_root(Some(file.as_os_str())).is_err());
+        assert_eq!(fs::read(file).unwrap(), b"keep");
+    }
 }

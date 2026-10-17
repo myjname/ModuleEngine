@@ -182,20 +182,24 @@ impl Workflow {
 
 impl Editor {
     pub(super) fn initialize_workflow(&mut self) {
-        #[cfg(test)]
-        {
-            self.workflow.recent_path = Some(
-                self.test_personal_settings
-                    .path()
-                    .join(".user/editor-recent-projects.json"),
-            );
-        }
-        #[cfg(not(test))]
-        {
-            self.workflow.recent_path = self
-                .distribution
-                .as_ref()
-                .map(|d| d.package_root.join(".user/editor-recent-projects.json"));
+        if let Some(root) = &self.diagnostic_personal_root {
+            self.workflow.recent_path = Some(root.join("editor-recent-projects.json"));
+        } else {
+            #[cfg(test)]
+            {
+                self.workflow.recent_path = Some(
+                    self.test_personal_settings
+                        .path()
+                        .join(".user/editor-recent-projects.json"),
+                );
+            }
+            #[cfg(not(test))]
+            {
+                self.workflow.recent_path = self
+                    .distribution
+                    .as_ref()
+                    .map(|d| d.package_root.join(".user/editor-recent-projects.json"));
+            }
         }
         if let Some(path) = &self.workflow.recent_path
             && let Ok(bytes) = fs::read(path)
@@ -1367,6 +1371,7 @@ fn import_resource_transaction<T>(
 pub(crate) fn verify_workflow(source: &Path, output: &Path) -> Result<serde_json::Value, String> {
     use module_engine_core::{AuthoredObject, Transform, WorldObject};
     use workspace_files::ProjectTemplate;
+    let personal_root = crate::ui_capture::diagnostic_personal_root()?;
     let source = source.canonicalize().map_err(|e| e.to_string())?;
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
     let output = output.canonicalize().map_err(|e| e.to_string())?;
@@ -1480,10 +1485,11 @@ pub(crate) fn verify_workflow(source: &Path, output: &Path) -> Result<serde_json
     }
     crate::write_png(&case.join("relocated-model.png"), &frame)?;
     drop(host);
-    let mut editor = Editor::new_with_distribution(
+    let mut editor = Editor::new_with_diagnostic_personal_root(
         copy.document.clone(),
         copy.path.clone(),
         copy_context.clone(),
+        personal_root,
     );
     editor.workspace = WorkspaceKind::Project;
     editor.playing = false;
