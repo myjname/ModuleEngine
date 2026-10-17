@@ -8,6 +8,7 @@ English is the primary documentation language. Every document below has a comple
 
 - [Working with the ModuleEngine assistant](assistant-workflow.md)
 - [Debug ModuleEngine behavior](../.agents/skills/moduleengine-debug/SKILL.md)
+- [Assistant workflow rollout and Serena pilot](assistant-efficiency-20261017.md)
 
 - [ModuleEngine 0.4](../README.md)
 - [Working on ModuleEngine](../AGENTS.md)

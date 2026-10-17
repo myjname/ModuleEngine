@@ -8,6 +8,7 @@
 
 - [Работа с ассистентом ModuleEngine](assistant-workflow.md)
 - [Диагностика поведения ModuleEngine](debugging-skill.md)
+- [Внедрение рабочего процесса ассистента и пилот Serena](assistant-efficiency-20261017.md)
 
 - [ModuleEngine 0.4](../../README.ru.md)
 - [Работа над ModuleEngine](agent-guide.md)

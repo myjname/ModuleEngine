@@ -79,3 +79,14 @@ Another agent/person examines the diff, goal, actual paths, and evidence. The st
 `review_snapshot.py` binds the conclusion to HEAD and tracked/untracked source bytes;
 a successful comparison is not itself approval. The [template](review-template.md)
 records findings, fixes, rechecks, and unverified boundaries.
+
+## Assistant workflow
+
+[Communication and context guidance](assistant-workflow.md), a repository debugging
+skill and adaptive subagent settings were added on 17 October. New subagents default
+to `gpt-6.1-sol` / `medium`; explicit launches select supported effort by task.
+This does not change an active parent turn or the user's global `ultra` setting.
+The [read-only Serena pilot](assistant-efficiency-20261017.md) resolved nine checked
+caller references after workspace-loading configuration was corrected. Overall speed
+and account-cost gains remain unmeasured; no always-on MCP registration was added.
+These changes concern assistant tooling and documentation, not engine/native acceptance.
