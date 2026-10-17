@@ -4,7 +4,7 @@
 
 [English](ci.md) | [Русский](ru/ci.md) | [Documentation](README.md)
 
-Goal: every PR receives `contracts` on Windows and Linux; changes to executable
+Goal: every PR receives separate `contracts` and `clippy` checks on Windows and Linux; changes to executable
 sources add native and package checks. Documentation PRs do not receive
 expensive native/package builds. Non-goals: performance, desktop dialogs, hardware GPU,
 and full Full/Team/Player delivery. Criterion: `CI required` succeeds only after
@@ -23,8 +23,17 @@ Failure to determine the diff fails planning.
 
 | Runner | Always | When sources change |
 | --- | --- | --- |
-| `windows-2022` | Python unit checks, `contracts` | `native-tools`, then `package` |
-| `ubuntu-24.04` | Python unit checks, `contracts` | `native` on explicitly selected Mesa lavapipe, then `package` |
+| `windows-2022` | Python unit checks, `contracts`, `clippy` | `native-tools`, then `package` |
+| `ubuntu-24.04` | Python unit checks, `contracts`, `clippy` | `native` on explicitly selected Mesa lavapipe, then `package` |
+
+The existing checks job always plans and runs `clippy` separately on both platforms,
+including documentation PRs. Its command is
+`cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings`.
+The launcher resolves `{native_host}` from the actual verbose Rust toolchain output
+and rejects a release/target mismatch with the platform manifest before Cargo metadata.
+Clippy does not run formatting, tests, or runtime scenarios; `contracts` still checks
+formatting exactly once. The fail-closed `CI required` aggregate is unchanged.
+This workflow change requires new hosted results for its own SHA.
 
 `native-tools` comprises three existing checks of native linker/cache/executable
 spellings without GPU or UI. This is part of `native`, not a replacement for its two GameUI tests.
@@ -38,7 +47,7 @@ The two platforms run in parallel on separate hosted VMs; commands within
 each VM run sequentially. Each job receives a fresh hosted checkout
 and separate caches/TEMP; the developer's authored working directory is not used.
 Rust version/native target come from the existing Windows/Linux manifests.
-Before the offline launcher, CI explicitly installs pinned Rust/rustfmt and runs
+Before the offline launcher, CI explicitly installs pinned Rust with the `rustfmt` and `clippy` components and runs
 `cargo fetch --locked`. Linux explicitly installs system link libraries;
 the native route additionally installs Mesa and restores DXC using the
 existing archive SHA and all file SHAs from `scripts/linux-toolchain.json`.
@@ -53,8 +62,10 @@ and confirming the fix requires a new successful `package` on hosted Windows.
 Reports and command logs from `outputs/verification` are published as an artifact for
 each platform even after failure; if verification did not start, the GitHub job log
 contains the preparation error. Retention is 14 days. Full source/artifact hashes and
-scope remain in the launcher's normal `result.json`. CI caches have not yet been added:
-first, the real hosted run must be measured without carrying over local tool paths.
+scope remain in the launcher's normal `result.json`. A conservative combined Cargo
+cache restores only admitted dependency/workspace build paths; every check still runs.
+[Measurement and cache boundaries](build-verification-performance.md) define compatible
+keys and how to assess total hosted time, including restore/save costs.
 
 <a id="включение-обязательности"></a>
 
@@ -98,6 +109,8 @@ for each version must be checked in its [CI run](https://github.com/myjname/Modu
 ```sh
 python -B -m unittest discover -s scripts -p 'test_*.py' -v
 python scripts/ci_plan.py --base <full-base-SHA>
+python scripts/verify.py --profile clippy --plan
+python scripts/verify.py --profile clippy
 python scripts/verify.py --profile native-tools --plan
 ```
 

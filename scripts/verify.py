@@ -265,6 +265,12 @@ class Runner:
         if requested and requested != self.host:
             raise VerificationError("Foreign CARGO_BUILD_TARGET is not a native verification environment")
         self.toolchain = text
+        if any(step.get("pinned_rust") for step in self.plan["steps"]):
+            pin_path = "toolchain-manifest.json" if PLATFORM == "windows" else "scripts/linux-toolchain.json"
+            pin = json.loads((self.root / pin_path).read_text(encoding="utf-8"))["rust"]
+            releases = re.findall(r"^release: (\S+)$", text, re.MULTILINE)
+            if releases != [pin["version"]] or self.host != pin["target"]:
+                raise VerificationError("Clippy requires the pinned native Rust version and target: " + pin["version"] + " / " + pin["target"])
         self.metadata = json.loads(self.command(["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version=1"], 60).read_text(encoding="utf-8"))
 
     def artifact(self, step):
@@ -326,7 +332,8 @@ class Runner:
             result["started_at"] = utc()
             try:
                 if step["kind"] == "command":
-                    self.command(step["argv"], step["timeout"])
+                    argv = [self.host if arg == "{native_host}" else arg for arg in step["argv"]]
+                    self.command(argv, step["timeout"])
                 else:
                     result.update(self.test(step))
                 result["status"] = "passed"
@@ -343,7 +350,7 @@ class Runner:
 
 def main(argv=None, root=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=["quick", "contracts", "native", "native-tools", "package"], default="quick")
+    parser.add_argument("--profile", choices=["quick", "contracts", "clippy", "native", "native-tools", "package"], default="quick")
     read_only = parser.add_mutually_exclusive_group()
     read_only.add_argument("--list", action="store_true")
     read_only.add_argument("--plan", action="store_true")

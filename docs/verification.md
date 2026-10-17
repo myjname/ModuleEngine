@@ -9,6 +9,9 @@ The [scripts/verification.json](../scripts/verification.json) registry and stdli
 change Rust, Cargo profiles, product watchdogs, or performance criteria.
 The new route does not replace full acceptance from historical reports.
 
+[Editor diagnostics](editor-diagnostics.md) is a separate bounded route using a supplied
+normal executable, generated fixtures and validated native captures; it does not build an Editor.
+
 <a id="запуск-и-окружение"></a>
 
 ## Launch and Environment
@@ -55,10 +58,19 @@ arguments retain the previous heavy legacy suite**.
 | Profile | Scope | What it does not confirm |
 | --- | --- | --- |
 | `quick` | `cargo fmt --all -- --check`, all lib tests of `module-engine-core` and `module-engine-project`. | Not the workspace, Editor, Vulkan runtime, secondary Custom builds, or ignored acceptance. Cold compilation can still be slow. |
-| `contracts` | Quick plus `cargo_build::tests::`, four Inspector regressions, 99 Inspector property scenarios, four previous Save As tests, and 28 workflow preservation scenarios. | Not all UI, native dialogs, or the full authoring suite. |
+| `contracts` | Quick plus `cargo_build::tests::`, four Inspector regressions, 99 Inspector property scenarios, four previous Save As tests, 28 workflow preservation scenarios, and two `diagnostic_personal` tests for explicit-root validation and Recent/layout isolation with source permissions preserved. | Not all UI, native dialogs, or the full authoring suite. |
+| `clippy` | `cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings` on the pinned native toolchain. | No formatting, tests, or runtime checks; not engine or delivery acceptance. |
 | `native` | Five explicit ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context, and Windows executable spellings. | Not desktop benchmark, screen latency, Full export, or strict 60 FPS. A Windows-only test is marked `skipped` on Linux, not passed. |
 | `native-tools` | Three native linker/cache/executable-spelling checks from `native`, without GameUI or GPU. | Not full `native`; a Windows-only test is marked `skipped` on Linux. Used by Windows CI. |
 | `package` | Two ignored `game_package` checks: native target modes and concurrent immutable snapshots. They build minimal Cargo fixtures and execute their products. | **Not a real Full/Team/Player game export, relocation, or full delivery acceptance.** These CLI checks remain a targeted/legacy route. |
+
+The `clippy` profile is explicit and independent: `contracts` still runs formatting
+exactly once, and legacy routes are unchanged. Run
+`python scripts/verify.py --profile clippy --plan`, then
+`python scripts/verify.py --profile clippy`. Planning is process-free and leaves
+`{native_host}` unresolved. Execution checks the actual `rustc -vV` release and
+native host against `toolchain-manifest.json` on Windows or
+`scripts/linux-toolchain.json` on Linux before Cargo metadata; a mismatch fails.
 
 Checks run sequentially. For Rust tests, the launcher first obtains
 `cargo metadata`, then `cargo test --no-run --message-format=json` for the selected
@@ -79,11 +91,17 @@ The test binary runs **directly in the normal loader environment**, not through
 success. After execution, the libtest summary is checked against the discovered set. This
 preserves the important Stop/reuse condition from the [previous loader check](postfix-p2-fixes-20261016.md).
 
+## Build and test timing
+
+[Build/verification performance](build-verification-performance.md) separates Cargo
+compilation/linking, direct tests and launcher/observer costs. Its local target-cold
+and repeat reports do not establish hosted cache benefit or Editor cold-start.
+
 ## CI
 
-[GitHub Actions and the required check](ci.md) run `contracts` on Windows and
-Linux and add native/package routes for source changes. Before offline
-checks, CI explicitly restores tools and locked dependencies. Enforcing
+[GitHub Actions and the required check](ci.md) run separate `contracts` and `clippy` plans/checks on Windows and
+Linux, including documentation PRs, and add native/package routes for source changes. Before offline
+checks, CI explicitly restores pinned Rust with `rustfmt`/`clippy` and locked dependencies. Enforcing
 merge requirements needs an applied branch rule; having YAML is not
 proof of a first successful hosted run or configured protection.
 

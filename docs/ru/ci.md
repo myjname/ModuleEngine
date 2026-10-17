@@ -2,7 +2,7 @@
 
 [English](../ci.md) | [Русский](ci.md) | [Документация](README.md)
 
-Цель: каждый PR получает `contracts` на Windows и Linux; изменение исполняемых
+Цель: каждый PR получает отдельные проверки `contracts` и `clippy` на Windows и Linux; изменение исполняемых
 исходников добавляет native и package проверки. Документационный PR не получает
 дорогие native/package сборки. Нецели: performance, desktop dialogs, hardware GPU
 и полная Full/Team/Player поставка. Критерий: `CI required` успешен только после
@@ -19,8 +19,17 @@
 
 | Runner | Всегда | При изменении исходников |
 | --- | --- | --- |
-| `windows-2022` | Python unit checks, `contracts` | `native-tools`, затем `package` |
-| `ubuntu-24.04` | Python unit checks, `contracts` | `native` на явно выбранном Mesa lavapipe, затем `package` |
+| `windows-2022` | Python unit checks, `contracts`, `clippy` | `native-tools`, затем `package` |
+| `ubuntu-24.04` | Python unit checks, `contracts`, `clippy` | `native` на явно выбранном Mesa lavapipe, затем `package` |
+
+Существующий checks job всегда отдельно планирует и выполняет `clippy` на обеих
+платформах, включая документационные PR. Команда:
+`cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings`.
+Launcher определяет `{native_host}` по фактическому verbose выводу Rust toolchain
+и отклоняет несовпадение release/target с manifest платформы до Cargo metadata.
+Clippy не выполняет formatting, tests или runtime-сценарии; `contracts` по-прежнему
+проверяет formatting ровно один раз. Fail-closed aggregate `CI required` не изменён.
+Для этого изменения workflow требуются новые hosted результаты на его SHA.
 
 `native-tools` — три существующие проверки native linker/cache/executable
 spellings без GPU или UI. Это часть `native`, а не замена его двух GameUI tests.
@@ -34,7 +43,7 @@ Linux full `native` запускает offscreen tests с software Vulkan, бе�
 каждой VM выполняются последовательно. Каждый job получает новый hosted checkout
 и отдельные caches/TEMP; авторский рабочий каталог разработчика не используется.
 Rust version/native target берутся из существующих Windows/Linux manifests.
-Перед offline launcher CI явно устанавливает pinned Rust/rustfmt и делает
+Перед offline launcher CI явно устанавливает pinned Rust с компонентами `rustfmt` и `clippy` и делает
 `cargo fetch --locked`. Linux явно устанавливает системные link библиотеки;
 native маршрут дополнительно устанавливает Mesa и восстанавливает DXC по
 существующему archive SHA и всем file SHA из `scripts/linux-toolchain.json`.
@@ -49,8 +58,10 @@ snapshot fixture на длинном TEMP; тест и его критерии �
 Отчёты и command logs из `outputs/verification` публикуются как artifact для
 каждой платформы даже после отказа; если проверка не стартовала, GitHub job log
 содержит ошибку подготовки. Retention 14 дней. Full source/artifact hashes и
-scope остаются в обычном `result.json` launcher. CI caches пока не добавлены:
-сначала нужно измерить реальный hosted прогон и не перенести локальные tool paths.
+scope остаются в обычном `result.json` launcher. Консервативный объединённый Cargo
+cache восстанавливает только допустимые dependency/workspace build paths; все проверки
+сохраняются. [Замеры и границы cache](build-verification-performance.md) определяют
+совместимые keys и оценку полного hosted времени, включая стоимость restore/save.
 
 ## Включение обязательности
 
@@ -90,6 +101,8 @@ prerequisite, а не отдельный искусственный отказ R
 ```sh
 python -B -m unittest discover -s scripts -p 'test_*.py' -v
 python scripts/ci_plan.py --base <full-base-SHA>
+python scripts/verify.py --profile clippy --plan
+python scripts/verify.py --profile clippy
 python scripts/verify.py --profile native-tools --plan
 ```
 

@@ -39,7 +39,7 @@
 
 - Windows: корневой [verify.ps1](../../verify.ps1); необязательная ветка `-NativeBenchmarks` требует рабочего стола и изолированного замера.
 - Linux: корневой [verify.sh](../../verify.sh), условия native toolchain/DXC/Vulkan — в [Linux guide](linux-support.md). Скрипт включает offscreen проверки и не закрывает desktop/export acceptance.
-- [Реестр и stdlib launcher](verification.md) добавляют явные `quick`, `contracts`, `native`, `native-tools`, `package`; `--plan`/`--list` читают конфигурацию без Cargo. Native tests запускаются напрямую из CargoJSON-selected executable с normal loader environment. Windows-only проверки на Linux отмечаются `skipped`. `package` проверяет минимальные Cargo product/snapshot fixtures, а не полный Full/Team/Player export.
+- [Реестр и stdlib launcher](verification.md) добавляют явные `quick`, `contracts`, `clippy`, `native`, `native-tools`, `package`; `--plan`/`--list` читают конфигурацию без Cargo. Native tests запускаются напрямую из CargoJSON-selected executable с normal loader environment. Windows-only проверки на Linux отмечаются `skipped`. `package` проверяет минимальные Cargo product/snapshot fixtures, а не полный Full/Team/Player export.
 - Объём legacy-вызовов без аргументов сохранён; Windows `-NativeBenchmarks` выбирает actual normal Editor из CargoJSON и по-прежнему не требует Python. Новый launcher требует уже установленный Python 3.9+ без сторонних зависимостей. Performance остаётся отдельным opt-in legacy/адресным маршрутом с прежними ограничениями.
 
 Launcher и его unit fixtures реализованы отдельно от Rust. Unit-проверки и планирование не являются новой приёмкой engine/native/package; реальные профили требуют своих отчётов на текущем snapshot. Правила работы и сохранности данных: [AGENTS.md](agent-guide.md).
@@ -57,10 +57,43 @@ Launcher и его unit fixtures реализованы отдельно от Ru
 без изменения production-поведения или Cargo dependencies; прежние performance
 и delivery ограничения сохраняются.
 
-[GitHub CI](ci.md) запускает Windows/Linux contracts и выбранные native/package
+[GitHub CI](ci.md) запускает отдельные Windows/Linux проверки `contracts` и `clippy`,
+включая документационные PR, и выбранные native/package
 маршруты; в публичном `myjname/ModuleEngine` для `main` требуется `CI required`,
 включая администратора. Новые версии оцениваются по фактическому CI своего SHA,
 не по старому зелёному запуску. Негативный служебный PR подтвердил блокировку merge.
+
+17 октября добавлен явный профиль `clippy` для всего workspace, всех targets и features
+с запретом warnings и проверкой pinned Rust release/native target.
+Он не добавляет formatting, tests или runtime-проверки. Профиль прошёл на
+Windows (Clippy 3.359 с; preflight 0.219 с) и Ubuntu/WSL (Clippy 27.856 с;
+preflight 0.592 с) с существующими прогретыми общими caches. Отчёты:
+[Windows](../../outputs/ci-editor-builds-20261017/verification/20261017T015811Z-985d823c/result.json),
+[Ubuntu/WSL](../../outputs/ci-editor-builds-20261017/verification/20261017T015921Z-6ef11385/result.json).
+Это не холодные замеры и не аппаратная приёмка.
+[Hosted-прогон этапов 1/2](https://github.com/myjname/ModuleEngine/actions/runs/38994338494)
+прошёл Windows/Linux Clippy, contracts, выбранные native/package маршруты и aggregate;
+прежние границы приёмки сохраняются.
+
+[Маршрут диагностики Editor](editor-diagnostics.md) использует предоставленный обычный
+executable, сгенерированные fixtures и изолированные Recent/layout.
+[Windows-прогон both](../../outputs/ci-editor-builds-20261017/diagnostics/20261017T020938Z-e9e189aad466/result.json)
+прошёл workflow и native WGPU/Dx12 capture; проверки неподдерживаемой оконной системы
+и timeout отклонили свои случаи с доказательствами сохранности и owned-process cleanup.
+Финальный Windows `contracts` прошёл 187 Rust tests в 16 шагах, Clippy прошёл,
+полный Python suite прошёл с 66 тестами и двумя явными platform skips; ссылки на
+отчёты приведены в руководстве. Native панель Scene в both-прогоне ещё готовилась;
+отдельные workflow PNG проверяют импортированную модель, а Puzzle capture показывает поле.
+Linux native capture ещё не подтверждён; hosted-прогон этапов 1/2 прошёл
+перечисленные CI-маршруты. Это не доказательство готовности Scene, cold-start,
+отзывчивости compositor или полной поставки.
+
+[Замеры сборки/проверок и cache policy](build-verification-performance.md) разделяют
+target-cold компиляцию и повторные тесты: оба локальных цикла `contracts` прошли
+187 тестов без изменения исходников/защищённых данных. Полное время цикла —
+182.375/89.906 с; это не доказывает hosted выигрыш или cold-start Editor.
+Консервативный CI Cargo cache сохраняет каждый шаг проверки; реальные hosted
+baseline/miss/hit результаты относятся к своим отчётам с учётом переноса/save.
 
 [Независимое ревью](review.md) обязательно для существенных изменений по AGENTS.
 Другой агент/человек проверяет diff, цель, реальные пути и evidence. Stdlib
