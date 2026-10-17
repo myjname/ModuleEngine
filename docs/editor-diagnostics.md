@@ -6,8 +6,9 @@
 with an existing normal native Editor executable. It creates its own fixture, reuses
 `--editor-ui-check` for workflow checks, and records native WGPU captures. The wrapper
 does not build an Editor and accepts no authored project JSON as input. The Windows
-runs below confirm this bounded route; Linux native capture and hosted CI for this
-change remain unverified.
+runs below confirm this bounded route; Linux native capture remains unverified.
+The [stage-1/2 hosted CI run](https://github.com/myjname/ModuleEngine/actions/runs/38994338494)
+passed its Windows/Linux verification routes; it did not run native diagnostic captures.
 
 ## Run
 
@@ -144,8 +145,9 @@ passed 187 Rust tests across 16 steps, and
 passed. The final full
 [Python suite](../outputs/ci-editor-builds-20261017/stage2-final-python-tests.json)
 passed with 66 tests and two explicit platform skips; its logs are linked from the
-report. Linux native capture and hosted CI remain unverified. The scope limits below
-continue to apply.
+report. The subsequent stage-1/2 hosted CI run linked above passed its Windows/Linux
+verification routes. Linux native diagnostic capture remains unverified, and CI does
+not establish Scene readiness or replace the scope limits below.
 
 ## Scope and verification
 

@@ -7,7 +7,9 @@
 fixture, использует прежний `--editor-ui-check` для workflow и записывает native
 WGPU captures. Wrapper не собирает Editor и не принимает авторский JSON проекта.
 Приведённые ниже Windows-прогоны подтверждают этот ограниченный маршрут; Linux
-native capture и hosted CI этого изменения ещё не проверены.
+native capture ещё не проверен.
+[Hosted CI этапов 1/2](https://github.com/myjname/ModuleEngine/actions/runs/38994338494)
+прошёл свои Windows/Linux-маршруты проверок; native diagnostic captures он не запускал.
 
 ## Запуск
 
@@ -147,8 +149,9 @@ Windows canonical-path regression. Финальный Windows
 Финальный полный
 [Python suite](../../outputs/ci-editor-builds-20261017/stage2-final-python-tests.json)
 прошёл с 66 тестами и двумя явными platform skips; ссылки на logs находятся в
-отчёте. Linux native capture и hosted CI остаются непроверенными. Ограничения объёма
-ниже сохраняются.
+отчёте. Последующий hosted CI этапов 1/2 по ссылке выше прошёл свои Windows/Linux-
+маршруты проверок. Linux native diagnostic capture ещё не проверен; CI не доказывает
+готовность Scene и не заменяет приведённые ниже ограничения объёма.
 
 ## Объём и проверка
 
