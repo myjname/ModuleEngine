@@ -70,8 +70,10 @@ Windows (Clippy 3.359 с; preflight 0.219 с) и Ubuntu/WSL (Clippy 27.856 с;
 preflight 0.592 с) с существующими прогретыми общими caches. Отчёты:
 [Windows](../../outputs/ci-editor-builds-20261017/verification/20261017T015811Z-985d823c/result.json),
 [Ubuntu/WSL](../../outputs/ci-editor-builds-20261017/verification/20261017T015921Z-6ef11385/result.json).
-Это не холодные замеры и не аппаратная приёмка. Hosted CI этого изменения
-ещё не проверен; прежние границы приёмки сохраняются.
+Это не холодные замеры и не аппаратная приёмка.
+[Hosted-прогон этапов 1/2](https://github.com/myjname/ModuleEngine/actions/runs/38994338494)
+прошёл Windows/Linux Clippy, contracts, выбранные native/package маршруты и aggregate;
+прежние границы приёмки сохраняются.
 
 [Маршрут диагностики Editor](editor-diagnostics.md) использует предоставленный обычный
 executable, сгенерированные fixtures и изолированные Recent/layout.
@@ -82,8 +84,16 @@ executable, сгенерированные fixtures и изолированны�
 полный Python suite прошёл с 66 тестами и двумя явными platform skips; ссылки на
 отчёты приведены в руководстве. Native панель Scene в both-прогоне ещё готовилась;
 отдельные workflow PNG проверяют импортированную модель, а Puzzle capture показывает поле.
-Linux native capture и hosted CI ещё не подтверждены; это не доказательство готовности
-Scene, cold-start, отзывчивости compositor или полной поставки.
+Linux native capture ещё не подтверждён; hosted-прогон этапов 1/2 прошёл
+перечисленные CI-маршруты. Это не доказательство готовности Scene, cold-start,
+отзывчивости compositor или полной поставки.
+
+[Замеры сборки/проверок и cache policy](build-verification-performance.md) разделяют
+target-cold компиляцию и повторные тесты: оба локальных цикла `contracts` прошли
+187 тестов без изменения исходников/защищённых данных. Полное время цикла —
+182.375/89.906 с; это не доказывает hosted выигрыш или cold-start Editor.
+Консервативный CI Cargo cache сохраняет каждый шаг проверки; реальные hosted
+baseline/miss/hit результаты относятся к своим отчётам с учётом переноса/save.
 
 [Независимое ревью](review.md) обязательно для существенных изменений по AGENTS.
 Другой агент/человек проверяет diff, цель, реальные пути и evidence. Stdlib

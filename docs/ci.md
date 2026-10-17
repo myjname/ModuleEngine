@@ -62,8 +62,10 @@ and confirming the fix requires a new successful `package` on hosted Windows.
 Reports and command logs from `outputs/verification` are published as an artifact for
 each platform even after failure; if verification did not start, the GitHub job log
 contains the preparation error. Retention is 14 days. Full source/artifact hashes and
-scope remain in the launcher's normal `result.json`. CI caches have not yet been added:
-first, the real hosted run must be measured without carrying over local tool paths.
+scope remain in the launcher's normal `result.json`. A conservative combined Cargo
+cache restores only admitted dependency/workspace build paths; every check still runs.
+[Measurement and cache boundaries](build-verification-performance.md) define compatible
+keys and how to assess total hosted time, including restore/save costs.
 
 <a id="включение-обязательности"></a>
 

@@ -86,6 +86,12 @@ Test binary запускается **напрямую в normal loader environme
 успехом. После выполнения сверяется libtest summary с найденным набором. Это
 сохраняет важное условие Stop/reuse из [предыдущей проверки loader](postfix-p2-fixes-20261016.md).
 
+## Время сборки и тестов
+
+[Производительность сборки/проверок](build-verification-performance.md) разделяет Cargo
+compile/link, прямые тесты и затраты launcher/observer. Локальные target-cold/repeat
+отчёты не доказывают hosted cache выигрыш или cold-start Editor.
+
 ## CI
 
 [GitHub Actions и обязательный check](ci.md) выполняют отдельные планы/проверки `contracts` и `clippy` на Windows и

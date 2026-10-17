@@ -91,6 +91,12 @@ The test binary runs **directly in the normal loader environment**, not through
 success. After execution, the libtest summary is checked against the discovered set. This
 preserves the important Stop/reuse condition from the [previous loader check](postfix-p2-fixes-20261016.md).
 
+## Build and test timing
+
+[Build/verification performance](build-verification-performance.md) separates Cargo
+compilation/linking, direct tests and launcher/observer costs. Its local target-cold
+and repeat reports do not establish hosted cache benefit or Editor cold-start.
+
 ## CI
 
 [GitHub Actions and the required check](ci.md) run separate `contracts` and `clippy` plans/checks on Windows and

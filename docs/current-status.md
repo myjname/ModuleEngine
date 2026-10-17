@@ -82,8 +82,10 @@ Windows (Clippy 3.359 s; preflight 0.219 s) and Ubuntu/WSL (Clippy 27.856 s;
 preflight 0.592 s), using existing warm shared caches. Reports:
 [Windows](../outputs/ci-editor-builds-20261017/verification/20261017T015811Z-985d823c/result.json),
 [Ubuntu/WSL](../outputs/ci-editor-builds-20261017/verification/20261017T015921Z-6ef11385/result.json).
-These are not cold measurements or hardware acceptance. Hosted CI for this change
-is pending; previous acceptance boundaries remain.
+These are not cold measurements or hardware acceptance. The
+[stage-1/2 hosted run](https://github.com/myjname/ModuleEngine/actions/runs/38994338494)
+passed Windows/Linux Clippy, contracts, selected native/package routes and the aggregate;
+previous acceptance boundaries remain.
 
 The [Editor diagnostics route](editor-diagnostics.md) uses a supplied normal executable,
 generated fixtures and isolated Recent/layout. Its
@@ -94,8 +96,16 @@ Final Windows `contracts` passed 187 Rust tests in 16 steps, Clippy passed, and 
 full Python suite passed with 66 tests and two explicit platform skips; reports are
 linked in the guide. The both-run native Scene pane was still preparing; separate
 workflow PNGs verify the imported model, and the Puzzle capture shows its board.
-Linux native capture and hosted CI remain unconfirmed; these results do not establish
-Scene readiness, cold-start, compositor responsiveness or full delivery.
+Linux native capture remains unconfirmed; the stage-1/2 hosted run passed the
+listed CI routes. These results do not establish Scene readiness, cold-start,
+compositor responsiveness or full delivery.
+
+[Build/verification measurements and cache policy](build-verification-performance.md)
+separate target-cold compilation from repeat tests: both local `contracts` cycles
+passed 187 tests with unchanged source/protected data. Whole-cycle time was
+182.375/89.906 s; this does not establish hosted benefit or Editor cold-start.
+The conservative CI Cargo cache preserves every verification step; actual hosted
+baseline/miss/hit outcomes belong with their reports, including transfer/save costs.
 
 [Independent review](review.md) is required for substantial changes under AGENTS.
 Another agent/person examines the diff, goal, actual paths, and evidence. The stdlib

@@ -58,8 +58,10 @@ snapshot fixture на длинном TEMP; тест и его критерии �
 Отчёты и command logs из `outputs/verification` публикуются как artifact для
 каждой платформы даже после отказа; если проверка не стартовала, GitHub job log
 содержит ошибку подготовки. Retention 14 дней. Full source/artifact hashes и
-scope остаются в обычном `result.json` launcher. CI caches пока не добавлены:
-сначала нужно измерить реальный hosted прогон и не перенести локальные tool paths.
+scope остаются в обычном `result.json` launcher. Консервативный объединённый Cargo
+cache восстанавливает только допустимые dependency/workspace build paths; все проверки
+сохраняются. [Замеры и границы cache](build-verification-performance.md) определяют
+совместимые keys и оценку полного hosted времени, включая стоимость restore/save.
 
 ## Включение обязательности
 

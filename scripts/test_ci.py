@@ -74,6 +74,28 @@ class PolicyTests(unittest.TestCase):
             if "uses:" in line:
                 self.assertRegex(line, r"uses: actions/[a-z-]+@[0-9a-f]{40} # v")
 
+    def test_cache_never_controls_fetch_verification_or_artifact_reporting(self):
+        text = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn("cache-hit", text)
+        self.assertNotIn("lookup-only", text)
+        self.assertNotIn("save-always", text)
+        self.assertIn("actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6", text)
+        cache = text.split("      - name: Restore compatible Cargo", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: steps.cargo-cache-context.outputs.enabled == 'true'", cache)
+        self.assertEqual(cache.count("restore-keys:"), 1)
+        paths = cache.split("          path: |\n", 1)[1].splitlines()
+        self.assertEqual([p.strip() for p in paths], ["${{ env.CARGO_HOME }}/registry", "${{ env.CARGO_HOME }}/git",
+                         "target/debug", "target/release", "target/${{ steps.cargo-cache-context.outputs.native_host }}/debug",
+                         "target/${{ steps.cargo-cache-context.outputs.native_host }}/release"])
+        self.assertLess(text.index("run: python scripts/ci_cache.py"), text.index("run: cargo fetch --locked"))
+        for block in text.split("      - name: ")[1:]:
+            if any(command in block for command in ["run: cargo fetch --locked", "run: python scripts/verify.py --profile contracts",
+                                                   "run: python scripts/verify.py --profile clippy"]):
+                self.assertNotIn("        if:", block.split("      - ", 1)[0])
+        self.assertIn("if: runner.os == 'Windows' && needs.plan.outputs.native == 'true'", text)
+        self.assertIn("if: runner.os == 'Linux' && needs.plan.outputs.native == 'true'", text)
+        self.assertIn("if: needs.plan.outputs.package == 'true'", text)
+
 
 class DxcRestoreTests(unittest.TestCase):
     def setUp(self):
