@@ -30,7 +30,7 @@ NtQueryDirectoryObject → OpenDxBltEvent
 
 `E:\ModuleEngine\crates\player\src\ui.rs` задаёт общую политику Editor/Player: Windows GUI по умолчанию использует WGPU, с явным выбором DX12. `MODULE_ENGINE_GUI_BACKEND=glow` оставлен для диагностики. Инициализированный адаптер записывается отдельно от запрошенного backend. Подключение Editor: `E:\ModuleEngine\crates\editor\src\main.rs`; контрольное пустое окно: `E:\ModuleEngine\crates\editor\examples\desktop_presentation_probe.rs`. Зависимости обновлены в `Cargo.toml`/`Cargo.lock`.
 
-Нативные снимки Editor поддерживает через `MODULE_ENGINE_UI_SCREENSHOT_TO` (`crates/editor/src/ui_capture.rs`), сохраняя WGPU. Старый `EFRAME_SCREENSHOT_TO` при неуказанном backend выбирает Glow; вместе с явно выбранным WGPU возвращает понятную ошибку. Для обычного запуска эти переменные должны отсутствовать.
+Нативные снимки Editor поддерживает через `MODULE_ENGINE_UI_SCREENSHOT_TO` (`crates/editor/src/ui_capture.rs`), сохраняя WGPU. В исходном снимке этого отчёта от 15 октября 2026 года старый `EFRAME_SCREENSHOT_TO` выбирал Glow при неуказанном backend и отклонял явно выбранный WGPU. Такой автоматический выбор относится к истории: текущий GUI Windows/Linux сохраняет WGPU, если явно не запрошен `MODULE_ENGINE_GUI_BACKEND=glow`; иначе старый захват возвращает ошибку. См. [текущую политику GUI и захвата](linux-support.md). Для обычного запуска обе переменные захвата должны отсутствовать.
 
 A/B выполнялся последовательно одним Release EXE, с одинаковыми проектом, layout, настройками observer и основным монитором RTX 4080 SUPER, 3440×1440. Границы открытия определены QPC от resume до запроса закрытия. Desktop Duplication сохранял только метаданные, без чтения/копирования пикселей приложением observer.
 
