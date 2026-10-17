@@ -57,6 +57,37 @@ sample cap. Probe/source hashes и архив исходников observer на
 непроверенная toolchain/runner identity или другое неучтённое compiler environment
 отключают caching; обычные проверки продолжаются с исходным окружением.
 
+Для известного setup-python context предусмотрено узкое исключение из отказа по
+loader/pkg-config. `pythonLocation` должен быть canonical каталогом
+`$RUNNER_TOOL_CACHE/Python/<actual-3.12.patch>/x64`. Работающий interpreter должен
+находиться непосредственно в нём на Windows или в его `bin` на Linux, а resolved
+binary — внутри этой установки. Linux `LD_LIBRARY_PATH` допустим отсутствующим/пустым
+или ровно `lib` этой установки; `PKG_CONFIG_PATH` — отсутствующим/пустым или ровно
+её `lib/pkgconfig` (допускается эквивалентное Windows написание слешей). Дополнительные,
+неизвестные или пустые элементы списка путей отклоняются. Другие непустые overrides
+с `PKG_CONFIG` и preload/audit overrides отключают cache; окружение сохраняется.
+
+Compatibility hash включает настоящий interpreter binary и ограниченные native
+library/pkg-config inputs. Linux хеширует непосредственные файлы `lib` и referents
+symlinks внутри установки, а также shallow names/types; допустимы только подкаталоги
+`python3.12` и `pkgconfig`, требуется `libpython3.12.so*`. Windows хеширует DLL
+непосредственно в installation directory, требует `python312.dll`, а также учитывает
+непосредственные loadable libraries в `lib`, если они есть; standard library `Lib`
+рекурсивно не хешируется. Непосредственные `.pc` файлы хешируются; вложенные или
+неизвестные pkg-config inputs, нечитаемые файлы и выходящие наружу links отклоняются.
+Поверхностный просмотр Windows `Lib` допускает 512 entries; обычные `.py` файлы и
+подкаталоги standard library рекурсивно не хешируются, а подходящие непосредственные
+native libraries хешируются по содержимому. Остальные просмотры каталогов допускают
+128 entries. Общий предел учитываемых файлов остаётся 128 файлов и 256 МиБ.
+Отсутствующие Windows library/pkg-config directories представлены явно.
+Это ограниченный inventory, а не полная system-library closure; compatibility key
+также привязан к runner image.
+
+Независимое ревью R3-1 обнаружило ранее неучтённые pkg-config overrides; первый Linux
+trial также отключил caching из-за известного loader path setup-python. Исправленная
+policy допускает только точный проверенный контекст выше. Ни такой допуск, ни локальный
+repeat не доказывают Linux cache hit или чистый hosted выигрыш; реальные CI результаты
+остаются в отчётах своих прогонов.
 Workflow использует один объединённый restore/save action `actions/cache` v6,
 закреплённый на `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`. Допустимы только пути:
 

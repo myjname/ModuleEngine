@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Conservative hosted Cargo cache admission; never changes the build environment."""
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 
 HOSTS = {"Windows": "x86_64-pc-windows-msvc", "Linux": "x86_64-unknown-linux-gnu"}
@@ -42,7 +44,119 @@ def source_digest(root, tracked):
     return digest.hexdigest()
 
 
-def decision(root, env, rustc, cargo, tracked, tools):
+def python_context(env, runtime):
+    """Account only for setup-python's single known loader/pkg-config context."""
+    location = env.get("pythonLocation", "")
+    loader = env.get("LD_LIBRARY_PATH", "")
+    pkg = env.get("PKG_CONFIG_PATH", "")
+    for name, value in env.items():
+        if value and ("PKG_CONFIG" in name and name != "PKG_CONFIG_PATH"):
+            raise ValueError("unaccounted pkg-config environment")
+    if not location:
+        if loader or pkg:
+            raise ValueError("loader or pkg-config path without Python context")
+        return {"setup_python": "absent"}
+    base = Path(location)
+    cache = Path(env.get("RUNNER_TOOL_CACHE", ""))
+    version = runtime["version"]
+    if (not base.is_absolute() or not cache.is_absolute()
+            or not re.fullmatch(r"3\.12\.[0-9]+", version)
+            or base != base.resolve() or cache != cache.resolve()
+            or base != cache / "Python" / version / "x64" or not base.is_dir()):
+        raise ValueError("unverified setup-python location")
+    executable = Path(runtime["executable"])
+    expected_bin = base if env["RUNNER_OS"] == "Windows" else base / "bin"
+    if (not executable.is_absolute() or executable.parent != expected_bin
+            or not executable.resolve().is_relative_to(base)):
+        raise ValueError("unverified Python executable")
+    lib = base / "lib"
+    pc = lib / "pkgconfig"
+    if loader and (env["RUNNER_OS"] != "Linux" or loader != str(lib)):
+        raise ValueError("unaccounted loader search path")
+    if pkg and Path(pkg) != pc:
+        raise ValueError("unaccounted pkg-config search path")
+    # Every referenced file stays in the known installation. Bound both work
+    # and memory; reject nested pkg-config directories and escaping symlinks.
+    inventory = {}
+    remaining = 256 * 1024 * 1024
+
+    def record(path):
+        nonlocal remaining
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(base) or not resolved.is_file() or len(inventory) >= 128:
+            raise ValueError("unsupported Python context file")
+        size = resolved.stat().st_size
+        if size > remaining:
+            raise ValueError("oversized Python context")
+        remaining -= size
+        digest = hashlib.sha256()
+        read = 0
+        with resolved.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                read += len(chunk)
+                if read > size:
+                    raise ValueError("Python context file changed while reading")
+                digest.update(chunk)
+        if read != size:
+            raise ValueError("Python context file changed while reading")
+        inventory[str(path.relative_to(base))] = ["symlink" if path.is_symlink() else "file",
+                                                str(resolved.relative_to(base)), digest.hexdigest()]
+
+    record(executable)
+    for directory in (lib, pc):
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise ValueError("unsupported Python context directory")
+    if env["RUNNER_OS"] == "Linux":
+        if not lib.is_dir():
+            raise ValueError("missing Python library directory")
+        entries = list(islice(lib.iterdir(), 129))
+        if len(entries) > 128:
+            raise ValueError("oversized Python library inventory")
+        for path in sorted(entries):
+            if path.is_dir():
+                if path.name not in {"python3.12", "pkgconfig"} or path.is_symlink():
+                    raise ValueError("unknown Python library subdirectory")
+            else:
+                record(path)
+        if not any(path.name.startswith("libpython3.12.so") for path in entries):
+            raise ValueError("missing Python runtime library")
+        library_names = sorted((path.name, "directory" if path.is_dir() else "file") for path in entries)
+    else:
+        # Windows loads CPython DLLs beside python.exe; Lib is its stdlib and
+        # must not be recursively hashed as a native loader directory.
+        entries = list(islice(base.iterdir(), 129))
+        if len(entries) > 128:
+            raise ValueError("oversized Python runtime inventory")
+        for path in sorted(entries):
+            if path.suffix.lower() == ".dll":
+                record(path)
+        if not any(path.name.lower() == "python312.dll" for path in entries):
+            raise ValueError("missing Python runtime library")
+        library_names = sorted(path.name for path in entries if path.suffix.lower() == ".dll")
+        if lib.exists():
+            # Windows lib is case-insensitively Lib, the Python stdlib. Its
+            # shallow scan needs room for ordinary .py files; only direct native
+            # loadables consume the separate 128-file/256-MiB digest budget.
+            direct = list(islice(lib.iterdir(), 513))
+            if len(direct) > 512:
+                raise ValueError("oversized Python library inventory")
+            for path in sorted(direct):
+                if path.suffix.lower() in {".dll", ".so", ".dylib"} or ".so." in path.name:
+                    record(path)
+    if pc.exists():
+        entries = list(islice(pc.iterdir(), 129))
+        if len(entries) > 128:
+            raise ValueError("oversized pkg-config inventory")
+        for path in sorted(entries):
+            if path.suffix != ".pc":
+                raise ValueError("unknown pkg-config input")
+            record(path)
+    return {"setup_python": str(base), "version": version, "executable": str(executable),
+            "loader": loader, "pkg_config": pkg, "lib_exists": lib.exists(),
+            "pkgconfig_exists": pc.exists(), "library_names": library_names, "files": inventory}
+
+
+def decision(root, env, rustc, cargo, tracked, tools, runtime=None):
     """Pure admission policy apart from reading compatibility files."""
     root = Path(root).resolve()
     denied = {"enabled": "false", "key": "", "restore_prefix": "", "native_host": ""}
@@ -69,10 +183,15 @@ def decision(root, env, rustc, cargo, tracked, tools):
         if ((name.startswith("CARGO_") and name not in SAFE_CARGO)
                 or (name.startswith("RUST") and name not in {"RUSTUP_HOME", "RUSTUP_TOOLCHAIN"})
                 or name in {"CARGO", "CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
-                            "LINK", "_LINK_", "CL", "_CL_", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"}
+                            "LINK", "_LINK_", "CL", "_CL_", "LD_PRELOAD", "LD_AUDIT"}
                 or name.startswith("DYLD_")
                 or name.startswith(("CC_", "CXX_", "AR_", "CFLAGS_", "CXXFLAGS_"))):
             return reject("unaccounted compiler environment")
+    try:
+        python = python_context(env, runtime or {"executable": sys.executable,
+                                                "version": ".".join(map(str, sys.version_info[:3]))})
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return reject("unverified Python loader or pkg-config context")
     # Cargo searches the current directory's ancestors and CARGO_HOME. Do not
     # invent support for config (including includes, wrappers or linker overrides).
     for directory in (root, *root.parents):
@@ -94,7 +213,7 @@ def decision(root, env, rustc, cargo, tracked, tools):
                 "host": host, "rustc": rustc, "cargo": cargo, "tools": tools,
                 "workspace": str(root), "cargo_home": str(cargo_home.resolve()),
                 "rustup_home": env.get("RUSTUP_HOME", ""),
-                "inputs": source_digest(root, tracked)}
+                "python": python, "inputs": source_digest(root, tracked)}
     compatibility = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     prefix = "me-cargo-v1-" + env["RUNNER_OS"] + "-X64-" + host + "-" + compatibility + "-"
     return {"enabled": "true", "key": prefix + sha, "restore_prefix": prefix,

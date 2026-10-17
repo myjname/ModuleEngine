@@ -58,6 +58,36 @@ repair an unsupported context. Unknown flags/wrappers, effective Cargo configs,
 unverified toolchain/runner identity or other unaccounted compiler environment
 disable caching while the normal checks continue against that original environment.
 
+The known setup-python context has a narrow exception to the loader/pkg-config
+rejection rule. `pythonLocation` must be the canonical
+`$RUNNER_TOOL_CACHE/Python/<actual-3.12.patch>/x64` directory. The running interpreter
+must reside directly there on Windows or in its `bin` on Linux, with its resolved
+binary inside that installation. Linux `LD_LIBRARY_PATH` may be absent/empty or
+exactly that installation's `lib`; `PKG_CONFIG_PATH` may be absent/empty or exactly
+its `lib/pkgconfig` (equivalent Windows slash spelling is accepted). Additional,
+unknown or empty path-list entries are rejected. Other nonempty `PKG_CONFIG`
+overrides and preload/audit overrides disable caching; the environment is preserved.
+
+The compatibility hash includes the actual interpreter binary and bounded native
+library/pkg-config inputs. Linux hashes direct `lib` files and in-installation
+symlink referents, plus shallow names/types; only `python3.12` and `pkgconfig`
+subdirectories are admitted, and a `libpython3.12.so*` is required. Windows hashes
+direct installation DLLs, requiring `python312.dll`, and direct loadable libraries
+in `lib` if present; it does not recursively hash the `Lib` standard library.
+Direct `.pc` files are hashed; nested or unknown pkg-config inputs, unreadable files
+and escaping links are rejected. The Windows `Lib` shallow scan allows 512 entries;
+ordinary `.py` files and standard-library subdirectories are not recursively hashed,
+while direct matching native libraries are content-hashed. Other directory scans
+allow 128 entries. The shared recorded-file limit remains 128 files and 256 MiB
+in total. Absent Windows library/pkg-config
+directories are represented explicitly. This is a bounded inventory, not complete
+system-library closure; the compatibility key also binds the runner image.
+
+Independent review R3-1 exposed previously unaccounted pkg-config overrides; the
+first Linux trial also disabled caching for setup-python's known loader path.
+The revised policy admits only the exact verified context above. Neither that
+admission nor a local repeat proves a Linux cache hit or a net hosted gain; actual
+CI outcomes remain attached to their run reports.
 The workflow uses one combined `actions/cache` v6 restore/save action, pinned to
 `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`. Allowed paths are only:
 
