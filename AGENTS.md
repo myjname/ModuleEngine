@@ -42,8 +42,14 @@ Before completing substantial changes, send them to an [independent reviewer](do
 
 Distinguish product defects from fixture or environment failures. Tie results to the source snapshot, commands, target/features, and actual artifact; identify failed and unverified checks. Offscreen, prewarmed, or small Puzzle results do not establish cold-start behavior, hardware Linux support, or the ARPG 60 FPS goal. When behavior changes, update the relevant contract and current status; do not copy the entire history into these instructions.
 
+## Communication
+
+Lead with the outcome in the user's language. Progress updates explain a new finding and the next useful action; identify a blocker or user decision when one exists. Summarize routine commands rather than narrating them.
+
+Ask only for missing decisions that materially affect the result or required authorization. Explain the concrete choice, recommend an option with its consequence, and distinguish a product decision from permission. Use existing answers and project contracts; resolve routine implementation details yourself. The final response states the changed behavior, verification and material limits, plus any necessary user action. See [examples](docs/assistant-workflow.md).
+
 ## Documentation languages
 
 English is the primary language of public documentation: root and crate `README.md` files, `AGENTS.md`, and `docs/*.md`. Maintain complete Russian counterparts in root and crate `README.ru.md` files and `docs/ru/*.md`; the Russian copy of this guide is `docs/ru/agent-guide.md`. Keep language links visible on both versions.
 
-Update both language versions in the same change when adding or changing documentation. Translate the full meaning, including limitations and evidence, without turning the counterpart into a summary. Keep commands, code, file paths, API and JSON identifiers, exact diagnostic/UI literals, and historical evidence accurate; explain technical literals in the surrounding language. Verify relative links and heading anchors in both versions. Conversation language follows the user's preference.
+Review both language versions in the same change when adding or changing documentation; update each as needed to keep their full meaning aligned. Do not make empty edits to an already correct translation. Translate the full meaning, including limitations and evidence, without turning the counterpart into a summary. Keep commands, code, file paths, API and JSON identifiers, exact diagnostic/UI literals, and historical evidence accurate; explain technical literals in the surrounding language. Verify relative links and heading anchors in both versions. Conversation language follows the user's preference.

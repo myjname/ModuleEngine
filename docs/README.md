@@ -6,6 +6,8 @@ English is the primary documentation language. Every document below has a comple
 
 ## Start here
 
+- [Working with the ModuleEngine assistant](assistant-workflow.md)
+
 - [ModuleEngine 0.4](../README.md)
 - [Working on ModuleEngine](../AGENTS.md)
 - [Current ModuleEngine Status](current-status.md)

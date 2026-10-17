@@ -6,6 +6,8 @@
 
 ## С чего начать
 
+- [Работа с ассистентом ModuleEngine](assistant-workflow.md)
+
 - [ModuleEngine 0.4](../../README.ru.md)
 - [Работа над ModuleEngine](agent-guide.md)
 - [Текущее состояние ModuleEngine](current-status.md)
