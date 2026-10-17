@@ -83,7 +83,7 @@ class RegistryTests(Fixture):
         self.assertCountEqual(actual, registered, "Every real #[ignore] needs a purpose and profile/exclusion decision")
 
     def test_profiles_are_explicit_and_native_never_leaks_into_quick_contracts(self):
-        self.assertEqual(set(self.data["profiles"]), {"quick", "contracts", "native", "native-tools", "package"})
+        self.assertEqual(set(self.data["profiles"]), {"quick", "contracts", "clippy", "native", "native-tools", "package"})
         for name in ["quick", "contracts"]:
             chosen = verify.plan(self.data, self.steps, name)["steps"]
             self.assertTrue(chosen)
@@ -102,6 +102,15 @@ class RegistryTests(Fixture):
         skipped = [s for s in chosen if s["status"] == "skipped"]
         self.assertEqual([s["id"] for s in skipped], ["native-exe-spellings"])
         self.assertTrue(skipped[0]["reason"])
+
+    def test_clippy_is_explicit_strict_and_does_not_duplicate_formatting(self):
+        chosen = verify.plan(self.data, self.steps, "clippy")["steps"]
+        self.assertEqual([step["id"] for step in chosen], ["clippy"])
+        self.assertEqual(chosen[0]["argv"], ["cargo", "clippy", "--offline", "--locked", "--target", "{native_host}", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
+        self.assertTrue(chosen[0]["pinned_rust"])
+        self.assertEqual([s["id"] for s in verify.plan(self.data, self.steps, "contracts")["steps"]].count("fmt"), 1)
+        with patch.object(verify.subprocess, "run", side_effect=AssertionError("process")), patch.object(verify.subprocess, "Popen", side_effect=AssertionError("process")), redirect_stdout(io.StringIO()):
+            self.assertEqual(verify.main(["--profile", "clippy", "--plan"], self.root), 0)
 
     def test_invalid_registry_fails_before_execution(self):
         for change in [lambda d: d.update(schema_version=9),
@@ -182,6 +191,44 @@ class ArtifactTests(Fixture):
 
 
 class ExecutionTests(Fixture):
+    def test_clippy_uses_the_native_host_and_propagates_command_failure(self):
+        for fail in [False, True]:
+            seen = []
+            runner = self.runner("clippy")
+            runner.host = self.host
+            runner.prepare = lambda: None
+            def command(argv, timeout):
+                seen.append(argv)
+                if fail:
+                    raise verify.VerificationError("Clippy warning")
+            runner.command = command
+            with redirect_stdout(io.StringIO()):
+                results, failed = runner.run()
+            self.assertEqual(failed, fail)
+            self.assertEqual(results[0]["status"], "failed" if fail else "passed")
+            self.assertEqual(seen[0][seen[0].index("--target") + 1], self.host)
+            self.assertNotIn("{native_host}", seen[0])
+
+    def test_clippy_rejects_unpinned_rust_version_or_target_before_cargo(self):
+        pin_path = self.root / ("toolchain-manifest.json" if verify.PLATFORM == "windows" else "scripts/linux-toolchain.json")
+        for release, target, accepted in [("1.99.0", self.host, True), ("1.100.0", self.host, False), ("1.99.0", "other-native-target", False)]:
+            runner = self.runner("clippy")
+            seen = []
+            def command(argv, timeout):
+                seen.append(argv)
+                log = self.root / "preflight.log"
+                log.write_text("host: " + self.host + "\nrelease: " + release + "\n" if "-vV" in argv else "{}", encoding="utf-8")
+                return log
+            runner.command = command
+            pin_path.write_text(json.dumps({"rust": {"version": "1.99.0", "target": target}}), encoding="utf-8")
+            if accepted:
+                runner.prepare()
+                self.assertEqual(seen[-1][:2], ["cargo", "metadata"])
+            else:
+                with self.assertRaisesRegex(verify.VerificationError, "pinned native Rust"):
+                    runner.prepare()
+                self.assertEqual(len(seen), 1)
+
     def test_exact_zero_is_failure_and_later_steps_not_run(self):
         runner = self.runner()
         runner.prepare = lambda: None

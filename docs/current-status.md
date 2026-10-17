@@ -51,7 +51,7 @@ The finished `outputs/ModuleEngine.exe`, `ModuleEngine-review-fixed.exe`, `Modul
 
 - Windows: root [verify.ps1](../verify.ps1); the optional `-NativeBenchmarks` branch requires a desktop and an isolated measurement.
 - Linux: root [verify.sh](../verify.sh); native toolchain/DXC/Vulkan requirements are in the [Linux guide](linux-support.md). The script includes offscreen checks and does not complete desktop/export acceptance.
-- The [registry and stdlib launcher](verification.md) add explicit `quick`, `contracts`, `native`, `native-tools`, `package` profiles; `--plan`/`--list` read configuration without Cargo. Native tests run directly from the CargoJSON-selected executable with the normal loader environment. Windows-only checks are marked `skipped` on Linux. `package` checks minimal Cargo product/snapshot fixtures, not a full Full/Team/Player export.
+- The [registry and stdlib launcher](verification.md) add explicit `quick`, `contracts`, `clippy`, `native`, `native-tools`, `package` profiles; `--plan`/`--list` read configuration without Cargo. Native tests run directly from the CargoJSON-selected executable with the normal loader environment. Windows-only checks are marked `skipped` on Linux. `package` checks minimal Cargo product/snapshot fixtures, not a full Full/Team/Player export.
 - The scope of legacy invocations without arguments is preserved; Windows `-NativeBenchmarks` selects the actual normal Editor from CargoJSON and still does not require Python. The new launcher requires an already installed Python 3.9+ without third-party dependencies. Performance remains a separate opt-in legacy/targeted route with its previous limitations.
 
 The launcher and its unit fixtures are implemented separately from Rust. Unit checks and planning are not a new engine/native/package acceptance; real profiles require their own reports on the current snapshot. Work and data-preservation rules: [AGENTS.md](../AGENTS.md).
@@ -69,10 +69,21 @@ the source was restored byte for byte, and the targeted test then passed. This s
 without changing production behavior or Cargo dependencies; previous performance
 and delivery limitations remain.
 
-[GitHub CI](ci.md) runs Windows/Linux contracts and selected native/package
+[GitHub CI](ci.md) runs separate Windows/Linux `contracts` and `clippy` checks, including
+documentation PRs, and selected native/package
 routes; public `myjname/ModuleEngine` requires `CI required` for `main`,
 including administrators. New versions are assessed by the actual CI for their SHA,
 not an old green run. A negative service PR confirmed merge blocking.
+
+On 17 October, an explicit all-workspace/all-targets/all-features `clippy` profile
+was added with warnings denied and pinned Rust release/native-target validation.
+It does not add formatting, tests, or runtime checks. The profile passed on
+Windows (Clippy 3.359 s; preflight 0.219 s) and Ubuntu/WSL (Clippy 27.856 s;
+preflight 0.592 s), using existing warm shared caches. Reports:
+[Windows](../outputs/ci-editor-builds-20261017/verification/20261017T015811Z-985d823c/result.json),
+[Ubuntu/WSL](../outputs/ci-editor-builds-20261017/verification/20261017T015921Z-6ef11385/result.json).
+These are not cold measurements or hardware acceptance. Hosted CI for this change
+is pending; previous acceptance boundaries remain.
 
 [Independent review](review.md) is required for substantial changes under AGENTS.
 Another agent/person examines the diff, goal, actual paths, and evidence. The stdlib

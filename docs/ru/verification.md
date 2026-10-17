@@ -50,9 +50,18 @@ python3 scripts/verify.py --profile native --plan
 | --- | --- | --- |
 | `quick` | `cargo fmt --all -- --check`, все lib tests пакетов `module-engine-core` и `module-engine-project`. | Не workspace, Editor, Vulkan runtime, secondary Custom builds или ignored acceptance. Холодная компиляция всё равно может быть долгой. |
 | `contracts` | Quick плюс `cargo_build::tests::`, четыре Inspector-регрессии, 99 сценариев свойств Inspector, четыре прежних Save As tests и 28 сценариев сохранности workflow. | Не всё UI, native dialogs или полный authoring suite. |
+| `clippy` | `cargo clippy --offline --locked --target {native_host} --workspace --all-targets --all-features -- -D warnings` на закреплённом native toolchain. | Без formatting, tests или runtime-проверок; не приёмка движка или поставки. |
 | `native` | Пять явных ignored tests: Stop/reuse, slow-UI/hot-apply, native linker, cache context и Windows executable spellings. | Не desktop benchmark, screen latency, Full export или строгие 60 FPS. Windows-only test на Linux отмечается `skipped`, а не пройденным. |
 | `native-tools` | Три native linker/cache/executable-spelling проверки из `native`, без GameUI и GPU. | Не полный `native`; на Linux Windows-only test отмечается `skipped`. Используется Windows CI. |
 | `package` | Две ignored проверки `game_package`: native target modes и concurrent immutable snapshots. Они собирают минимальные Cargo fixtures и исполняют их продукты. | **Не реальный Full/Team/Player game export, relocation или полная приёмка поставки.** Эти CLI-проверки остаются адресным/legacy маршрутом. |
+
+Профиль `clippy` явный и независимый: `contracts` по-прежнему проверяет formatting
+ровно один раз; legacy-маршруты не изменены. Сначала выполните
+`python scripts/verify.py --profile clippy --plan`, затем
+`python scripts/verify.py --profile clippy`. Планирование не запускает процессы
+и оставляет `{native_host}` неразрешённым. Исполнение сверяет фактические release
+и native host из `rustc -vV` с `toolchain-manifest.json` на Windows или
+`scripts/linux-toolchain.json` на Linux до Cargo metadata; несовпадение — отказ.
 
 Проверки выполняются последовательно. Для Rust tests launcher сначала получает
 `cargo metadata`, затем `cargo test --no-run --message-format=json` для выбранного
@@ -75,9 +84,9 @@ Test binary запускается **напрямую в normal loader environme
 
 ## CI
 
-[GitHub Actions и обязательный check](ci.md) выполняют `contracts` на Windows и
-Linux и добавляют native/package маршруты для изменений исходников. Перед offline
-проверками CI явно восстанавливает инструменты и locked dependencies. Для
+[GitHub Actions и обязательный check](ci.md) выполняют отдельные планы/проверки `contracts` и `clippy` на Windows и
+Linux, включая документационные PR, и добавляют native/package маршруты для изменений исходников. Перед offline
+проверками CI явно восстанавливает pinned Rust с `rustfmt`/`clippy` и locked dependencies. Для
 обязательности merge требуется применённое правило ветки; наличие YAML не является
 доказательством первого успешного hosted запуска или настроенной защиты.
 

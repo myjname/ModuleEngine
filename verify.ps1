@@ -1,6 +1,6 @@
 param(
     [switch]$NativeBenchmarks,
-    [ValidateSet('quick', 'contracts', 'native', 'native-tools', 'package')]
+    [ValidateSet('quick', 'contracts', 'clippy', 'native', 'native-tools', 'package')]
     [string]$Profile,
     [string]$Python,
     [switch]$Plan,

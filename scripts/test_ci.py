@@ -67,6 +67,9 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("    if: always()\n    needs: [plan, checks]", text)
         self.assertIn("  contents: read", text)
         self.assertIn("  merge_group:", text)
+        self.assertIn("--component rustfmt --component clippy", text)
+        self.assertIn("run: python scripts/verify.py --profile clippy --plan", text)
+        self.assertIn("run: python scripts/verify.py --profile clippy --timeout 1800", text)
         for line in text.splitlines():
             if "uses:" in line:
                 self.assertRegex(line, r"uses: actions/[a-z-]+@[0-9a-f]{40} # v")

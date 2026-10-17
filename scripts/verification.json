@@ -2,6 +2,7 @@
   "schema_version": 1,
   "protected": ["*.json", "assets", "game-assets", ".user", ".history", ".asset-history", ".asset-trash"],
   "profiles": {
+    "clippy": {"steps": ["clippy"], "scope": "Strict Clippy for the pinned native Rust toolchain, all workspace targets and features; no tests, formatting or runtime acceptance."},
     "quick": {"steps": ["fmt", "core", "project"], "scope": "Formatting and CPU Core/Project library tests; not a workspace or native acceptance."},
     "contracts": {"steps": ["fmt", "core", "project", "cargo-products", "inspector-prefab", "inspector-opaque", "inspector-noop", "inspector-prefix", "inspector-generated-noop", "inspector-generated-inheritance", "inspector-generated-controls", "save-as-boundaries", "preservation-save-as", "preservation-replay-rollback", "preservation-history-branch"], "scope": "Selected author-data and artifact-selection regressions: 99 bounded Inspector Apply scenarios, Save As boundary tests and 28 bounded workflow preservation scenarios; no native ignored tests."},
     "native": {"steps": ["native-reuse", "native-slow-ui", "native-linker", "native-context", "native-exe-spellings"], "scope": "Five explicit native ignored tests; not desktop/performance or full workspace acceptance."},
@@ -10,6 +11,7 @@
   },
   "legacy_routes": {"performance": {"command": "verify.ps1 -NativeBenchmarks", "scope": "Existing full legacy suite followed by opt-in native benchmarks; not a strict 60 FPS certification. See docs/verification.md for fixture and environment limitations."}},
   "steps": [
+    {"id": "clippy", "kind": "command", "argv": ["cargo", "clippy", "--offline", "--locked", "--target", "{native_host}", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"], "pinned_rust": true, "timeout": 1200, "purpose": "Reject all Clippy warnings in every workspace target with all additive features on the pinned native toolchain."},
     {"id": "fmt", "kind": "command", "argv": ["cargo", "fmt", "--all", "--", "--check"], "timeout": 120, "purpose": "Check Rust formatting without rewriting files."},
     {"id": "core", "kind": "tests", "package": "module-engine-core", "target_kind": "lib", "filter": "", "timeout": 300, "purpose": "CPU Core contracts."},
     {"id": "project", "kind": "tests", "package": "module-engine-project", "target_kind": "lib", "filter": "", "timeout": 300, "purpose": "CPU Project data, history and asset contracts."},
