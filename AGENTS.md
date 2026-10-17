@@ -42,6 +42,12 @@ Before completing substantial changes, send them to an [independent reviewer](do
 
 Distinguish product defects from fixture or environment failures. Tie results to the source snapshot, commands, target/features, and actual artifact; identify failed and unverified checks. Offscreen, prewarmed, or small Puzzle results do not establish cold-start behavior, hardware Linux support, or the ARPG 60 FPS goal. When behavior changes, update the relevant contract and current status; do not copy the entire history into these instructions.
 
+## Context and evidence
+
+Load the current status and affected contracts, then narrow source searches by path and symbol. Open generated `outputs/`, `work/`, historical reports, and full logs only for a specific question. Bound tool output; state truncation and fetch the relevant continuation instead of silently treating an excerpt as complete.
+
+Summarize existing verification reports with `python scripts/summarize_verification.py <report-directory>`; add `--excerpts` for bounded failed-log context. Keep original logs as evidence. For a long task, keep a compact checkpoint in its existing notes: goal, decisions, current hypothesis, source state, checks and next action. Revalidate it against the current diff before resuming; do not create a second project history. See [context guidance](docs/assistant-workflow.md#context-and-diagnostic-budget).
+
 ## Communication
 
 Lead with the outcome in the user's language. Progress updates explain a new finding and the next useful action; identify a blocker or user decision when one exists. Summarize routine commands rather than narrating them.
