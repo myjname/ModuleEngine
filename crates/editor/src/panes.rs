@@ -63,6 +63,7 @@ pub struct PaneMemory {
     pub code_positions: BTreeMap<String, [f32; 2]>,
     pub camera: Camera,
     pub texture: Option<egui::TextureHandle>,
+    pub gpu_texture: module_engine_player::gpu_presentation::GpuTexture,
     pub last_render: f64,
     pub stats: String,
     pub param_draft: String,
@@ -110,6 +111,7 @@ impl PaneMemory {
             source_error: None,
             code_positions: BTreeMap::new(),
             texture: None,
+            gpu_texture: Default::default(),
             last_render: -1.,
             stats: String::new(),
             param_draft: String::new(),
@@ -150,6 +152,7 @@ impl PaneMemory {
             code_positions,
             camera,
             texture,
+            gpu_texture,
             last_render,
             stats,
             param_draft,
@@ -1040,13 +1043,25 @@ pub fn participating_modules_panel(
 mod tests {
     use super::*;
 
+    fn full_source_fixture(document: &GraphDocument) -> module_engine_script::TestArtifactGuard {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/test-temp");
+        let guard =
+            module_engine_script::TestArtifactGuard::new(&base, "pane-full-source").unwrap();
+        crate::distribution::copy_native_fixture(guard.path());
+        crate::distribution::write_full_manifest(guard.path(), document).unwrap();
+        guard
+    }
+
     #[test]
     fn diagnostic_personal_settings_preserve_other_editor_state_and_source_permissions() {
-        let root = crate::project::source_root();
         let document = demo_document(WorldKind::Objects);
+        let sources = full_source_fixture(&document);
+        let root = sources.path();
         let path = root.join("unused-diagnostic-settings-isolation.json");
         let first = Editor::new(document.clone(), path.clone());
         let distribution = first.distribution.as_ref().unwrap().clone();
+        assert!(distribution.can_author_engine());
+        assert_eq!(distribution.package_root, root);
         let compile_root = distribution.compile_root().unwrap();
         let ordinary_recent = first
             .test_personal_settings
@@ -1091,12 +1106,15 @@ mod tests {
 
     #[test]
     fn editor_personal_layouts_are_isolated_and_explicit_save_load_still_roundtrips() {
-        let root = crate::project::source_root();
         let document = demo_document(WorldKind::Objects);
+        let sources = full_source_fixture(&document);
+        let root = sources.path();
         let path = root.join("unused-personal-settings-isolation.json");
         let mut first = Editor::new(document.clone(), path.clone());
         let mut second = Editor::new(document.clone(), path);
         let distribution = first.distribution.as_ref().unwrap();
+        assert!(distribution.can_author_engine());
+        assert_eq!(distribution.package_root, root);
         let package_root = distribution.package_root.clone();
         let compile_root = distribution.compile_root().unwrap();
         let production_path = distribution.personal_layout_path("project");

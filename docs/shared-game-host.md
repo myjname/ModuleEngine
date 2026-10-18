@@ -27,9 +27,19 @@ registry factories and route policy, independently of an authored session.
 
 `RendererAdapter` provides CPU-only configuration identity, dependency revision,
 control targets and validation before GPU construction. Vulkan owns the concrete
-pass/HLSL/format checks. `FrameRenderer` provides pixels, portable controls,
+pass/HLSL/format checks. `FrameRenderer` provides CPU pixels or an opaque GPU lease, portable controls,
 optional counters and optional synchronous candidate preparation. A factory can
 also implement an independent CPU renderer with no Vulkan dependency.
+
+## Native frame ownership
+
+Core `Frame` has exactly one complete representation: CPU `rgba`, or `gpu: Some(Arc<dyn GpuFrame>)` with empty `rgba`. Core interprets no native handles. The application supplies a `PresentationTarget` through `FrameRenderer::set_presentation_target`. `render_presented` returns `RenderSubmission::Ready(Frame)`, `Pending(ticket)` or `Busy`. Ready is immediate output; Pending accepts one frozen request and publishes nothing yet; Busy accepts no work. Native Vulkan permits one producer submission at a time and four output leases. The explicit `render` contract remains CPU-readable and may synchronously wait for diagnostic readback; it rejects a conflicting pending native submission. Rejected targets cannot silently enable CPU transfer. Reaccepting the same endpoint is idempotent; a different endpoint cannot replace pending work or a live source lease. Renderer candidates retain the accepted endpoint.
+
+Host freezes the accepted request's scene, dimensions, camera, source revision, tick and presentation provenance. Exact-ticket nonblocking polling publishes that envelope once, even if authoritative state has since advanced. Pending and Busy preserve the last completed frame and its metadata. Ready/Pending acceptance consumes only the submitted one-shot command prefix; Busy or a pre-submit error preserves it. Commands accepted by a pending submission are not replayed after a later GPU error. Restart, presentation-history reset, pause or incompatible document/content/target changes discard obsolete publication and cached completion without treating cancellation as GPU completion.
+
+Authored Scene panes use stable process-local owner IDs, separate from authored JSON. Owner 0 preserves the legacy caller; nonzero IDs isolate pane completions. Per-owner ready mailboxes, request deduplication and FIFO demand route each completed frame only to its requesting pane and prevent a moving pane from starving an earlier waiting pane. The bounded owner registry holds at most 64 entries including the legacy owner, rather than an unbounded full-request queue. UI traversal retains visible owners even on display-cache hits; after traversal it removes hidden/closed owners' ready frames and demand, and cancels their pending publication without waiting. Runtime uses the same pending/ready contract. The backend continues owning discarded native resources until actual GPU completion; reaping may wait until the next submission or backend destruction. Scene ray/gizmo/drop projection uses the displayed request camera; new hit/drop geometry is gated until displayed revision and dimensions match current data, while an active gesture retains its captured camera.
+
+This async contract requires separately source-bound verification. Historical reports below retain their original snapshots and do not establish acceptance of the new implementation.
 
 ## Candidate publication
 
@@ -45,6 +55,54 @@ Vulkan synchronous candidates share the live device/cache but own their graph an
 source configuration. Warming a pipeline does not select that candidate. Async
 factory calls own separate devices, so preparation cannot reconfigure the active
 wrapper. Backend counters report actual work; unavailable counters stay zero.
+
+## Fixed simulation and interpolated presentation
+
+Interactive gameplay keeps its authoritative fixed 1/60-second step. Host retains
+at most the previous and current completed raw scene, their ECS lifetimes and
+follow-camera targets. `try_render_interpolated(width, height, alpha)` evaluates
+an immutable presentation without advancing systems, Custom, input, events or
+audio. The synchronous `render`/CLI route continues to use current state.
+This implementation is undergoing P0 verification; its presence is not a passed
+performance gate.
+
+Core interpolates safe affine translation/scale and shortest-path quaternion
+rotation before `ContentLibrary` expands imported primitives. Matching requires
+an unambiguous raw object ID and unchanged lifetime. New/reused IDs, duplicate
+IDs, unknown providers and unsupported singular/sheared transforms snap current.
+Geometry, materials, components and gameplay remain current discrete values.
+The mutable world is never interpolated. Camera follow uses the same state pair;
+the frame carries the camera actually used for rendering and aiming. Conventional
+previous/current interpolation adds roughly one fixed tick of visual delay.
+The point-only follow-target API has no target identity: camera interpolation is
+conservatively disabled when the identity/parent maps change, including birth,
+death, reparenting or respawn. A module switching targets without changing that
+map must signal a camera cut through the same discontinuity event.
+
+Restart, accepted code/content/configuration replacement and scene transitions
+discard old endpoints. `SceneChanged` also resets history for the same scene name.
+Native systems signal discontinuous motion with `GameEvent::presentation_reset()`;
+existing Rust Custom uses `ctx.emit_event(serde_json::json!("PresentationReset"))`.
+External owners use `reset_presentation_history()`. No distance heuristic reliably
+distinguishes motion from teleportation: teleporting modules must send the signal.
+Rejected transactions/candidates do not publish a reset.
+
+`RenderedPresentation` contains the actual frame, camera and
+`PresentationProvenance`: history generation, source tick/time pair, alpha,
+visual time and origin (`CommittedState`, `InterpolatedPose`, `Invalidated`).
+One actual render remains eligible per new committed tick, including static
+pixels. Extra sub-tick renders require changed evaluated poses or camera;
+alpha or visual time alone cannot qualify a static pair. `None` retains the last
+completed frame; failure cannot replace its identity or completion time.
+Time-only shader animation has no independent high-frequency capability here.
+
+Extra renders never invoke Custom. Pending Custom-emitted one-shot clear/copy
+operations retain order across ticks/failures until a successful render consumes
+its submitted batch once. The existing 4096-operation bound applies. Separately,
+selected `ReadyVariant`/`project_commands` recipes remain active on each actual
+render, including interpolated poses, and use committed simulation time; they do
+not run additional Custom or game calls. Headless execution discards GPU operations
+at each step call without GPU work or an unbounded command queue.
 
 ## Headless and optional services
 
@@ -86,6 +144,4 @@ thread destroys GPU/Custom/native resources. After the event loop,
 `finish_after_ui` signals all remaining owners before joining them. Arbitrary
 native teardown side effects after a committed operation are not rollbackable.
 
-The actor boundary prevents a slow simulation call from blocking UI methods; it
-does not make an intrinsically slow game system meet its frame budget. GPU output
-still uses synchronous CPU readback. Performance acceptance is measured separately.
+The actor boundary prevents a slow simulation call from blocking UI methods; it does not make slow systems meet their budget. Native output uses shared leases without normal CPU pixel transfer; the producer checks GPU completion through nonblocking exact-ticket polling. GUI submissions/retirement remain bridge-owned; explicit diagnostics retain readback. New async sources require separately bound checks and an independent conclusion in the [async report](gpu-async-20261018.md); passing individual current gates does not establish no regression or final acceptance. The [historical GPU report](gpu-presentation-20261018.md) retains Windows source15/Linux source11 results and earlier failures, including the cold gate open at that time. The [18 October continuation](p0-continuation-20261018.md) separately records the later normal cold PASS 40.906/39.9128549 s, Windows22/16 and WSL Linux23/16 and scoped native/package/lifecycle checks for its own sources. These snapshots do not verify the new async implementation or certify hardware Linux, real device loss or physical scanout.

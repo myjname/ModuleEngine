@@ -1,10 +1,11 @@
 //! Standalone game presentation. Shares gameplay and renderer with editor Play.
+use crate::gpu_presentation::{GpuPresentationBridge, GpuTexture};
 use crate::presentations::{capture_input_for, has_input_for};
 pub use crate::presentations::{draw_hud_for, preview_aim_for, read_input_for};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use module_engine_core::GameInput;
 use module_engine_host::GameHost;
-use module_engine_host::game_worker::{GameSnapshot, GameWorker, WorkerCommand};
+use module_engine_host::game_worker::{FramePresentation, GameSnapshot, GameWorker, WorkerCommand};
 use serde::Serialize;
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -16,6 +17,19 @@ use std::{
 const BENCHMARK_WARMUP: usize = 30;
 const BENCHMARK_FRAMES: usize = 120;
 const FRAME_BUDGET_MS: f64 = 1000. / 60.;
+
+/// Native Vulkan modules receive an explicit endpoint from the actual window;
+/// software-only builds and the explicit Glow diagnostic keep CPU presentation.
+pub fn presentation_bridge(
+    cc: &eframe::CreationContext<'_>,
+) -> Result<Option<Arc<GpuPresentationBridge>>, String> {
+    #[cfg(feature = "vulkan")]
+    if let Some(state) = &cc.wgpu_render_state {
+        return GpuPresentationBridge::new(state.clone()).map(|bridge| Some(Arc::new(bridge)));
+    }
+    let _ = cc;
+    Ok(None)
+}
 
 /// Shared window presentation policy for Editor, Player, and native diagnostics.
 /// The GUI uses WGPU/DX12 on Windows and WGPU/Vulkan on Linux. This does not
@@ -284,6 +298,37 @@ pub fn report_graphics(cc: &eframe::CreationContext<'_>) -> GuiGraphicsInfo {
     graphics
 }
 
+/// Build a Player host before opening its native window. Windows host/tool
+/// discovery may initialize an MTA, while winit's window thread requires an STA.
+/// Keep that preparation on its own joined thread; the GUI retains its normal
+/// drag-and-drop and the completed host still moves to the existing GameWorker.
+pub fn prepare_host(
+    prepare: impl FnOnce() -> Result<GameHost, String> + Send,
+) -> Result<GameHost, String> {
+    #[cfg(windows)]
+    {
+        prepare_on_host_thread(prepare)
+    }
+    #[cfg(not(windows))]
+    {
+        prepare()
+    }
+}
+
+#[cfg(windows)]
+fn prepare_on_host_thread<T: Send>(
+    prepare: impl FnOnce() -> Result<T, String> + Send,
+) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("Player host preparation".into())
+            .spawn_scoped(scope, prepare)
+            .map_err(|error| format!("Start Player host preparation: {error}"))?
+            .join()
+            .unwrap_or_else(|_| Err("Player host preparation panicked".into()))
+    })
+}
+
 pub fn run_host(mut host: GameHost) -> Result<(), String> {
     let options = native_options(
         egui::ViewportBuilder::default()
@@ -313,7 +358,7 @@ pub fn run_host(mut host: GameHost) -> Result<(), String> {
         Box::new(move |cc| {
             report_graphics(cc);
             configure_style(&cc.egui_ctx);
-            let mut player = Player::new(host, &cc.egui_ctx, None);
+            let mut player = Player::new_native(host, cc, None)?;
             if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
                 // The two-frame diagnostic must capture actual pixels. Wait
                 // only in this explicit startup diagnostic, before UI begins;
@@ -371,9 +416,9 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
             let refresh_millihertz = monitor
                 .as_ref()
                 .and_then(|monitor| monitor.refresh_rate_millihertz());
-            Ok(Box::new(Player::new(
+            Ok(Box::new(Player::new_native(
                 host,
-                &cc.egui_ctx,
+                cc,
                 Some(NativeBenchmark {
                     folder,
                     outcome,
@@ -389,10 +434,17 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
                     observed_game_frames: vec![],
                     frame_ages_ms: vec![],
                     missing_completion_timestamps: 0,
+                    presentations: vec![],
+                    seen_presentations: BTreeSet::new(),
+                    last_presentation: None,
+                    missing_frame_metadata: 0,
+                    invalid_presentation_metadata: 0,
+                    repeated_frame_identities: 0,
+                    invalid_completion_timestamps: 0,
                     finished: false,
                     gui_graphics,
                 }),
-            )))
+            )?))
         }),
     )
     .map_err(gui_startup_error)?;
@@ -407,6 +459,9 @@ struct Player {
     worker: GameWorker,
     snapshot: Option<Arc<GameSnapshot>>,
     texture: Option<egui::TextureHandle>,
+    gpu_texture: GpuTexture,
+    gpu_bridge: Option<Arc<GpuPresentationBridge>>,
+    displayed_camera: Option<module_engine_core::Camera>,
     uploaded: Option<Arc<module_engine_core::Frame>>,
     pending_commands: VecDeque<WorkerCommand>,
     pending_inputs: VecDeque<GameInput>,
@@ -415,6 +470,17 @@ struct Player {
     benchmark: Option<NativeBenchmark>,
 }
 impl Player {
+    fn new_native(
+        host: GameHost,
+        cc: &eframe::CreationContext<'_>,
+        benchmark: Option<NativeBenchmark>,
+    ) -> Result<Self, String> {
+        let bridge = presentation_bridge(cc)?;
+        let target = bridge.as_ref().map(|bridge| bridge.target());
+        let mut player = Self::new_with_target(host, &cc.egui_ctx, benchmark, target);
+        player.gpu_bridge = bridge;
+        Ok(player)
+    }
     fn prepare_capture(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -435,10 +501,21 @@ impl Player {
         }
     }
 
+    #[cfg(test)]
     fn new(host: GameHost, ctx: &egui::Context, benchmark: Option<NativeBenchmark>) -> Self {
+        Self::new_with_target(host, ctx, benchmark, None)
+    }
+
+    fn new_with_target(
+        host: GameHost,
+        ctx: &egui::Context,
+        benchmark: Option<NativeBenchmark>,
+        target: Option<Arc<dyn module_engine_core::PresentationTarget>>,
+    ) -> Self {
         Self {
-            worker: GameWorker::spawn(
+            worker: GameWorker::spawn_with_presentation_target(
                 host,
+                target,
                 Some({
                     let ctx = ctx.clone();
                     std::sync::Arc::new(move || ctx.request_repaint())
@@ -446,6 +523,9 @@ impl Player {
             ),
             snapshot: None,
             texture: None,
+            gpu_texture: GpuTexture::default(),
+            gpu_bridge: None,
+            displayed_camera: None,
             uploaded: None,
             pending_commands: VecDeque::from([
                 WorkerCommand::SetViewport {
@@ -536,6 +616,10 @@ impl eframe::App for Player {
         let now = Instant::now();
         let ui_frame = ui.ctx().cumulative_frame_nr();
         let new_frame = self.last_ui_frame != Some(ui_frame);
+        let gpu_poll_error = self
+            .gpu_bridge
+            .as_deref()
+            .and_then(|bridge| self.gpu_texture.poll(bridge).err());
         let snapshot = self.worker.latest();
         self.snapshot = snapshot.clone();
         if !self.worker.is_alive() {
@@ -560,7 +644,10 @@ impl eframe::App for Player {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click());
-                let camera = snapshot.as_ref().map(|s| s.camera).unwrap_or_default();
+                let camera = self
+                    .displayed_camera
+                    .or_else(|| snapshot.as_ref().map(|s| s.camera))
+                    .unwrap_or_default();
                 let presentation = snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.presentation_ids.first())
@@ -579,6 +666,7 @@ impl eframe::App for Player {
                     let mut conversion_ms = 0.;
                     let mut fresh_frame = false;
                     let mut observed_at = None;
+                    let mut presentation_error = gpu_poll_error.clone();
                     if let Some(snapshot) = &snapshot {
                         if let Some(frame) = &snapshot.frame
                             && self
@@ -586,18 +674,31 @@ impl eframe::App for Player {
                                 .as_ref()
                                 .is_none_or(|old| !Arc::ptr_eq(old, frame))
                         {
-                            observed_at = Some(Instant::now());
                             let started = Instant::now();
-                            update_texture(ui, &mut self.texture, frame);
+                            match update_presented_texture(
+                                ui,
+                                &mut self.texture,
+                                &mut self.gpu_texture,
+                                self.gpu_bridge.as_deref(),
+                                frame,
+                            ) {
+                                Ok(true) => {
+                                    observed_at = Some(started);
+                                    self.uploaded = Some(Arc::clone(frame));
+                                    self.displayed_camera = Some(snapshot.camera);
+                                    fresh_frame = true;
+                                }
+                                Ok(false) => {}
+                                Err(error) => presentation_error = Some(error),
+                            }
                             conversion_ms = started.elapsed().as_secs_f64() * 1000.;
-                            self.uploaded = Some(Arc::clone(frame));
-                            fresh_frame = true;
                         }
                         self.error = snapshot
                             .fault
                             .clone()
                             .or_else(|| snapshot.preparation_error.clone())
                             .or_else(|| snapshot.render_error.clone())
+                            .or(presentation_error)
                             .or_else(|| {
                                 snapshot
                                     .activity
@@ -617,6 +718,7 @@ impl eframe::App for Player {
                             benchmark.observe_game_frame(
                                 observed_at.unwrap_or(now),
                                 snapshot.frame_completed_at,
+                                snapshot.frame_presentation.as_ref(),
                                 fresh_frame,
                             );
                             let pixels_per_point = ui.ctx().pixels_per_point();
@@ -630,8 +732,24 @@ impl eframe::App for Player {
                                 render_ms: snapshot.last_render_ms,
                                 dispatch_ms,
                                 fresh_frame,
+                                gpu_resident: snapshot
+                                    .frame
+                                    .as_ref()
+                                    .is_some_and(|frame| frame.gpu.is_some()),
+                                cpu_frame_bytes: snapshot
+                                    .frame
+                                    .as_ref()
+                                    .map_or(0, |frame| frame.rgba.len()),
+                                renderer_performance: snapshot.renderer_performance,
+                                gpu_bridge_counters: self
+                                    .gpu_bridge
+                                    .as_ref()
+                                    .map_or_else(Default::default, |bridge| bridge.counters()),
                                 game_tick: snapshot.state.tick,
                                 game_time: snapshot.state.time,
+                                backlog_seconds: snapshot.backlog_seconds,
+                                deadline_wait_strategy: snapshot.deadline_wait_strategy,
+                                deadline_wait_error: snapshot.deadline_wait_error.clone(),
                                 conversion_enqueue_ms: conversion_ms,
                                 hud_ms: 0.,
                                 framebuffer_pixels: (benchmark.physical_size)(),
@@ -662,9 +780,9 @@ impl eframe::App for Player {
                         }
                     }
                 }
-                if let Some(texture) = &self.texture {
+                if let Some(texture) = presentation_texture_id(&self.texture, &self.gpu_texture) {
                     ui.painter().image(
-                        texture.id(),
+                        texture,
                         rect,
                         Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
                         Color32::WHITE,
@@ -693,7 +811,7 @@ impl eframe::App for Player {
                         ui,
                         rect,
                         &snapshot.state,
-                        snapshot.camera,
+                        self.displayed_camera.unwrap_or(snapshot.camera),
                         aim,
                     ) {
                         self.pending_inputs.clear();
@@ -760,8 +878,15 @@ struct NativeFrameSample {
     render_ms: f64,
     dispatch_ms: f64,
     fresh_frame: bool,
+    gpu_resident: bool,
+    cpu_frame_bytes: usize,
+    renderer_performance: module_engine_core::RendererPerformance,
+    gpu_bridge_counters: crate::gpu_presentation::GpuPresentationCounters,
     game_tick: u64,
     game_time: f64,
+    backlog_seconds: f64,
+    deadline_wait_strategy: &'static str,
+    deadline_wait_error: Option<String>,
     conversion_enqueue_ms: f64,
     hud_ms: f64,
     framebuffer_pixels: Option<[u32; 2]>,
@@ -791,8 +916,22 @@ struct NativeBenchmark {
     observed_game_frames: Vec<Instant>,
     frame_ages_ms: Vec<f64>,
     missing_completion_timestamps: usize,
+    presentations: Vec<NativePresentationObservation>,
+    seen_presentations: BTreeSet<(u64, u64, u64)>,
+    last_presentation: Option<FramePresentation>,
+    missing_frame_metadata: usize,
+    invalid_presentation_metadata: usize,
+    repeated_frame_identities: usize,
+    invalid_completion_timestamps: usize,
     finished: bool,
     gui_graphics: GuiGraphicsInfo,
+}
+
+#[derive(Serialize)]
+struct NativePresentationObservation {
+    metadata: FramePresentation,
+    completed_since_start_ms: f64,
+    observed_since_start_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -823,16 +962,88 @@ fn timing_summary(mut values: Vec<f64>) -> Option<TimingSummary> {
 }
 
 impl NativeBenchmark {
-    fn observe_game_frame(&mut self, now: Instant, completed_at: Option<Instant>, fresh: bool) {
+    fn observe_game_frame(
+        &mut self,
+        now: Instant,
+        completed_at: Option<Instant>,
+        metadata: Option<&FramePresentation>,
+        fresh: bool,
+    ) {
         if fresh && self.completed >= BENCHMARK_WARMUP {
             self.observed_game_frames.push(now);
-            if let Some(completed) = completed_at {
-                self.game_frames.push(completed);
-                self.frame_ages_ms
-                    .push(now.saturating_duration_since(completed).as_secs_f64() * 1000.);
-            } else {
+            let Some(completed) = completed_at else {
                 self.missing_completion_timestamps += 1;
+                return;
+            };
+            let Some(metadata) = metadata else {
+                self.missing_frame_metadata += 1;
+                return;
+            };
+            let provenance = &metadata.provenance;
+            if !provenance.alpha.is_finite()
+                || !(0. ..=1.).contains(&provenance.alpha)
+                || !provenance.previous_time.is_finite()
+                || !provenance.current_time.is_finite()
+                || !provenance.visual_time.is_finite()
+                || provenance.previous_tick > provenance.current_tick
+                || provenance.previous_time > provenance.current_time
+                || provenance.visual_time < provenance.previous_time - 1e-9
+                || provenance.visual_time > provenance.current_time + 1e-9
+            {
+                self.invalid_presentation_metadata += 1;
+                return;
             }
+            let identity = (metadata.actor_id, metadata.epoch, metadata.serial);
+            if self.seen_presentations.contains(&identity)
+                || self.last_presentation.as_ref().is_some_and(|previous| {
+                    previous.actor_id == metadata.actor_id && previous.serial >= metadata.serial
+                })
+            {
+                self.repeated_frame_identities += 1;
+                return;
+            }
+            if self.last_presentation.as_ref().is_some_and(|previous| {
+                let old = &previous.provenance;
+                previous.actor_id == metadata.actor_id
+                    && previous.epoch == metadata.epoch
+                    && previous.source_revision == metadata.source_revision
+                    && previous.camera == metadata.camera
+                    && old.generation == provenance.generation
+                    && old.previous_tick == provenance.previous_tick
+                    && old.current_tick == provenance.current_tick
+                    && old.previous_time == provenance.previous_time
+                    && old.current_time == provenance.current_time
+                    && old.alpha == provenance.alpha
+                    && old.visual_time == provenance.visual_time
+            }) {
+                // A new serial or origin label alone cannot turn the same
+                // completed source sample into an interpolated presentation.
+                self.invalid_presentation_metadata += 1;
+                return;
+            }
+            if completed > now
+                || self
+                    .game_frames
+                    .last()
+                    .is_some_and(|previous| completed <= *previous)
+            {
+                self.invalid_completion_timestamps += 1;
+                return;
+            }
+            self.seen_presentations.insert(identity);
+            self.last_presentation = Some(metadata.clone());
+            self.game_frames.push(completed);
+            self.frame_ages_ms
+                .push(now.duration_since(completed).as_secs_f64() * 1000.);
+            self.presentations.push(NativePresentationObservation {
+                metadata: metadata.clone(),
+                completed_since_start_ms: completed
+                    .saturating_duration_since(self.started)
+                    .as_secs_f64()
+                    * 1000.,
+                observed_since_start_ms: now.saturating_duration_since(self.started).as_secs_f64()
+                    * 1000.,
+            });
         }
     }
     fn record_ui_pass(
@@ -916,7 +1127,11 @@ impl NativeBenchmark {
             && game_frame_interval
                 .as_ref()
                 .is_some_and(|s| s.mean_ms <= FRAME_BUDGET_MS && s.p95_ms <= FRAME_BUDGET_MS);
-        let timing_data_valid = self.missing_completion_timestamps == 0;
+        let timing_data_valid = self.missing_completion_timestamps == 0
+            && self.missing_frame_metadata == 0
+            && self.invalid_presentation_metadata == 0
+            && self.repeated_frame_identities == 0
+            && self.invalid_completion_timestamps == 0;
         let target_met = physical_resolution_met
             && workload_met
             && timing_met
@@ -927,7 +1142,7 @@ impl NativeBenchmark {
             .and_then(|value| value.get("player_health"))
             .cloned();
         let mut report = serde_json::json!({
-            "schema_version":3,
+            "schema_version":4,
             "kind":"native-player-window",
             "shipping_game_unmodified":true,
             "input_mode":"normal Player input, no scripted actions and no health/stat overrides",
@@ -942,6 +1157,17 @@ impl NativeBenchmark {
             "ui_observed_unique_mean_fps":observed_interval.as_ref().map(|summary|1000./summary.mean_ms),
             "observed_frame_age":timing_summary(self.frame_ages_ms.clone()),
             "missing_completion_timestamps":self.missing_completion_timestamps,"timing_data_valid":timing_data_valid,
+            "missing_frame_metadata":self.missing_frame_metadata,
+            "invalid_presentation_metadata":self.invalid_presentation_metadata,
+            "repeated_frame_identities":self.repeated_frame_identities,
+            "invalid_completion_timestamps":self.invalid_completion_timestamps,
+            "presentation_samples":self.presentations,
+            "presentation_origin_counts":{
+                "CommittedState":self.presentations.iter().filter(|sample|matches!(sample.metadata.provenance.origin,module_engine_host::game_host::PresentationOrigin::CommittedState)).count(),
+                "InterpolatedPose":self.presentations.iter().filter(|sample|matches!(sample.metadata.provenance.origin,module_engine_host::game_host::PresentationOrigin::InterpolatedPose)).count(),
+                "Invalidated":self.presentations.iter().filter(|sample|matches!(sample.metadata.provenance.origin,module_engine_host::game_host::PresentationOrigin::Invalidated)).count()
+            },
+            "presentation_identity_scope":"Successful rendered simulation-state or genuine interpolated-pose samples; not pixel-distinct images. Actor/epoch/serial belong to the completed frame and survive retained last-good snapshots.",
             "timing_met":timing_met,"physical_resolution_met":physical_resolution_met,"shipping_twenty_enemy_load_met":workload_met,
             "callback_period":callback,"framework_cpu_including_gl_upload_draw_excluding_vsync":framework
         });
@@ -956,8 +1182,33 @@ impl NativeBenchmark {
             "worker_cost_statistics_scope":"Last completed step/render cost observed at each UI callback; UI-weighted observations, not independent per-worker-frame samples",
             "input_dispatch":timing_summary(self.samples.iter().map(|s|s.dispatch_ms).collect()),
             "fresh_game_frame_callbacks":self.samples.iter().filter(|s|s.fresh_frame).count(),
+            "presentation_transport":{
+                "gpu_resident_fresh_frames":self.samples.iter().filter(|s|s.fresh_frame && s.gpu_resident).count(),
+                "cpu_fresh_frames":self.samples.iter().filter(|s|s.fresh_frame && !s.gpu_resident).count(),
+                "cpu_pixel_bytes_in_fresh_frames":self.samples.iter().filter(|s|s.fresh_frame).map(|s|s.cpu_frame_bytes).sum::<usize>(),
+                "renderer_performance_first":self.samples.first().map(|s|s.renderer_performance),
+                "renderer_performance_last":self.samples.last().map(|s|s.renderer_performance),
+                "bridge_counters_last":self.samples.last().map(|s|s.gpu_bridge_counters),
+                "gpu_only_measured":!self.samples.is_empty() && self.samples.iter().all(|s|s.gpu_resident && s.cpu_frame_bytes==0 && s.renderer_performance.cpu_readback_bytes==0),
+                "scope":"Actual published payloads and renderer branch counters; explicit diagnostic captures remain separate. GPU copy/conversion is enqueued on the GUI device; worker completion is producer completion, not scanout."
+            },
             "game_tick_first":self.samples.first().map(|s|s.game_tick),"game_tick_last":self.samples.last().map(|s|s.game_tick),
             "game_time_first":self.samples.first().map(|s|s.game_time),"game_time_last":self.samples.last().map(|s|s.game_time),
+            "simulation_tick_samples":self.samples.iter().map(|s|s.game_tick).collect::<Vec<_>>(),
+            "simulation_time_samples":self.samples.iter().map(|s|s.game_time).collect::<Vec<_>>(),
+            "simulation_backlog_samples_seconds":self.samples.iter().map(|s|s.backlog_seconds).collect::<Vec<_>>(),
+            "simulation_backlog_max_seconds":self.samples.iter().map(|s|s.backlog_seconds).reduce(f64::max),
+            "deadline_wait_strategies":self.samples.iter().map(|sample|sample.deadline_wait_strategy).collect::<BTreeSet<_>>(),
+            "deadline_wait_errors":self.samples.iter().filter_map(|sample|sample.deadline_wait_error.as_deref()).collect::<BTreeSet<_>>(),
+            "deadline_wait_strategy_final":snapshot.map(|snapshot|snapshot.deadline_wait_strategy),
+            "deadline_wait_error_final":snapshot.and_then(|snapshot|snapshot.deadline_wait_error.as_deref()),
+            "simulation_progress":self.samples.first().zip(self.samples.last()).map(|(first,last)| {
+                let wall=last.started.saturating_duration_since(first.started).as_secs_f64();
+                serde_json::json!({"wall_seconds":wall,"ticks":last.game_tick.saturating_sub(first.game_tick),
+                    "game_seconds":last.game_time-first.game_time,
+                    "game_seconds_per_wall_second":(wall>0.).then(||(last.game_time-first.game_time)/wall),
+                    "fixed_step_seconds":1./60.,"scope":"Authoritative simulation progression across measured UI observations, separate from interpolated presentation frequency"})
+            }),
             "renderer_content_render_readback":timing_summary(self.samples.iter().map(|s|s.render_ms).collect()),
             "vulkan_content_render_readback":timing_summary(self.samples.iter().map(|s|s.render_ms).collect()),
             "rgba_conversion_and_egui_enqueue":timing_summary(self.samples.iter().map(|s|s.conversion_enqueue_ms).collect()),
@@ -1005,6 +1256,7 @@ pub fn update_texture(
     texture: &mut Option<egui::TextureHandle>,
     frame: &module_engine_core::Frame,
 ) {
+    debug_assert!(frame.gpu.is_none() && frame.is_valid());
     let image = egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
     if let Some(texture) = texture {
         texture.set(image, egui::TextureOptions::LINEAR);
@@ -1014,6 +1266,42 @@ pub fn update_texture(
                 .load_texture("game-frame", image, egui::TextureOptions::LINEAR),
         );
     }
+}
+
+/// Returns true only when this frame's GPU copy or CPU upload was enqueued.
+/// Backpressure retains the previous display without inventing fresh frames.
+pub fn update_presented_texture(
+    ui: &egui::Ui,
+    texture: &mut Option<egui::TextureHandle>,
+    gpu_texture: &mut GpuTexture,
+    bridge: Option<&GpuPresentationBridge>,
+    frame: &module_engine_core::Frame,
+) -> Result<bool, String> {
+    if !frame.is_valid() {
+        return Err("Renderer returned an incomplete CPU/GPU frame".into());
+    }
+    if frame.gpu.is_some() {
+        let bridge = bridge.ok_or("GPU frame has no compatible native presentation endpoint")?;
+        if gpu_texture.update(bridge, frame)?.is_some() {
+            *texture = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    } else {
+        update_texture(ui, texture, frame);
+        Ok(true)
+    }
+}
+
+pub fn presentation_texture_id(
+    texture: &Option<egui::TextureHandle>,
+    gpu_texture: &GpuTexture,
+) -> Option<egui::TextureId> {
+    texture
+        .as_ref()
+        .map(egui::TextureHandle::id)
+        .or_else(|| gpu_texture.texture_id())
 }
 
 pub fn configure_style(ctx: &egui::Context) {
@@ -1127,6 +1415,83 @@ mod native_options_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod startup_tests {
+    use super::prepare_on_host_thread;
+    use std::{ffi::c_void, sync::Arc, sync::Mutex, thread};
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *const c_void, flags: u32) -> i32;
+        fn CoUninitialize();
+        fn OleInitialize(reserved: *const c_void) -> i32;
+        fn OleUninitialize();
+    }
+
+    struct Apartment(bool);
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { OleUninitialize() };
+            } else {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    #[test]
+    fn host_preparation_keeps_mta_discovery_off_the_sta_window_thread() {
+        // Cargo's test runner may already use COM. Use a fresh GUI stand-in so
+        // the test measures this startup boundary rather than its environment.
+        thread::spawn(|| {
+            let gui_thread = thread::current().id();
+            let prepared_thread = prepare_on_host_thread(|| {
+                let host_thread = thread::current().id();
+                assert_ne!(host_thread, gui_thread);
+                // This is the same MTA initialization requested by the locked
+                // find-msvc-tools discovery path before the native window.
+                let initialized = unsafe { CoInitializeEx(std::ptr::null(), 0) };
+                assert!(initialized >= 0, "MTA initialization: {initialized:#x}");
+                let _apartment = Apartment(false);
+                Ok(host_thread)
+            })
+            .unwrap();
+            assert_ne!(prepared_thread, gui_thread);
+            let initialized = unsafe { OleInitialize(std::ptr::null()) };
+            assert!(initialized >= 0, "STA/OLE initialization: {initialized:#x}");
+            let _apartment = Apartment(true);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_preparation_joins_failures_and_releases_owned_resources() {
+        struct Owned(Arc<Mutex<Vec<thread::ThreadId>>>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push(thread::current().id());
+            }
+        }
+
+        let caller = thread::current().id();
+        let released = Arc::new(Mutex::new(vec![]));
+        let result: Result<(), String> = prepare_on_host_thread(|| {
+            let _owned = Owned(released.clone());
+            Err("original host error".into())
+        });
+        assert_eq!(result.unwrap_err(), "original host error");
+        let result: Result<(), String> = prepare_on_host_thread(|| {
+            let _owned = Owned(released.clone());
+            panic!("host startup panic fixture");
+        });
+        assert_eq!(result.unwrap_err(), "Player host preparation panicked");
+        let released = released.lock().unwrap();
+        assert_eq!(released.len(), 2);
+        assert!(released.iter().all(|thread| *thread != caller));
+    }
+}
+
 #[cfg(test)]
 mod timing_tests {
     use super::*;
@@ -1148,6 +1513,13 @@ mod timing_tests {
             observed_game_frames: vec![],
             frame_ages_ms: vec![],
             missing_completion_timestamps: 0,
+            presentations: vec![],
+            seen_presentations: BTreeSet::new(),
+            last_presentation: None,
+            missing_frame_metadata: 0,
+            invalid_presentation_metadata: 0,
+            repeated_frame_identities: 0,
+            invalid_completion_timestamps: 0,
             finished: false,
             gui_graphics: GuiGraphicsInfo::default(),
         }
@@ -1164,8 +1536,15 @@ mod timing_tests {
             render_ms: 3.,
             dispatch_ms: 0.01,
             fresh_frame: true,
+            gpu_resident: false,
+            cpu_frame_bytes: 1920 * 1080 * 4,
+            renderer_performance: Default::default(),
+            gpu_bridge_counters: Default::default(),
             game_tick: 60,
             game_time: 1.,
+            backlog_seconds: 0.,
+            deadline_wait_strategy: "test",
+            deadline_wait_error: None,
             conversion_enqueue_ms: 0.5,
             hud_ms: 0.,
             framebuffer_pixels: Some([1920, 1080]),
@@ -1178,6 +1557,26 @@ mod timing_tests {
             window_visible: Some(true),
             user_input: false,
             had_error: false,
+        }
+    }
+
+    fn presentation(serial: u64) -> FramePresentation {
+        FramePresentation {
+            actor_id: 1,
+            epoch: 1,
+            serial,
+            source_revision: 1,
+            camera: module_engine_core::Camera::default(),
+            provenance: module_engine_host::game_host::PresentationProvenance {
+                generation: 1,
+                previous_tick: 58 + serial,
+                current_tick: 59 + serial,
+                previous_time: (58 + serial) as f64 / 60.,
+                current_time: (59 + serial) as f64 / 60.,
+                alpha: 1.,
+                visual_time: (59 + serial) as f64 / 60.,
+                origin: module_engine_host::game_host::PresentationOrigin::CommittedState,
+            },
         }
     }
 
@@ -1208,15 +1607,22 @@ mod timing_tests {
     fn worker_completion_observation_and_age_remain_distinct_and_missing_time_is_not_fabricated() {
         let mut benchmark = benchmark();
         let start = Instant::now();
-        benchmark.observe_game_frame(start + Duration::from_millis(5), Some(start), true);
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(5),
+            Some(start),
+            Some(&presentation(1)),
+            true,
+        );
         benchmark.observe_game_frame(
             start + Duration::from_millis(25),
             Some(start + Duration::from_millis(10)),
+            Some(&presentation(2)),
             true,
         );
         benchmark.observe_game_frame(
             start + Duration::from_millis(30),
             Some(start + Duration::from_millis(10)),
+            Some(&presentation(2)),
             false,
         );
         assert_eq!(benchmark.game_frames.len(), 2);
@@ -1230,7 +1636,12 @@ mod timing_tests {
             Duration::from_millis(20)
         );
         assert_eq!(benchmark.frame_ages_ms, [5., 15.]);
-        benchmark.observe_game_frame(start + Duration::from_millis(40), None, true);
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(40),
+            None,
+            Some(&presentation(3)),
+            true,
+        );
         assert_eq!(
             benchmark.game_frames.len(),
             2,
@@ -1238,6 +1649,83 @@ mod timing_tests {
         );
         assert_eq!(benchmark.observed_game_frames.len(), 3);
         assert_eq!(benchmark.missing_completion_timestamps, 1);
+    }
+
+    #[test]
+    fn new_texture_without_new_successful_frame_identity_cannot_raise_measured_fps() {
+        let mut benchmark = benchmark();
+        let start = Instant::now();
+        let mut first = presentation(1);
+        first.provenance.alpha = 0.;
+        first.provenance.visual_time = first.provenance.previous_time;
+        benchmark.observe_game_frame(start, Some(start), Some(&first), true);
+        // Even if a caller allocates another texture/Arc, its old completed
+        // presentation cannot be credited a second time with a new timestamp.
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(8),
+            Some(start + Duration::from_millis(8)),
+            Some(&first),
+            true,
+        );
+        assert_eq!(benchmark.game_frames.len(), 1);
+        assert_eq!(benchmark.presentations.len(), 1);
+        assert_eq!(benchmark.repeated_frame_identities, 1);
+        let mut fabricated = first.clone();
+        fabricated.serial = 2;
+        fabricated.provenance.origin =
+            module_engine_host::game_host::PresentationOrigin::InterpolatedPose;
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(9),
+            Some(start + Duration::from_millis(9)),
+            Some(&fabricated),
+            true,
+        );
+        assert_eq!(benchmark.game_frames.len(), 1);
+        assert_eq!(benchmark.invalid_presentation_metadata, 1);
+        let mut interpolated = first.clone();
+        interpolated.serial = 2;
+        interpolated.provenance.alpha = 0.5;
+        interpolated.provenance.visual_time = 59.5 / 60.;
+        interpolated.provenance.origin =
+            module_engine_host::game_host::PresentationOrigin::InterpolatedPose;
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(16),
+            Some(start + Duration::from_millis(16)),
+            Some(&interpolated),
+            true,
+        );
+        assert_eq!(benchmark.game_frames.len(), 2);
+        assert_eq!(benchmark.presentations[1].metadata.provenance.alpha, 0.5);
+    }
+
+    #[test]
+    fn missing_provenance_nonfinite_alpha_and_invalid_completion_time_stay_invalid() {
+        let mut benchmark = benchmark();
+        let start = Instant::now();
+        benchmark.observe_game_frame(start, Some(start), None, true);
+        let mut invalid = presentation(1);
+        invalid.provenance.alpha = f64::NAN;
+        benchmark.observe_game_frame(start, Some(start), Some(&invalid), true);
+        benchmark.observe_game_frame(
+            start,
+            Some(start + Duration::from_millis(1)),
+            Some(&presentation(1)),
+            true,
+        );
+        assert!(benchmark.game_frames.is_empty());
+        assert_eq!(benchmark.missing_frame_metadata, 1);
+        assert_eq!(benchmark.invalid_presentation_metadata, 1);
+        assert_eq!(benchmark.invalid_completion_timestamps, 1);
+        benchmark.observe_game_frame(start, Some(start), Some(&presentation(1)), true);
+        benchmark.observe_game_frame(
+            start + Duration::from_millis(1),
+            Some(start),
+            Some(&presentation(2)),
+            true,
+        );
+        assert_eq!(benchmark.game_frames.len(), 1);
+        assert_eq!(benchmark.invalid_completion_timestamps, 2);
+        assert_eq!(benchmark.game_frames[0], start);
     }
 }
 

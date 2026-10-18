@@ -31,12 +31,19 @@ pub struct SceneViewportState {
     pub gesture: Option<DragGesture>,
     pub rect: Option<Rect>,
     pub texture: Option<egui::TextureHandle>,
+    gpu_texture: module_engine_player::gpu_presentation::GpuTexture,
+    gpu_bridge:
+        Option<std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>>,
+    displayed_camera: Option<Camera>,
+    presentation_owner: u64,
     pub error: Option<String>,
     hovered_axis: Option<Axis>,
     locked: bool,
     drop_hint: Option<(String, bool)>,
     render_revision: Option<u64>,
     rendered_key: Option<SceneRenderKey>,
+    displayed_key: Option<SceneRenderKey>,
+    presentation_pending: bool,
     rendered_at: Option<f64>,
     rendered_frame: Option<u64>,
     render_count: u64,
@@ -49,6 +56,59 @@ struct SceneRenderKey {
     camera: Camera,
     size: [usize; 2],
 }
+
+/// Frozen producer metadata travels with its completed pixels. The current
+/// viewport camera can already belong to a newer request by the time it arrives.
+pub struct PresentedSceneFrame {
+    pub frame: Frame,
+    pub camera: Camera,
+    pub revision: Option<u64>,
+    pub pending: bool,
+}
+
+fn render_size(rect: Rect, dpi: f32) -> [usize; 2] {
+    let physical = rect.size() * dpi;
+    let fit = (1280. / physical.x).min(720. / physical.y).min(1.);
+    [
+        (physical.x * fit).round().max(1.) as usize,
+        (physical.y * fit).round().max(1.) as usize,
+    ]
+}
+
+fn next_presentation_owner() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn scene_owns_press(response: &egui::Response, pointer: Pos2) -> bool {
+    let ctx = &response.ctx;
+    let local_pointer = ctx
+        .layer_transform_from_global(response.layer_id)
+        .map_or(pointer, |transform| transform * pointer);
+    if !response.enabled()
+        || !response.interact_rect.contains(local_pointer)
+        || !ctx.memory(|memory| memory.allows_interaction(response.layer_id))
+        || ctx.layer_id_at(pointer) != Some(response.layer_id)
+    {
+        return false;
+    }
+    // egui's current interaction snapshot uses the final pointer position of
+    // the input frame. Check origin ownership against the same previous-pass
+    // widget rectangles, without letting a later same-layer control be crossed.
+    ctx.viewport(|viewport| {
+        let widgets = &viewport.prev_pass.widgets;
+        let Some((layer, order)) = widgets.order(response.id) else {
+            return false;
+        };
+        layer == response.layer_id
+            && !widgets.get_layer(layer).skip(order + 1).any(|widget| {
+                widget.enabled
+                    && widget.sense.interactive()
+                    && widget.interact_rect.contains(local_pointer)
+            })
+    })
+}
+
 impl Default for SceneViewportState {
     fn default() -> Self {
         Self {
@@ -64,12 +124,18 @@ impl Default for SceneViewportState {
             gesture: None,
             rect: None,
             texture: None,
+            gpu_texture: Default::default(),
+            gpu_bridge: None,
+            displayed_camera: None,
+            presentation_owner: next_presentation_owner(),
             error: None,
             hovered_axis: None,
             locked: false,
             drop_hint: None,
             render_revision: None,
             rendered_key: None,
+            displayed_key: None,
+            presentation_pending: false,
             rendered_at: None,
             rendered_frame: None,
             render_count: 0,
@@ -78,6 +144,27 @@ impl Default for SceneViewportState {
     }
 }
 impl SceneViewportState {
+    /// Process-local routing only; personal/authored serialization never stores it.
+    pub fn presentation_owner(&self) -> u64 {
+        self.presentation_owner
+    }
+    pub fn request_presentation_refresh(&mut self) {
+        self.presentation_pending = true;
+    }
+    /// The same selected image painted by this viewport, independent of whether
+    /// its representation is a software texture or a native GPU display.
+    pub fn texture_id(&self) -> Option<egui::TextureId> {
+        module_engine_player::ui::presentation_texture_id(&self.texture, &self.gpu_texture)
+    }
+    pub fn poll_gpu_presentation(&mut self) -> Result<(), String> {
+        if let Some(bridge) = &self.gpu_bridge {
+            self.gpu_texture.poll(bridge)?;
+        }
+        Ok(())
+    }
+    fn visible_camera(&self) -> Camera {
+        self.displayed_camera.unwrap_or(self.camera)
+    }
     /// Host revisions cover accepted scene/content/GPU changes. Camera and size
     /// are tracked here so interaction feedback never waits for the idle poll.
     pub fn set_render_revision(&mut self, revision: u64) {
@@ -178,15 +265,55 @@ impl SceneViewportState {
         let size = ui.available_size().max(Vec2::splat(1.));
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         self.rect = Some(rect);
+        // Never test newly edited geometry against a retained older image.
+        // An already active gesture keeps using its captured camera/geometry.
+        let image_current = self.render_revision.is_none()
+            || self.displayed_key.is_some_and(|key| {
+                key.revision == self.render_revision
+                    && key.size == render_size(rect, ui.ctx().pixels_per_point())
+            });
         self.drop_hint = None;
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let primary_pressed =
             ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary));
-        let primary_released =
-            ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary));
-        if response.contains_pointer()
-            && (primary_pressed
-                || ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Middle)))
+        // A press and movement can arrive in the same input frame. The latest
+        // pointer position is for updating a gesture, not choosing its handle.
+        let (primary_press, primary_release) = ui.input(|input| {
+            let press = input
+                .events
+                .iter()
+                .enumerate()
+                .find_map(|(index, event)| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    } => Some((index, *pos)),
+                    _ => None,
+                });
+            let release_after = if self.gesture.is_some() {
+                0
+            } else {
+                press.map_or(input.events.len(), |(index, _)| index + 1)
+            };
+            let release = input.events[release_after..]
+                .iter()
+                .find_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                });
+            (press.map(|(_, pos)| pos), release)
+        });
+        let primary_press = primary_press.filter(|pointer| scene_owns_press(&response, *pointer));
+        if primary_press.is_some()
+            || (response.contains_pointer()
+                && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Middle)))
         {
             response.request_focus();
         }
@@ -233,10 +360,18 @@ impl SceneViewportState {
                 self.focus_object(objects, snapshot, id, rect);
             }
         }
-        let geometry = (!locked)
+        let geometry = (!locked && image_current)
             .then(|| {
                 selected.and_then(|id| {
-                    GizmoGeometry::build(objects, id, self.tool, self.space, self.camera, rect).ok()
+                    GizmoGeometry::build(
+                        objects,
+                        id,
+                        self.tool,
+                        self.space,
+                        self.visible_camera(),
+                        rect,
+                    )
+                    .ok()
                 })
             })
             .flatten();
@@ -251,13 +386,20 @@ impl SceneViewportState {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         let dragging_asset = egui::DragAndDrop::has_payload_of_type::<AssetDrag>(ui.ctx());
+        let pressed_handle = primary_press
+            .filter(|pointer| rect.contains(*pointer))
+            .and_then(|pointer| {
+                geometry
+                    .as_ref()
+                    .and_then(|geometry| geometry.hit_test(pointer))
+                    .map(|axis| (axis, pointer))
+            });
         if !locked
             && !handled_gesture
             && self.gesture.is_none()
             && !dragging_asset
             && primary_pressed
-            && response.contains_pointer()
-            && let (Some(id), Some(axis), Some(pointer)) = (selected, self.hovered_axis, pointer)
+            && let (Some(id), Some((axis, pointer))) = (selected, pressed_handle)
         {
             match DragGesture::begin(
                 objects,
@@ -265,7 +407,7 @@ impl SceneViewportState {
                 self.tool,
                 self.space,
                 axis,
-                self.camera,
+                self.visible_camera(),
                 rect,
                 pointer,
             ) {
@@ -281,7 +423,9 @@ impl SceneViewportState {
         if let Some(gesture) = &self.gesture {
             handled_gesture = true;
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            if let Some(pointer) = pointer {
+            // Stop at this gesture's first release, even if another press or
+            // pointer movement follows it in the same input frame.
+            if let Some(pointer) = primary_release.or(pointer) {
                 match gesture.update(pointer, self.snap) {
                     Ok(transform) => {
                         self.error = None;
@@ -293,7 +437,7 @@ impl SceneViewportState {
                     Err(error) => self.report_error(error, &mut actions),
                 }
             }
-            if primary_released
+            if primary_release.is_some()
                 || !ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary))
             {
                 self.gesture = None;
@@ -302,16 +446,17 @@ impl SceneViewportState {
             ui.ctx().request_repaint();
         }
         if !handled_gesture
+            && image_current
             && response.clicked_by(egui::PointerButton::Primary)
             && !dragging_asset
             && let Some(pointer) = pointer
         {
-            let id = scene_tools::camera_ray(self.camera, rect, pointer)
+            let id = scene_tools::camera_ray(self.visible_camera(), rect, pointer)
                 .and_then(|ray| scene_tools::pick(snapshot, ray))
                 .map(|hit| hit.id);
             actions.push(SceneAction::Select(id));
         }
-        self.asset_drop(ui, &response, rect, snapshot, locked, &mut actions);
+        self.asset_drop(ui, &response, rect, snapshot, image_current, &mut actions);
         actions
     }
 
@@ -324,6 +469,42 @@ impl SceneViewportState {
         selected: Option<u64>,
         render: &mut dyn FnMut(Camera, usize, usize) -> Result<Frame, String>,
     ) {
+        let revision = self.render_revision;
+        self.paint_presented(
+            ui,
+            objects,
+            snapshot,
+            selected,
+            &mut |camera, width, height| {
+                render(camera, width, height).map(|frame| {
+                    Some(PresentedSceneFrame {
+                        frame,
+                        camera,
+                        revision,
+                        pending: false,
+                    })
+                })
+            },
+        );
+    }
+
+    pub fn set_gpu_presentation(
+        &mut self,
+        bridge: Option<
+            std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>,
+        >,
+    ) {
+        self.gpu_bridge = bridge;
+    }
+
+    pub fn paint_presented(
+        &mut self,
+        ui: &mut egui::Ui,
+        objects: &[WorldObject],
+        snapshot: &SceneSnapshot,
+        selected: Option<u64>,
+        render: &mut dyn FnMut(Camera, usize, usize) -> Result<Option<PresentedSceneFrame>, String>,
+    ) {
         let Some(rect) = self
             .rect
             .filter(|rect| rect.width() > 2. && rect.height() > 2.)
@@ -333,10 +514,7 @@ impl SceneViewportState {
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         painter.rect_filled(rect, 0., Color32::from_rgb(21, 29, 43));
         let dpi = ui.ctx().pixels_per_point();
-        let physical = rect.size() * dpi;
-        let fit = (1280. / physical.x).min(720. / physical.y).min(1.);
-        let width = (physical.x * fit).round().max(1.) as usize;
-        let height = (physical.y * fit).round().max(1.) as usize;
+        let [width, height] = render_size(rect, dpi);
         let now = ui.input(|input| input.time);
         let frame_number = ui.ctx().cumulative_frame_nr();
         let key = SceneRenderKey {
@@ -349,41 +527,69 @@ impl SceneViewportState {
             .is_none_or(|previous| now < previous || now - previous >= 0.25);
         let untracked_frame =
             self.render_revision.is_none() && self.rendered_frame != Some(frame_number);
-        if self.rendered_key != Some(key) || expired || untracked_frame {
+        if self.presentation_pending || self.rendered_key != Some(key) || expired || untracked_frame
+        {
             self.rendered_key = Some(key);
             self.rendered_at = Some(now);
             self.rendered_frame = Some(frame_number);
             self.render_count += 1;
             match render(self.camera, width, height) {
-                Ok(frame) if valid_frame(&frame) => {
-                    if self
-                        .render_failure
-                        .as_ref()
-                        .is_some_and(|error| self.error.as_ref() == Some(error))
-                    {
-                        self.error = None;
-                    }
-                    self.render_failure = None;
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width, frame.height],
-                        &frame.rgba,
-                    );
-                    if let Some(texture) = &mut self.texture {
-                        texture.set(image, egui::TextureOptions::LINEAR);
-                    } else {
-                        self.texture = Some(ui.ctx().load_texture(
-                            format!("scene-preview-{:?}", ui.id()),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                Ok(Some(presented)) if valid_frame(&presented.frame) => {
+                    let frame = &presented.frame;
+                    self.presentation_pending = presented.pending;
+                    match module_engine_player::ui::update_presented_texture(
+                        ui,
+                        &mut self.texture,
+                        &mut self.gpu_texture,
+                        self.gpu_bridge.as_deref(),
+                        frame,
+                    ) {
+                        Ok(true) => {
+                            self.displayed_camera = Some(presented.camera);
+                            let completed_key = SceneRenderKey {
+                                revision: presented.revision,
+                                camera: presented.camera,
+                                size: [frame.width, frame.height],
+                            };
+                            self.displayed_key = Some(completed_key);
+                            self.rendered_key = Some(completed_key);
+                            if presented.pending || completed_key != key {
+                                ui.ctx().request_repaint();
+                            }
+                            if self
+                                .render_failure
+                                .as_ref()
+                                .is_some_and(|error| self.error.as_ref() == Some(error))
+                            {
+                                self.error = None;
+                            }
+                            self.render_failure = None;
+                        }
+                        Ok(false) => {
+                            self.rendered_key = None;
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(1));
+                        }
+                        Err(error) => {
+                            self.render_failure = Some(error.clone());
+                            self.error = Some(error);
+                        }
                     }
                 }
-                Ok(_) => {
+                Ok(None) => {
+                    self.presentation_pending = true;
+                    self.rendered_key = None;
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(1));
+                }
+                Ok(Some(_)) => {
+                    self.presentation_pending = false;
                     let error = "Scene renderer returned malformed frame pixels".to_owned();
                     self.render_failure = Some(error.clone());
                     self.error = Some(error);
                 }
                 Err(error) => {
+                    self.presentation_pending = false;
                     self.render_failure = Some(error.clone());
                     self.error = Some(error);
                 }
@@ -393,21 +599,31 @@ impl SceneViewportState {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
-        if let Some(texture) = &self.texture {
+        if let Some(texture) = self.texture_id() {
             painter.image(
-                texture.id(),
+                texture,
                 rect,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
                 Color32::WHITE,
             );
         }
-        if let Some(id) = selected {
+        let image_current = self.render_revision.is_none()
+            || self.displayed_key.is_some_and(|displayed| {
+                displayed.revision == self.render_revision && displayed.size == [width, height]
+            });
+        if image_current && let Some(id) = selected {
             if let Some(bounds) = object_bounds(snapshot, id) {
-                draw_bounds(&painter, self.camera, rect, bounds);
+                draw_bounds(&painter, self.visible_camera(), rect, bounds);
             }
             if !self.locked
-                && let Ok(geometry) =
-                    GizmoGeometry::build(objects, id, self.tool, self.space, self.camera, rect)
+                && let Ok(geometry) = GizmoGeometry::build(
+                    objects,
+                    id,
+                    self.tool,
+                    self.space,
+                    self.visible_camera(),
+                    rect,
+                )
             {
                 let active = self.gesture.as_ref().map(|gesture| gesture.axis);
                 for axis in &geometry.axes {
@@ -567,15 +783,18 @@ impl SceneViewportState {
         response: &egui::Response,
         rect: Rect,
         snapshot: &SceneSnapshot,
-        locked: bool,
+        image_current: bool,
         actions: &mut Vec<SceneAction>,
     ) {
+        let locked = self.locked;
         if let Some(payload) = response.dnd_hover_payload::<AssetDrag>() {
             let pointer = ui.input(|input| input.pointer.interact_pos());
-            let ray =
-                pointer.and_then(|pointer| scene_tools::camera_ray(self.camera, rect, pointer));
+            let ray = pointer
+                .and_then(|pointer| scene_tools::camera_ray(self.visible_camera(), rect, pointer));
             let (hint, allowed) = if locked {
                 ("Редактирование доступно после Stop", false)
+            } else if !image_current {
+                ("Изображение Scene обновляется", false)
             } else {
                 match payload.kind {
                     AssetKind::Model => (
@@ -594,12 +813,12 @@ impl SceneViewportState {
             self.drop_hint = Some((hint.into(), allowed));
         }
         if let Some(payload) = response.dnd_release_payload::<AssetDrag>() {
-            if locked {
+            if locked || !image_current {
                 return;
             }
             let Some(ray) = ui
                 .input(|input| input.pointer.interact_pos())
-                .and_then(|pointer| scene_tools::camera_ray(self.camera, rect, pointer))
+                .and_then(|pointer| scene_tools::camera_ray(self.visible_camera(), rect, pointer))
             else {
                 return;
             };
@@ -637,13 +856,7 @@ impl SceneViewportState {
 }
 
 fn valid_frame(frame: &Frame) -> bool {
-    frame.width > 0
-        && frame.height > 0
-        && frame
-            .width
-            .checked_mul(frame.height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            == Some(frame.rgba.len())
+    frame.is_valid()
 }
 fn axis_color(axis: Axis, active: Option<Axis>, hovered: Option<Axis>) -> Color32 {
     if active == Some(axis) || hovered == Some(axis) {
@@ -748,11 +961,43 @@ mod tests {
         locked: bool,
         time: f64,
     ) -> Vec<SceneAction> {
+        frame_with_overlay(ctx, state, events, selected, locked, time, None)
+    }
+    #[derive(Clone, Copy)]
+    enum SceneOverlay {
+        Foreground,
+        SameLayer,
+    }
+    fn frame_with_overlay(
+        ctx: &egui::Context,
+        state: &mut SceneViewportState,
+        events: Vec<egui::Event>,
+        selected: Option<u64>,
+        locked: bool,
+        time: f64,
+        overlay: Option<(SceneOverlay, Rect)>,
+    ) -> Vec<SceneAction> {
         let mut actions = vec![];
         let output = ctx.run_ui(input(time, events), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 actions = state.interact(ui, &objects(), &snapshot(), selected, locked);
+                if let Some((SceneOverlay::SameLayer, rect)) = overlay {
+                    ui.interact(
+                        rect,
+                        egui::Id::new("scene-press-overlay"),
+                        Sense::click_and_drag(),
+                    );
+                }
             });
+            if let Some((SceneOverlay::Foreground, rect)) = overlay {
+                egui::Area::new(egui::Id::new("scene-press-overlay-area"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(rect.min)
+                    .movable(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_exact_size(rect.size(), Sense::click_and_drag());
+                    });
+            }
         });
         output.drop_without_applying_deltas();
         actions
@@ -896,6 +1141,266 @@ mod tests {
             !frame(&ctx, &mut state, vec![], Some(7), false, 0.7)
                 .contains(&SceneAction::CommitGesture)
         );
+    }
+    #[derive(Clone, Copy)]
+    enum DragInputBatching {
+        SplitFrames,
+        PressAndMove,
+        CompleteGesture,
+        PressAway,
+        ReleaseBeforePress,
+        MoveAfterRelease,
+        MoveOutsideViewport,
+    }
+    fn assert_handle_drag_event_batching(batching: DragInputBatching) {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState::default();
+        frame(&ctx, &mut state, vec![], Some(7), false, 0.);
+        let geometry = GizmoGeometry::build(
+            &objects(),
+            7,
+            state.tool,
+            state.space,
+            state.camera,
+            state.rect.unwrap(),
+        )
+        .unwrap();
+        let handle = geometry
+            .axes
+            .iter()
+            .find(|axis| axis.axis == Axis::X)
+            .unwrap()
+            .end;
+        let mut end = handle + (handle - geometry.center).normalized() * 40.;
+        if matches!(batching, DragInputBatching::MoveOutsideViewport) {
+            end.x = state.rect.unwrap().right() + 2.;
+            assert!(input(0., vec![]).screen_rect.unwrap().contains(end));
+            assert!(!state.rect.unwrap().contains(end));
+        } else {
+            assert!(state.rect.unwrap().contains(end));
+        }
+        assert_eq!(geometry.hit_test(handle), Some(Axis::X));
+        assert_eq!(geometry.hit_test(end), None);
+
+        let mut events = vec![egui::Event::PointerMoved(handle), button(handle, true)];
+        if matches!(batching, DragInputBatching::ReleaseBeforePress) {
+            let preceding = frame(
+                &ctx,
+                &mut state,
+                vec![egui::Event::PointerMoved(end), button(end, true)],
+                Some(7),
+                false,
+                0.05,
+            );
+            assert!(!preceding.contains(&SceneAction::BeginGesture { id: 7 }));
+            events.insert(0, button(end, false));
+        }
+        if matches!(batching, DragInputBatching::PressAway) {
+            let actions = frame(
+                &ctx,
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(end),
+                    button(end, true),
+                    egui::Event::PointerMoved(handle),
+                ],
+                Some(7),
+                false,
+                0.1,
+            );
+            assert!(!actions.iter().any(|action| matches!(
+                action,
+                SceneAction::BeginGesture { .. } | SceneAction::SetTransform { .. }
+            )));
+            assert!(state.gesture.is_none());
+            let released = frame(
+                &ctx,
+                &mut state,
+                vec![button(handle, false)],
+                Some(7),
+                false,
+                0.2,
+            );
+            assert!(!released.contains(&SceneAction::CommitGesture));
+            return;
+        }
+        let mut actions = vec![];
+        if matches!(batching, DragInputBatching::SplitFrames) {
+            actions.extend(frame(&ctx, &mut state, events, Some(7), false, 0.1));
+            events = vec![];
+        }
+        events.push(egui::Event::PointerMoved(end));
+        let released_in_frame = matches!(
+            batching,
+            DragInputBatching::CompleteGesture | DragInputBatching::MoveAfterRelease
+        );
+        if released_in_frame {
+            events.push(button(end, false));
+        }
+        if matches!(batching, DragInputBatching::MoveAfterRelease) {
+            events.push(egui::Event::PointerMoved(handle));
+        }
+        actions.extend(frame(&ctx, &mut state, events, Some(7), false, 0.2));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, SceneAction::BeginGesture { id: 7 }))
+                .count(),
+            1,
+            "The press position must start the gesture even when movement shares its input frame"
+        );
+        assert!(
+            actions.iter().any(|action| matches!(action,
+                SceneAction::SetTransform { id: 7, transform }
+                    if transform.translation != Transform::default().translation
+            )),
+            "The gesture must preserve displacement from the actual press position"
+        );
+        if !released_in_frame {
+            assert!(state.gesture.is_some());
+            assert!(!actions.contains(&SceneAction::CommitGesture));
+            actions.extend(frame(
+                &ctx,
+                &mut state,
+                vec![button(end, false)],
+                Some(7),
+                false,
+                0.3,
+            ));
+        }
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, SceneAction::CommitGesture))
+                .count(),
+            1
+        );
+        assert!(state.gesture.is_none());
+        assert!(
+            !frame(&ctx, &mut state, vec![], Some(7), false, 0.4)
+                .contains(&SceneAction::CommitGesture)
+        );
+    }
+    #[test]
+    fn handle_drag_event_batching_split_frames_positive_control() {
+        assert_handle_drag_event_batching(DragInputBatching::SplitFrames);
+    }
+    #[test]
+    fn handle_drag_event_batching_coalesced_press_move_preserves_origin() {
+        assert_handle_drag_event_batching(DragInputBatching::PressAndMove);
+    }
+    #[test]
+    fn handle_drag_event_batching_complete_gesture_preserves_origin_and_commit() {
+        assert_handle_drag_event_batching(DragInputBatching::CompleteGesture);
+    }
+    #[test]
+    fn handle_drag_event_batching_press_away_does_not_capture_handle() {
+        assert_handle_drag_event_batching(DragInputBatching::PressAway);
+    }
+    #[test]
+    fn handle_drag_event_batching_release_before_press_does_not_commit_new_gesture() {
+        assert_handle_drag_event_batching(DragInputBatching::ReleaseBeforePress);
+    }
+    #[test]
+    fn handle_drag_event_batching_move_after_release_preserves_completed_displacement() {
+        assert_handle_drag_event_batching(DragInputBatching::MoveAfterRelease);
+    }
+    #[test]
+    fn handle_drag_event_batching_move_outside_viewport_preserves_origin_ownership() {
+        assert_handle_drag_event_batching(DragInputBatching::MoveOutsideViewport);
+    }
+    fn assert_overlay_press_does_not_start_scene_gesture(overlay: SceneOverlay) {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState::default();
+        frame(&ctx, &mut state, vec![], Some(7), false, 0.);
+        let geometry = GizmoGeometry::build(
+            &objects(),
+            7,
+            state.tool,
+            state.space,
+            state.camera,
+            state.rect.unwrap(),
+        )
+        .unwrap();
+        let handle = geometry
+            .axes
+            .iter()
+            .find(|axis| axis.axis == Axis::X)
+            .unwrap()
+            .end;
+        let end = handle + (handle - geometry.center).normalized() * 40.;
+        let overlay_rect = Rect::from_center_size(handle, Vec2::splat(24.));
+        assert_eq!(geometry.hit_test(handle), Some(Axis::X));
+        assert!(state.rect.unwrap().contains(end));
+        assert!(!overlay_rect.contains(end));
+        for time in [0.05, 0.1] {
+            frame_with_overlay(
+                &ctx,
+                &mut state,
+                vec![],
+                Some(7),
+                false,
+                time,
+                Some((overlay, overlay_rect)),
+            );
+        }
+        match overlay {
+            SceneOverlay::Foreground => {
+                assert_eq!(
+                    ctx.layer_id_at(handle).unwrap().order,
+                    egui::Order::Foreground
+                );
+                assert_eq!(ctx.layer_id_at(end).unwrap().order, egui::Order::Background);
+            }
+            SceneOverlay::SameLayer => {
+                let response = ctx
+                    .read_response(egui::Id::new("scene-press-overlay"))
+                    .unwrap();
+                assert!(response.enabled());
+                assert!(response.sense.interactive());
+                assert!(response.interact_rect.contains(handle));
+                assert!(!response.interact_rect.contains(end));
+                assert_eq!(ctx.layer_id_at(handle), Some(response.layer_id));
+            }
+        }
+        let actions = frame_with_overlay(
+            &ctx,
+            &mut state,
+            vec![
+                egui::Event::PointerMoved(handle),
+                button(handle, true),
+                egui::Event::PointerMoved(end),
+            ],
+            Some(7),
+            false,
+            0.2,
+            Some((overlay, overlay_rect)),
+        );
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            SceneAction::BeginGesture { .. }
+                | SceneAction::SetTransform { .. }
+                | SceneAction::CommitGesture
+        )));
+        assert!(state.gesture.is_none());
+        let released = frame_with_overlay(
+            &ctx,
+            &mut state,
+            vec![button(end, false)],
+            Some(7),
+            false,
+            0.3,
+            Some((overlay, overlay_rect)),
+        );
+        assert!(!released.contains(&SceneAction::CommitGesture));
+    }
+    #[test]
+    fn handle_drag_event_batching_foreground_overlay_owns_press_origin() {
+        assert_overlay_press_does_not_start_scene_gesture(SceneOverlay::Foreground);
+    }
+    #[test]
+    fn handle_drag_event_batching_same_layer_overlay_owns_press_origin() {
+        assert_overlay_press_does_not_start_scene_gesture(SceneOverlay::SameLayer);
     }
     #[test]
     fn play_lock_and_lost_window_focus_restore_gesture_baseline() {
@@ -1119,6 +1624,7 @@ mod tests {
                             width,
                             height,
                             rgba: vec![128; width * height * 4],
+                            gpu: None,
                             stats: RenderStats::default(),
                         })
                     },
@@ -1169,6 +1675,228 @@ mod tests {
     }
 
     #[test]
+    fn saturated_presentation_keeps_visible_image_camera_and_retries_without_revision_change() {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState {
+            rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(160., 90.))),
+            ..Default::default()
+        };
+        let objects = objects();
+        let snapshot = snapshot();
+        let draw = |state: &mut SceneViewportState, time: f64, busy: bool| {
+            ctx.run_ui(input(time, vec![]), |ui| {
+                state.paint_presented(
+                    ui,
+                    &objects,
+                    &snapshot,
+                    None,
+                    &mut |camera, width, height| {
+                        Ok((!busy).then(|| PresentedSceneFrame {
+                            frame: Frame {
+                                width,
+                                height,
+                                rgba: vec![128; width * height * 4],
+                                gpu: None,
+                                stats: RenderStats::default(),
+                            },
+                            camera,
+                            revision: Some(1),
+                            pending: false,
+                        }))
+                    },
+                );
+            })
+        };
+        state.set_render_revision(1);
+        draw(&mut state, 0., false).drop_without_applying_deltas();
+        let original_camera = state.visible_camera();
+        let texture = state.texture.as_ref().unwrap().id();
+        state.camera.yaw += 0.5;
+        let requested_camera = state.camera;
+        let output = draw(&mut state, 0.01, true);
+        assert_eq!(state.visible_camera(), original_camera);
+        assert_eq!(state.texture.as_ref().unwrap().id(), texture);
+        assert!(state.error.is_none());
+        let primitives = ctx.tessellate(output.shapes.clone(), output.pixels_per_point);
+        assert!(primitives.iter().any(|shape| matches!(&shape.primitive,
+            egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == texture)));
+        output.drop_without_applying_deltas();
+        let attempts = state.render_count();
+        // Same authored revision/camera, well before the 250 ms idle refresh.
+        draw(&mut state, 0.02, false).drop_without_applying_deltas();
+        assert_eq!(state.render_count(), attempts + 1);
+        assert_eq!(state.visible_camera(), requested_camera);
+    }
+
+    #[test]
+    fn delayed_completion_keeps_its_camera_and_key_and_polls_successor_before_idle_refresh() {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState {
+            rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(160., 90.))),
+            ..Default::default()
+        };
+        let authored = objects();
+        let snapshot = snapshot();
+        let first = state.camera;
+        let second = Camera {
+            yaw: first.yaw + 0.3,
+            ..first
+        };
+        let third = Camera {
+            yaw: first.yaw + 0.6,
+            ..first
+        };
+        let draw = |state: &mut SceneViewportState, time, completed: Option<Camera>, pending| {
+            ctx.run_ui(input(time, vec![]), |ui| {
+                state.paint_presented(
+                    ui,
+                    &authored,
+                    &snapshot,
+                    None,
+                    &mut |_requested, width, height| {
+                        Ok(completed.map(|camera| PresentedSceneFrame {
+                            frame: Frame {
+                                width,
+                                height,
+                                rgba: vec![128; width * height * 4],
+                                gpu: None,
+                                stats: RenderStats::default(),
+                            },
+                            camera,
+                            revision: Some(1),
+                            pending,
+                        }))
+                    },
+                );
+            })
+            .drop_without_applying_deltas();
+        };
+        state.set_render_revision(1);
+        draw(&mut state, 0., Some(first), false);
+        state.camera = second;
+        draw(&mut state, 0.01, None, true);
+        assert_eq!(state.visible_camera(), first);
+        state.camera = third;
+        draw(&mut state, 0.02, Some(second), true);
+        assert_eq!(state.visible_camera(), second);
+        assert_eq!(state.rendered_key.unwrap().camera, second);
+        assert!(state.presentation_pending);
+        let attempts = state.render_count();
+        draw(&mut state, 0.03, Some(third), false);
+        assert_eq!(state.render_count(), attempts + 1);
+        assert_eq!(state.visible_camera(), third);
+        assert!(!state.presentation_pending);
+        draw(&mut state, 0.04, None, true);
+        assert_eq!(
+            state.render_count(),
+            attempts + 1,
+            "A completed unchanged view returns to its static cache"
+        );
+    }
+
+    #[test]
+    fn retained_old_revision_or_size_cannot_pick_new_geometry() {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState::default();
+        frame(&ctx, &mut state, vec![], None, false, 0.);
+        state.set_render_revision(2);
+        let current_size = render_size(state.rect.unwrap(), ctx.pixels_per_point());
+        let center =
+            scene_tools::project_point(state.camera, state.rect.unwrap(), [0.; 3]).unwrap();
+        let click = |state: &mut SceneViewportState, time| {
+            frame(
+                &ctx,
+                state,
+                vec![egui::Event::PointerMoved(center), button(center, true)],
+                None,
+                false,
+                time,
+            );
+            frame(
+                &ctx,
+                state,
+                vec![button(center, false)],
+                None,
+                false,
+                time + 0.01,
+            )
+        };
+        state.displayed_key = Some(SceneRenderKey {
+            revision: Some(1),
+            camera: state.camera,
+            size: current_size,
+        });
+        let actions = click(&mut state, 0.1);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SceneAction::Select(_)))
+        );
+        state.displayed_key = Some(SceneRenderKey {
+            revision: Some(2),
+            camera: state.camera,
+            size: [1, 1],
+        });
+        let actions = click(&mut state, 0.2);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SceneAction::Select(_)))
+        );
+        state.displayed_key = Some(SceneRenderKey {
+            revision: Some(2),
+            camera: state.camera,
+            size: current_size,
+        });
+        assert!(click(&mut state, 0.3).contains(&SceneAction::Select(Some(7))));
+    }
+
+    #[test]
+    fn asset_drop_release_uses_the_visible_camera_while_a_new_camera_is_pending() {
+        let ctx = egui::Context::default();
+        let mut state = SceneViewportState::default();
+        frame(&ctx, &mut state, vec![], None, false, 0.);
+        let visible = state.camera;
+        state.displayed_camera = Some(visible);
+        state.camera.target = [100., 0., 0.];
+        let center = scene_tools::project_point(visible, state.rect.unwrap(), [0.; 3]).unwrap();
+        assert!(
+            scene_tools::camera_ray(state.camera, state.rect.unwrap(), center)
+                .and_then(|ray| scene_tools::pick(&snapshot(), ray))
+                .is_none()
+        );
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(center), button(center, true)],
+            None,
+            false,
+            0.1,
+        );
+        egui::DragAndDrop::set_payload(
+            &ctx,
+            AssetDrag {
+                id: "visible-texture".into(),
+                reference: "asset://visible-texture".into(),
+                path: "assets/visible.png".into(),
+                kind: AssetKind::Texture,
+            },
+        );
+        let actions = frame(
+            &ctx,
+            &mut state,
+            vec![button(center, false)],
+            None,
+            false,
+            0.2,
+        );
+        assert!(actions.contains(&SceneAction::DropTexture {
+            asset_ref: "asset://visible-texture".into(),
+            id: 7,
+        }));
+    }
+
+    #[test]
     fn painter_preserves_aspect_and_uses_updated_host_snapshot_without_world_mutation() {
         let ctx = egui::Context::default();
         let mut state = SceneViewportState::default();
@@ -1189,6 +1917,7 @@ mod tests {
                             width,
                             height,
                             rgba: vec![255; width * height * 4],
+                            gpu: None,
                             stats: RenderStats::default(),
                         })
                     },

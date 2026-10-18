@@ -21,3 +21,7 @@ egui = "0.36.2"
 [profile.release]
 opt-level = 2
 
+# Source/SDK proofs stream large toolchain binaries in interactive dev/test runs.
+[profile.dev.package.sha2]
+opt-level = 3
+

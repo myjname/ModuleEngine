@@ -91,6 +91,23 @@ The test binary runs **directly in the normal loader environment**, not through
 success. After execution, the libtest summary is checked against the discovered set. This
 preserves the important Stop/reuse condition from the [previous loader check](postfix-p2-fixes-20261016.md).
 
+<a id="isolated-source-fixtures"></a>
+
+## Isolated source fixtures
+
+Workflow and personal-layout tests create an owned temporary source installation,
+copy the real files from the required native inventory, and seal it through
+`write_full_manifest`. The normal distribution detection and project binding must
+select that installation and grant Full authoring before the scenario runs.
+Workflow projects and their Engine installation use sibling directories, so Save As
+copies only the project. Cleanup belongs to the test that created the directory.
+
+These file-command fixtures do not compile a game or Custom worker. Native and
+package checks continue to use their actual source/toolchain contexts. Checkout
+package metadata is not refreshed by the fixtures; an old or incomplete inventory
+still fails the production source check. This prevents unrelated checkout metadata
+from masking Save As, history, Recent, and personal-settings assertions in CI.
+
 ## Build and test timing
 
 [Build/verification performance](build-verification-performance.md) separates Cargo

@@ -293,14 +293,14 @@ impl ExecutableSystem for Step {
     }
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     root: PathBuf,
     document: GraphDocument,
     composition: CompositionContext,
     control: Arc<Control>,
 }
 impl Fixture {
-    fn new(custom_world: bool) -> Self {
+    pub(crate) fn new(custom_world: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "ModuleEngine neutral host {} {}",
             std::process::id(),
@@ -514,7 +514,10 @@ impl Fixture {
             services_enabled: enabled,
         }
     }
-    fn host(&self) -> GameHost {
+    pub(crate) fn set_draw_failure(&self, failed: bool) {
+        self.control.fail_render.store(failed, Ordering::SeqCst);
+    }
+    pub(crate) fn host(&self) -> GameHost {
         GameHost::build(
             self.document.clone(),
             self.composition.clone(),

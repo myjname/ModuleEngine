@@ -4,13 +4,31 @@
 
 [English](current-status.md) | [Русский](ru/current-status.md) | [Documentation](README.md)
 
-Summary as of 17 October 2026; the source baseline for the previous documentation stage is `c64bc34ffd28419cfd851838c16a2a48c9c2fcf8`. This is an index of current contracts and accumulated evidence, not a new acceptance of HEAD or a finished EXE. Test counts and measurements apply only to the snapshot of each report.
+Summary as of 18 October 2026: current async runtime evidence is separately bound to Windows08/LinuxL01 in the new report; earlier results retain their own source/artifact snapshots. This is an index of current contracts and accumulated evidence, not a new acceptance of HEAD or a finished EXE. Test counts and measurements apply only to the snapshot of each report.
 
 <a id="цели-и-границы"></a>
 
 ## Goals and Boundaries
 
+The PR preparation also closes a Full-source completeness gap: `crates/render-vulkan/src/retirement.rs` is now mandatory in the source inventory. Omitting it rejects Engine authoring; the source-omission regression covers this additional packaging guard separately from the historical async runtime measurements.
+
+Workflow and personal-layout tests now use [isolated, normally validated source installations](verification.md#isolated-source-fixtures), so a stale checkout manifest cannot stop their CI scenarios before the intended assertions. This changes test setup; runtime acceptance remains bound to the reports below.
+
 Shared modules and typed contracts must work independently of genre and specific examples. Authored data is separate from Play; rejecting a change preserves the working version and the user's work. Engine owns the architecture; Project changes what is permitted. Player is a separate native distribution with explicitly selected features, without Editor, Rust/Cargo/DXC on the player's machine.
+
+The accepted long-term goal is a [portfolio of 5–10 distinct finished games](portfolio-roadmap.md)
+covering 2D/2.5D/spatial 3D, pixel/polygonal/realistic/mobile-style graphics and
+different mechanics. Mobile-style currently means a PC game; mobile ports are
+future work, with specific platform targets still open. The roadmap proposes coverage, capability phases and acceptance
+gates; its game designs are not individually approved and no portfolio entry is
+accepted by writing the plan. Two Arenas and Puzzle remain technical baselines
+until they meet those gates. This adds a product direction, not new runtime features.
+
+P0 now requires an audit and stabilization of the existing version before P1:
+fix all confirmed current-scope defects and measured performance problems, repeat
+required checks, and pass the unchanged ARPG and cold Custom preparation criteria.
+Future missing subsystems remain separate work. This is an accepted plan change;
+recording it does not itself close the evidence gates.
 
 [Decisions](decisions.md) retain the accepted scope and assumptions; [open questions](questions.md) list future options. Historical statements such as “remains the next stage” in older reports do not reopen work already completed. Skeletal animation, full PBR, navmesh, networking, and other large subsystems require a separate task and criteria.
 
@@ -31,17 +49,47 @@ Shared modules and typed contracts must work independently of genre and specific
 
 ## Open and Unconfirmed
 
-- **The strict Player target of 60 FPS, 1080p, 20 active enemies was not reached** in the latest relevant measurements. Callback FPS and functional completion do not replace the mean/p95 cadence of unique game frames. See [final results](review-fixes-20261016.md).
-- **The previous 45-second target for cold Editor preparation with Custom remains open.** A successful prewarmed Editor and a small Puzzle scenario do not confirm it. See [authoring-stage boundaries](remaining-authoring-fixes-20261016.md) and [dialog smoke scope](dialog-path-fixes-20261016.md).
 - **Native Linux WAV and File/Folder dialogs are absent.** A verification project without audio and CLI operations do not confirm these services; production data must not silently lose sound. See [Linux services](linux-support.md#optional-services).
 - **Hardware Linux, portability across arbitrary ABIs/drivers, and manual foreground input-to-display QA are not certified.** WSLg software Vulkan and offscreen package verification cover a different scope.
-- The Custom worker manages process lifetimes, but **is not a sandbox for untrusted Rust**. Synchronous GPU readback, the limited visual Rust subset, and other functional boundaries remain documented in their respective contracts.
+- The Custom worker manages process lifetimes, but **is not a sandbox for untrusted Rust**. Explicit diagnostic GPU readback, bounded background GPU-retirement waiting, the limited visual Rust subset, and other functional boundaries remain documented in their respective contracts.
+
+### Async GPU producer: scoped runtime gates PASS — 18 October 2026
+
+Normal native Vulkan now submits one pending request and polls its exact ticket without ordinary producer GPU waiting or CPU pixel transfer. Four leases and actual consumer completion bound reuse; submitted camera/revision/tick/provenance and Scene owners stay attached to their pixels. Explicit diagnostics retain synchronous readback; only owned background teardown may wait up to30 s on its own fence, pinning unconfirmed resources/device on errors. Fixed 60 Hz simulation and the120 Hz presentation target are unchanged.
+
+The [async GPU report](gpu-async-20261018.md) binds Windows08 `318ae8c06c406c959aad706ecf16efbe45e368b648d62f2ebf8176ba5316d8fe`: current27/16 GPU cases/exact images,307 ordinary/3 ignored scoped tests plus two separately executed ignored native UI tests, strict Clippy, warm whole-Editor Graph/Scene/Game+Play/Stop, selected18-file tools-free Player/relocation and AB03 all 12 processes. Editor A/B means the native ARPG window launched by the normal Editor artifact; standalone Player is separate. Accepted supplemental audits reconstruct actual UI/callback/worker series, correcting F4 helper labels without changing original reports. Median worker FPS Editor 120.0422→119.0027/Player 119.0875→120.0249; worker p95 increases0.3543/0.3731 ms. Actual UI p9514.0170→14.0375/14.0813→13.9872 ms. Unchanged scoped gates pass; no blanket no-regression or universal improvement claim.
+
+Linux L01 `73a77fe8e06bd1a10fcc99f876c4dc7b7e612b396ab00c6c23c9942cfc142066` separately binds actual28/16 offscreen, normal Editor, strict Clippy, X11 resize1280×800→1440×900/Graph/Scene/Game/PlayStop/natural exit and ordinaryWM_DELETEempty-fixture close with all owned groups absent and no forced-cleanup success. Scoped coverage is a nonoverlapping303 ordinary/3 ignored logical union across failed v1's successful Core/Host and v2's five remaining suites, not one full-workspace run. JSON-only proof shows150 native/163 complete input maps equal Windows08; only an opaque settings entry is additionally inventoried by WSL. The initial pre-Cargo guard failure and DrvFS executable-bit fixture failure remain failed with explicit receipts. WSLg/llvmpipe is bounded functional evidence; native Linux audio/dialog, hardware/ABI/real device-loss, physical scanout and a newcold certification remain outside it.
+
+The report links the external final source inventory and independent decision; their recorded scope controls interpretation. Runtime hashes remain Windows Editor `cebd1391…` / Linux ELF `e7ad6a75…`; the planned source-complete Full and separately retained normal EXE have their own later delivery receipt. No new whole-P0/whole-workspace acceptance is claimed. Historical17 October P0 below remains unchanged.
+
+### Historical pre-async GPU stage — 18 October 2026
+
+The [ME-01 receipt](../outputs/verification/p0-continuation-20261018/me01-receipt.json) maps the inherited source snapshot to the exact Editor/Player packages and recorded results. ME-01 reconciles documentation; it is not a native rerun or closure of the cold gate.
+
+Normal native pixels remain on GPU through opaque Core leases and platform interop; four leases and actual consumer completion bound reuse. In that pre-async snapshot, producer completion waiting remained synchronous, and explicit CPU/software/Glow/PNG diagnostics retain readback. The [continuation report](p0-continuation-20261018.md) binds the restored normal Windows source `cedf173e70f531c8f1784a14ec02830a4aea905f7ff0ebd3aea5a0a07484a6cb` and its exact artifacts: first eligible fresh cold attempt **40.906 s wall / 39.9128549 s internal**, unchanged current ARPG gates (Editor 119.05/Player 119.00 FPS), Windows22/16 and separately bound current WSL Linux23/16 offscreen cases/exact comparisons, and scoped Windows authoring/export/relocated Player 120-frame evidence. This single cold attempt does not guarantee startup time; earlier failed cold attempts remain failed and their cause unknown. Diagnostic traces and admission-limit1 were removed; production default2 and original runtime remain.
+
+In that historical run, WSLg/X11 resized Editor and clean ordinary WM_DELETE close pass. A synthetic Linux pre-submit release-failure pair verifies the expected production error and quarantine without CPU fallback; it does not simulate actual hardware loss or establish hardware Linux support. The earlier close timeout showed an Unsaved Changes migration guard in a generated fixture; failed fixture/cleanup receipts remain preserved. Native Linux audio/dialog services, physical input/scanout and arbitrary ABI/driver portability remain outside these results. The [original GPU report](gpu-presentation-20261018.md) retains its historical source15 A/B, source11 Linux and cold failures. Final source binding and independent conclusion belong to the continuation's external records; full P0 or whole-workspace acceptance is not claimed. Historical17 October P0 below is unchanged.
+
+### P0: accepted within the documented scope — 17 October 2026
+
+**P0 verification and independent review are complete within the documented scope.** The [final evidence report](p0-stabilization-20261017.md) binds Windows runtime `b260549403e638653b75e880598b507d7965164b11096399cb18006eadbdab2c` and Linux Scene tests `94c60e636ca77ae19609e723913a745205da950305210236a60d8033e62e8c70` to actual artifacts. Normal Editor SHA256 is `de7ae73680f0c86d1ae1b33fa7de313ecffab1589906b72551debea593e2a9e9`; own standalone Player is `27b8ca7c7486a24b7f2df8c1e0927eb61b0a52881c23b77d078f990709c47427`.
+
+The unchanged 1080p/20-living-enemy/Playing gate passes: Editor 119.922177561 FPS, worker mean 8.338741176/p95 9.3295 ms; Player 117.082020875 FPS, worker mean 8.541021008/p95 9.2637 ms. Callback p95 is 7.5085/7.6059 ms and UI-observed unique p95 is 13.8867/14.0195 ms, separate series. Each report has 120 distinct completed presentations; origins 60/60 and 61/59 committed/interpolated, game/wall ratios 1.00535937/0.99658117, zero frame/wait errors. Focused-frame counts 145/146 with user-input frames zero do not prove held input or physical scanout latency. Simulation stays fixed at 60 Hz; eligible presentation targets 120 Hz without a guaranteed measured cadence.
+
+The single-attempt target-cold run passes both <=45 s clocks: 37.14 s wall/36.1642576 s internal, with a new process, fresh Full03 and previously absent empty `work/pcB260-03`. Existing tools/offline registry and uncontrolled OS caches remain. Actual [native/relocation](../outputs/p0-stabilization-20261017/scene-input-fixed-arpg-relocation-01/result.json), [cold](../outputs/p0-stabilization-20261017/final-cold-editor-03/launch.json) and [FG04](../outputs/p0-stabilization-20261017/foreground-current-04/result.json) receipts preserve source/protected data.
+
+Scene input's original 1-pass/2-fail red is retained; its corrected native set passes all 16 tests on Windows/Linux. Actual FG04 Move/one Undo/Rotate/Scale/Save changes exactly two selected transform leaves (Y rotation `0.9277253`, Y scale `1.0593712`); Editor closes with exit 0 and an explicitly author-transcribed tool receipt. Six captures have JPEG bytes despite `.png` names. Earlier scoped FG02 supports Unicode SaveAs, menus/Cancel/Assets/Play guards/history. Generic graph/DragValue drag, held keys/release, MMB/Shift+MMB, Ctrl-wheel and mid-held Escape were not exercised physically. Editor opens only for short specific UI tests and closes immediately afterward.
+
+Applicable functional/native/package evidence, six normal CLI cases, strict Windows checks/Rustdoc, supported Full stage and scoped Linux WSLg/X11 software-Vulkan Puzzle/Team/relocated Player are recorded in the full report with each source identity. Linux functional `target_met=false` is not Linux ARPG FPS/cold/hardware/Wayland acceptance. Default coverage is a mixed-snapshot logical union: **Windows 666 ordinary/9 ignored, Linux 664/8**; the [unique-name ledger](../work/verification/p0-stabilization-20261017/composite-test-inventory-scene.json) adds only nine new Scene names/platform, not duplicate 16 passes or all-feature overlap. It is not one successful current full-workspace invocation. Failed guards/cache fixtures/race/observers remain failed reports with bounded supplements/reruns; all 33 protected files and initial user data are preserved.
+
+The [independent final decision record](../outputs/reviews/p0-final-20261017/review.md) binds the final documentation/source snapshot separately from the unchanged native inputs. Native Linux WAV/dialog gaps, hardware/ABI support limits, physical input/scanout certification and untrusted Rust without a sandbox remain explicit limits; future portfolio systems are separate work.
 
 <a id="как-выбирать-доказательства"></a>
 
 ## Choosing Evidence
 
-The latest dialog-fix code snapshot is `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`: its [report](dialog-path-fixes-20261016.md) covers three changed Rust files, Editor tests, and the listed native scenarios. The full Windows/Linux workspace run from the [previous authoring stage](remaining-authoring-fixes-20261016.md) applies to `fb63b3ddae7cad52532761932855b755c61fb2c7`; its counts cannot be presented as a new full run of the current sources. The performance status from [review-fixes](review-fixes-20261016.md) did not change as a result of subsequent successful functional checks.
+The latest dialog-fix code snapshot is `0fbfb9ca74a139253b4e9d611b2b8877cfb4166d`: its [report](dialog-path-fixes-20261016.md) covers three changed Rust files, Editor tests, and the listed native scenarios. The full Windows/Linux workspace run from the [previous authoring stage](remaining-authoring-fixes-20261016.md) applies to `fb63b3ddae7cad52532761932855b755c61fb2c7`; its counts cannot be presented as a new full run of the current sources. The performance results in [review-fixes](review-fixes-20261016.md) remain historical; the current P0 report records later source-bound measurements.
 
 The finished `outputs/ModuleEngine.exe`, `ModuleEngine-review-fixed.exe`, `ModuleEngine-authoring-fixed.exe`, and `ModuleEngine-dialogs-fixed.exe` correspond to different source snapshots. Choose an artifact by its report and SHA; the date of this page does not update the EXE or source inventory.
 

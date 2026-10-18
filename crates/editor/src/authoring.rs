@@ -2,7 +2,9 @@
 
 use crate::activity::{ActivitySnapshot, BuildProgress};
 use crate::game_host::ShaderDependencyWatch;
-use module_engine_core::{ControlCommand, GraphDocument, ModuleRegistry, Runtime, ScriptContext};
+use module_engine_core::{
+    ControlCommand, GraphDocument, ModuleRegistry, PresentationTarget, Runtime, ScriptContext,
+};
 use module_engine_script::{
     CompiledScript, JobLease, ScriptCompiler, ScriptKind, ScriptTick, spawn_job,
 };
@@ -10,7 +12,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -476,6 +478,7 @@ pub struct PreviewBuilder {
     progress: Option<BuildProgress>,
     awaiting_acceptance: Option<PreviewAttempt>,
     rejected: Option<PreviewAttempt>,
+    presentation_target: Option<Arc<dyn PresentationTarget>>,
 }
 
 impl PreviewBuilder {
@@ -487,7 +490,23 @@ impl PreviewBuilder {
             progress: None,
             awaiting_acceptance: None,
             rejected: None,
+            presentation_target: None,
         }
+    }
+    pub fn set_presentation_target(&mut self, target: Option<Arc<dyn PresentationTarget>>) {
+        if match (&self.presentation_target, &target) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        } {
+            return;
+        }
+        self.pending = None;
+        self.latest = None;
+        self.awaiting_acceptance = None;
+        self.rejected = None;
+        self.error = None;
+        self.presentation_target = target;
     }
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
@@ -531,6 +550,7 @@ impl PreviewBuilder {
         // failed worker result reaches the UI. Capturing after failure misses it.
         let dependencies = ShaderDependencyWatch::new(document, backend_root);
         let registry = registry.clone();
+        let presentation_target = self.presentation_target.clone();
         let artifacts = module_engine_script::retain_test_artifacts(backend_root);
         let progress = BuildProgress::new("Предпросмотр Engine");
         progress.stage("Проверка графа, подготовка Vulkan и шейдеров");
@@ -540,12 +560,16 @@ impl PreviewBuilder {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return Err("Подготовка предпросмотра отменена".into());
             }
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Runtime::from_document(&candidate, &registry).map_err(|e| e.to_string())
-            }))
-            .unwrap_or_else(|_| {
-                Err("Подготовка предпросмотра завершилась с внутренней ошибкой".into())
-            });
+            let result: Result<Runtime, String> =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let runtime =
+                        Runtime::from_document(&candidate, &registry).map_err(|e| e.to_string())?;
+                    runtime.set_presentation_target(presentation_target)?;
+                    Ok(runtime)
+                }))
+                .unwrap_or_else(|_| {
+                    Err("Подготовка предпросмотра завершилась с внутренней ошибкой".into())
+                });
             match &result {
                 Ok(_) => progress.stage("GPU-кандидат подготовлен; ожидание применения"),
                 Err(error) => progress.fail(error.clone()),
@@ -665,6 +689,166 @@ mod tests {
             builder.activity_snapshot().unwrap().error.as_deref(),
             Some("Параметр не поддерживается новым проходом")
         );
+    }
+
+    struct ThreadCheckedTarget(u64);
+    impl PresentationTarget for ThreadCheckedTarget {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    struct ThreadCheckedRenderer {
+        ui_thread: thread::ThreadId,
+        calls: Arc<std::sync::Mutex<Vec<(thread::ThreadId, u64)>>>,
+    }
+    impl module_engine_core::FrameRenderer for ThreadCheckedRenderer {
+        fn render(
+            &mut self,
+            scene: &module_engine_core::SceneSnapshot,
+            camera: module_engine_core::Camera,
+            width: usize,
+            height: usize,
+            _: &module_engine_core::RenderOverrides,
+        ) -> Result<module_engine_core::Frame, String> {
+            Ok(module_engine_core::render_scene(
+                scene, width, height, camera,
+            ))
+        }
+        fn backend_name(&self) -> &str {
+            "thread-checked presentation fixture"
+        }
+        fn set_presentation_target(
+            &mut self,
+            target: Option<Arc<dyn PresentationTarget>>,
+        ) -> Result<(), String> {
+            let current = thread::current().id();
+            if current == self.ui_thread {
+                return Err("presentation setup ran on the UI thread".into());
+            }
+            let value = target
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ThreadCheckedTarget>()
+                .unwrap()
+                .0;
+            self.calls.lock().unwrap().push((current, value));
+            if value == 8 {
+                Err("injected background endpoint rejection".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn preview_endpoint_is_prepared_off_ui_before_publication_and_rejection_keeps_previous_runtime()
+    {
+        let root = module_engine_script::TestArtifactGuard::new(
+            &std::env::temp_dir(),
+            "preview-endpoint-thread",
+        )
+        .unwrap();
+        let mut registry = ModuleRegistry::builtin();
+        let mut descriptor = registry.descriptor("render.software3d").unwrap().clone();
+        descriptor.id = "fixture.threaded_presentation".into();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory_calls = calls.clone();
+        let ui_thread = thread::current().id();
+        registry
+            .register_renderer(descriptor, move |_, _| {
+                Ok(Box::new(ThreadCheckedRenderer {
+                    ui_thread,
+                    calls: factory_calls.clone(),
+                }))
+            })
+            .unwrap();
+        let mut document = demo_document(WorldKind::Objects);
+        document
+            .root
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "renderer")
+            .unwrap()
+            .module = "fixture.threaded_presentation".into();
+        let composition = module_engine_core::CompositionContext::new(
+            registry.clone(),
+            module_engine_core::SystemRegistry::builtin(),
+        )
+        .unwrap();
+        let profile = document.engine_lock.as_ref().unwrap().profile.clone();
+        composition
+            .capture_lock(
+                &document,
+                profile,
+                Some(module_engine_core::SdkIdentity::current()),
+            )
+            .unwrap()
+            .apply_to(&mut document);
+        let mut builder = PreviewBuilder::new();
+        builder.set_presentation_target(Some(Arc::new(ThreadCheckedTarget(7))));
+        builder.request_at(&document, &registry, root.path());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let accepted = loop {
+            if let Some(runtime) = builder.poll_at(&document, &registry, root.path()) {
+                break runtime;
+            }
+            assert!(builder.error.is_none(), "{:?}", builder.error);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background endpoint preparation timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        builder.applied();
+        let old_pixels = accepted
+            .render(32, 24, module_engine_core::Camera::default())
+            .unwrap()
+            .rgba;
+        assert_eq!(
+            accepted.backend_name(),
+            "thread-checked presentation fixture"
+        );
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                1,
+                "target was installed before the result reached the UI"
+            );
+            assert_ne!(calls[0].0, ui_thread);
+            assert_eq!(calls[0].1, 7);
+        }
+        builder.set_presentation_target(Some(Arc::new(ThreadCheckedTarget(8))));
+        builder.request_at(&document, &registry, root.path());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while builder.is_pending() {
+            assert!(builder.poll_at(&document, &registry, root.path()).is_none());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background rejection timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            builder.error.as_deref(),
+            Some("injected background endpoint rejection")
+        );
+        assert_eq!(
+            builder.activity_snapshot().unwrap().state,
+            crate::activity::ActivityState::Failed
+        );
+        assert_eq!(
+            accepted
+                .render(32, 24, module_engine_core::Camera::default())
+                .unwrap()
+                .rgba,
+            old_pixels
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[1].0, ui_thread);
+        assert_eq!(calls[1].1, 8);
     }
 
     fn supply_candidate(scripts: &mut Scripts, id: &str, source: &str, candidate: CompiledScript) {

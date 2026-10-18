@@ -6,6 +6,16 @@
 
 Project working directory: `E:\ModuleEngine`. The authored example is stored in `game-project-v4.json` after [explicit migration into a copy](engine-profiles.md); the original `game-project.json` and previous `project.json` are preserved separately.
 
+## Native GPU presentation
+
+The normal native Vulkan viewport publishes an opaque GPU frame lease instead of CPU pixels. Windows bridges the separate Vulkan producer to WGPU/DX12 through shared D3D12 resources; Linux bridges separate Vulkan devices through dedicated OPAQUE_FD memory and requires exact device and driver UUIDs. The GUI bridge copies and premultiplies RGBA8 on the GPU into its own native `Rgba8Unorm` texture, preserving the byte rounding of the previous egui conversion without sRGB decoding. Normal presentation performs no pixel readback to CPU and no CPU texture upload. Unsupported or failed interop reports an error and preserves the last good image; it does not silently select CPU transfer.
+
+The native producer admits at most one GPU submission at a time, with four leased output slots. `render_presented` returns `RenderSubmission::Pending(ticket)` after admission; `poll_presented(ticket)` checks completion without waiting and publishes that exact request once. `Busy` admits no work. `Ready(Frame)` supports immediate CPU/software output. Until completion, the previous image, identity, camera and provenance remain current; pending work is not a fresh frame. Scene uploads, atlas images, command resources and pipelines remain owned until their GPU use completes. The GUI separately retains each published lease until actual consumer GPU completion. Dropping a CPU reference or skipping a minimized surface does not complete either side. Explicit CPU/software rendering, diagnostic Glow and PNG/capture retain CPU pixels and may synchronously wait for readback; a conflicting CPU render is rejected while native producer work is pending. There is no game-renderer swapchain or multi-submission producer pipeline.
+
+Cancellation discards publication without waiting or freeing busy GPU resources. Reaping cancelled work may be deferred until the next submission or backend destruction; absence of publication does not permit early reuse. Dropping a renderer transfers unfinished producer work to an owned retirement job; only that background job may wait up to 30 seconds for its own fence. Application shutdown joins these jobs after renderer owners have stopped. `finish_gpu_retirements` reports consumer retirement plus nested `producer` registered/joined/completed/unconfirmed/failed counts. A timeout, device error, panic or failed retirement-thread start preserves unconfirmed resources and their device pin instead of reusing potentially busy memory; it is reported as an error, not successful completion. Linux consumer ownership-release failure retains its existing quarantine behavior. Historical successful or synthetic failure checks do not certify new async sources or real hardware loss.
+
+New async sources require separately bound checks and an independent conclusion in the [async report](gpu-async-20261018.md); passing individual current gates does not establish no regression or final acceptance. The [historical GPU report](gpu-presentation-20261018.md) retains Windows source15/Linux source11 results and earlier failures, including the cold gate open at that time. The [18 October continuation](p0-continuation-20261018.md) separately records the later normal cold PASS 40.906/39.9128549 s, Windows22/16 and WSL Linux23/16 and scoped native/package/lifecycle checks for its own sources. These snapshots do not verify the new async implementation or certify hardware Linux, real device loss or physical scanout.
+
 <a id="запуск"></a>
 
 ## Launch
@@ -71,7 +81,7 @@ The existing Team distribution remains a team editor. The Player game distributi
 
 Checks cover Object/ECS states/events/images, rollback of rejected Custom, death and Restart, transition, and victory. Automatic completion uses a separate saved verification copy with increased player health; enemy behavior, attacks, and transitions run through real systems. It checks the execution route, not the difficulty balance of the shipped game.
 
-The GameHost measurement includes simulation, Rust IPC, collisions, audio, and Vulkan/readback. The run is warmed up, then 120 frames at 1920×1080 are measured. The report contains GPU, load, mean, median, p95, and max; window presentation is measured separately. Disabling an inactive audio module excludes loading its sounds, but the authored archive remains.
+The explicit CPU-rendered GameHost diagnostic measurement includes simulation, Rust IPC, collisions, audio, and Vulkan/readback. The run is warmed up, then 120 frames at 1920×1080 are measured. The report contains GPU, load, mean, median, p95, and max; window presentation is measured separately. Disabling an inactive audio module excludes loading its sounds, but the authored archive remains.
 
 <a id="изменение-rust-во-время-play"></a>
 
@@ -90,11 +100,35 @@ JSON-packet protection and timeouts limit process errors, but the worker has nor
 .\outputs\my-game\Player.exe --benchmark outputs\my-game-native-window-verification
 ```
 
-The measurement uses the same Player, GPU rendering at 1920×1080, RGBA→egui conversion, image transfer to the GUI renderer (WGPU/DX12 on Windows and WGPU/Vulkan on Linux by default), game UI, and window loop. It does not increase health or replace scenes or behavior. Input is ordinary, without synthetic completion: twenty enemies continue acting. After 30 warmup UI frames, at least 120 callbacks and 120 distinct completed game frames are collected. The window then closes; the report is saved to `native-frame-report.json`.
+The measurement uses the same Player, GPU rendering at 1920×1080, GPU interop/copy/premultiplication into a GUI-owned native texture (WGPU/DX12 on Windows and WGPU/Vulkan on Linux by default), game UI, and window loop. It does not increase health or replace scenes or behavior. Input is ordinary, without synthetic completion: twenty enemies continue acting. After 30 warmup UI frames, at least 120 callbacks and 120 distinct completed game frames are collected. The window then closes; the report is saved to `native-frame-report.json`.
 
-In report schema 3, callback start-to-start measures the window loop: conversion, egui tessellation, GUI texture upload/draw, swap/vsync, and OS scheduling. Simulation, Rust IPC, and Vulkan/readback run on a separate worker. `mean_fps` uses distinct `Frame` values and their completion times; `ui_mean_fps` uses window callbacks. Repeating an old image does not increase game FPS. Completion intervals of observed worker frames, intervals of their first UI observation, and snapshot age are recorded separately; frames skipped between observations are not counted as measured. All egui passes are included in UI/HUD costs. Step/render cost fields contain the latest completed values observed on UI frames, so their distributions cannot be treated as an independent sample of worker frames.
+In report schema 4, callback start-to-start measures the window loop: GPU bridge preparation, egui tessellation, GUI drawing, swap/vsync, and OS scheduling. Simulation, Rust IPC and Vulkan production run on a separate worker. Normal GPU presentation performs no CPU pixel readback/upload; explicit CPU/diagnostic routes retain it. `mean_fps` uses distinct successful presentation identities and their real completion times; `ui_mean_fps` uses window callbacks. Repeating an old image does not increase game FPS. Completion intervals of observed worker frames, intervals of their first UI observation, and snapshot age are recorded separately; frames skipped between observations are not counted as measured. All egui passes are included in UI/HUD costs. Step/render cost fields contain the latest completed values observed on UI frames, so their distributions cannot be treated as an independent sample of worker frames.
 
-Additionally, `eframe::Frame.info().cpu_usage` measures CPU work of the UI and native presentation for the previous frame, excluding vsync waiting. Separate conversion/enqueue figures describe texture preparation; the framework performs the actual GUI texture upload later, and it is included in framework CPU and the overall period. This measures the window loop, not the time photons appear on the monitor or a separate GPU timestamp of the GUI renderer.
+`presentation_samples` records each completed frame's own actor/epoch/serial,
+source revision, actual camera and Host provenance (tick/time pair, alpha,
+visual time, generation and origin). `presentation_origin_counts` distinguishes
+new simulation states, genuine extra interpolated poses and invalidations.
+These are rendered state/presentation samples, not a claim of pixel-distinct
+images. Baseline rendering of each new committed tick remains valid even for
+static pixels; extra sub-tick frames require changed evaluated pose/camera.
+The [worker contract](game-worker.md#interpolated-presentation) describes the
+120 Hz target and its limits. New identities with repeated provenance, missing
+metadata, nonfinite values or invalid completion times make timing data invalid;
+the UI never substitutes observation time for worker completion.
+
+`simulation_tick_samples`, `simulation_time_samples`, `simulation_progress` and
+`simulation_backlog_samples_seconds` expose the authoritative fixed-step rate
+and lag separately from rendering. Higher presentation FPS cannot be read as
+faster simulation. Historical schema 3 reports used new `Arc<Frame>` identity;
+their recorded failures remain historical evidence, not schema 4 acceptance.
+The existing load, callback/game mean/p95 thresholds and watchdog are unchanged.
+
+`deadline_wait_strategies` and `deadline_wait_errors` list the worker wait modes
+and failures observed during measurement; the corresponding `_final` fields
+report the last snapshot. A fallback is reported explicitly, including while
+paused, rather than being labeled as a high-resolution wait.
+
+Additionally, `eframe::Frame.info().cpu_usage` measures CPU work of the UI and native presentation for the previous frame, excluding vsync waiting. Conversion/enqueue figures describe preparation on the selected presentation route. Native GPU work and framework drawing occur separately; diagnostic CPU texture uploads, when explicitly selected, remain part of framework CPU and the overall period. These CPU timings do not establish consumer GPU completion or GPU-copy duration. This measures the window loop, not the time photons appear on the monitor or a separate GPU timestamp of the GUI renderer.
 
 The window requests a client area of 1920×1080 physical pixels accounting for DPI. The report contains actual framebuffer and canvas area, game Vulkan renderer GPU and GUI backend, monitor/refresh rate, CPU identifier, models, living-enemy count, and player status/health. If the window manager reduced the window, `physical_resolution_met` shows this; offscreen render size stays 1920×1080.
 

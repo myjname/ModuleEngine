@@ -1,7 +1,7 @@
 use crate::{
     Camera, ControlCommand, Diagnostic, Frame, FrameRenderer, Graph, GraphDocument, ModuleRegistry,
-    Node, RenderOverrides, SceneSnapshot, Severity, WorldKind, WorldObject, WorldProvider,
-    validate_graph,
+    Node, RenderOverrides, RenderSubmission, SceneSnapshot, Severity, WorldKind, WorldObject,
+    WorldProvider, validate_graph,
 };
 use std::collections::BTreeSet;
 use std::fmt;
@@ -127,6 +127,49 @@ pub struct Runtime {
     renderer: Mutex<Box<dyn FrameRenderer>>,
     renderer_node_id: String,
     overrides: RenderOverrides,
+    scene_revision: u64,
+    presentation: Mutex<RuntimePresentation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RuntimePresentationKey {
+    revision: u64,
+    camera: Camera,
+    size: [usize; 2],
+}
+
+struct PendingRuntimePresentation {
+    ticket: u64,
+    key: RuntimePresentationKey,
+}
+
+#[derive(Default)]
+struct RuntimePresentation {
+    pending: Option<PendingRuntimePresentation>,
+    ready: Option<(RuntimePresentationKey, Frame)>,
+    completed: Option<RuntimePresentationKey>,
+    target: Option<std::sync::Arc<dyn crate::PresentationTarget>>,
+    consumed_resource_commands: usize,
+}
+
+impl RuntimePresentation {
+    fn poll(&mut self, renderer: &mut dyn FrameRenderer) -> Result<(), String> {
+        if self.ready.is_some() {
+            return Ok(());
+        }
+        if let Some(pending) = self.pending.take() {
+            match renderer.poll_presented(pending.ticket) {
+                Ok(Some(frame)) => self.ready = Some((pending.key, frame)),
+                Ok(None) => self.pending = Some(pending),
+                Err(error) => {
+                    // An error does not prove that GPU resources are idle.
+                    self.pending = Some(pending);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Runtime {
@@ -270,6 +313,8 @@ impl Runtime {
             renderer: Mutex::new(executable_renderer),
             renderer_node_id: renderer.id.clone(),
             overrides: RenderOverrides::default(),
+            scene_revision: 0,
+            presentation: Mutex::new(RuntimePresentation::default()),
         })
     }
 
@@ -279,21 +324,34 @@ impl Runtime {
     pub fn step(&mut self, dt: f32, speed: f32) {
         if dt.is_finite() && speed.is_finite() {
             self.provider.step(dt.max(0.0), speed);
+            self.scene_revision = self.scene_revision.wrapping_add(1);
         }
     }
 
     /// Execute the supported extraction/rasterization route into RGBA8.
     pub fn render(&self, width: usize, height: usize, camera: Camera) -> Result<Frame, String> {
-        self.renderer
+        let mut renderer = self
+            .renderer
             .lock()
-            .map_err(|_| "Renderer lock is poisoned".to_string())?
-            .render(
-                &self.provider.snapshot(),
-                camera,
-                width,
-                height,
-                &self.overrides,
-            )
+            .map_err(|_| "Renderer lock is poisoned".to_string())?;
+        let mut presentation = self
+            .presentation
+            .lock()
+            .map_err(|_| "Presentation lock is poisoned".to_string())?;
+        if presentation.pending.is_some() {
+            return Err(
+                "Diagnostic readback is unavailable while a presentation is pending".into(),
+            );
+        }
+        let mut overrides = self.overrides.clone();
+        let consumed = presentation
+            .consumed_resource_commands
+            .min(overrides.resource_commands.len());
+        overrides.resource_commands.drain(..consumed);
+        let frame =
+            renderer.render(&self.provider.snapshot(), camera, width, height, &overrides)?;
+        presentation.consumed_resource_commands = self.overrides.resource_commands.len();
+        Ok(frame)
     }
 
     pub fn backend_name(&self) -> String {
@@ -301,6 +359,141 @@ impl Runtime {
             .lock()
             .map(|r| r.backend_name().to_owned())
             .unwrap_or_else(|_| "Unavailable renderer".into())
+    }
+
+    pub fn set_presentation_target(
+        &self,
+        target: Option<std::sync::Arc<dyn crate::PresentationTarget>>,
+    ) -> Result<(), String> {
+        let mut renderer = self
+            .renderer
+            .lock()
+            .map_err(|_| "Renderer lock is poisoned".to_string())?;
+        let mut presentation = self
+            .presentation
+            .lock()
+            .map_err(|_| "Presentation lock is poisoned".to_string())?;
+        let unchanged = match (&presentation.target, &target) {
+            (None, None) => true,
+            (Some(previous), Some(candidate)) => std::sync::Arc::ptr_eq(previous, candidate),
+            _ => false,
+        };
+        if unchanged {
+            return Ok(());
+        }
+        if presentation.pending.is_some() || presentation.ready.is_some() {
+            return Err("Cannot replace presentation target while a frame is pending".into());
+        }
+        renderer.set_presentation_target(target.clone())?;
+        presentation.target = target;
+        Ok(())
+    }
+
+    pub fn has_pending_presentation(&self) -> bool {
+        self.presentation
+            .lock()
+            .is_ok_and(|state| state.pending.is_some())
+    }
+
+    pub fn has_ready_authored_presentation(&self) -> bool {
+        self.presentation
+            .lock()
+            .is_ok_and(|state| state.ready.is_some())
+    }
+
+    /// Hidden panes still reap producer work. Retain the frozen completion until
+    /// their next render call, without submitting a new request or changing its
+    /// displayed camera metadata.
+    pub fn poll_presentation(&self) -> Result<(), String> {
+        let mut renderer = self
+            .renderer
+            .lock()
+            .map_err(|_| "Renderer lock is poisoned".to_string())?;
+        self.presentation
+            .lock()
+            .map_err(|_| "Presentation lock is poisoned".to_string())?
+            .poll(renderer.as_mut())
+    }
+
+    /// Metadata belongs to the last completed frame, never to a newer request.
+    pub fn last_presented_camera(&self) -> Option<Camera> {
+        self.presentation
+            .lock()
+            .ok()?
+            .completed
+            .map(|key| key.camera)
+    }
+
+    pub fn last_presented_revision(&self) -> Option<u64> {
+        self.presentation
+            .lock()
+            .ok()?
+            .completed
+            .map(|key| key.revision)
+    }
+
+    /// Native presentation retains the CPU-only `render` route for diagnostics.
+    /// Polling never waits. Admit changed input in the completion call so a
+    /// continuously moving view does not alternate completion and submission.
+    pub fn render_presented(
+        &self,
+        width: usize,
+        height: usize,
+        camera: Camera,
+    ) -> Result<Option<Frame>, String> {
+        let mut renderer = self
+            .renderer
+            .lock()
+            .map_err(|_| "Renderer lock is poisoned".to_string())?;
+        let mut presentation = self
+            .presentation
+            .lock()
+            .map_err(|_| "Presentation lock is poisoned".to_string())?;
+        let key = RuntimePresentationKey {
+            revision: self.scene_revision,
+            camera,
+            size: [width, height],
+        };
+        presentation.poll(renderer.as_mut())?;
+        let mut completed = None;
+        if let Some((completed_key, frame)) = presentation.ready.take() {
+            presentation.completed = Some(completed_key);
+            completed = Some(frame);
+            if completed_key == key {
+                return Ok(completed);
+            }
+        }
+        if presentation.pending.is_some() {
+            return Ok(completed);
+        }
+        let mut overrides = self.overrides.clone();
+        let consumed = presentation
+            .consumed_resource_commands
+            .min(overrides.resource_commands.len());
+        overrides.resource_commands.drain(..consumed);
+        match renderer.render_presented(
+            &self.provider.snapshot(),
+            camera,
+            width,
+            height,
+            &overrides,
+        ) {
+            Ok(RenderSubmission::Ready(frame)) => {
+                presentation.consumed_resource_commands = self.overrides.resource_commands.len();
+                presentation.completed = Some(key);
+                Ok(Some(frame))
+            }
+            Ok(RenderSubmission::Pending(ticket)) => {
+                presentation.consumed_resource_commands = self.overrides.resource_commands.len();
+                presentation.pending = Some(PendingRuntimePresentation { ticket, key });
+                Ok(completed)
+            }
+            Ok(RenderSubmission::Busy) => Ok(completed),
+            // Publish a completed sample even if admitting its successor fails.
+            // A retry of that newer sample can report its own error.
+            Err(_) if completed.is_some() => Ok(completed),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn objects(&self) -> Result<Vec<WorldObject>, String> {
@@ -416,12 +609,22 @@ impl Runtime {
         if !world.is_empty() {
             self.provider.apply_commands(&world)?;
         }
+        if !world.is_empty() || self.overrides != candidate {
+            self.scene_revision = self.scene_revision.wrapping_add(1);
+        }
         self.overrides = candidate;
         Ok(())
     }
 
     pub fn begin_frame(&mut self) {
-        self.overrides.begin_frame();
+        // Retain one-shot operations until the renderer admits their request.
+        if let Ok(mut presentation) = self.presentation.lock() {
+            let consumed = presentation
+                .consumed_resource_commands
+                .min(self.overrides.resource_commands.len());
+            self.overrides.resource_commands.drain(..consumed);
+            presentation.consumed_resource_commands = 0;
+        }
     }
 
     /// Keep owned world state when only renderer/source/layout changes. Explicit
@@ -484,6 +687,15 @@ impl Runtime {
 
     pub fn reconfigure(&mut self, document: &GraphDocument) -> Result<bool, RuntimeError> {
         let mut candidate = Self::from_document(document, &self.registry)?;
+        let target = self
+            .presentation
+            .lock()
+            .map_err(|_| route_error("Presentation lock is poisoned"))?
+            .target
+            .clone();
+        candidate
+            .set_presentation_target(target)
+            .map_err(route_error)?;
         let kept = candidate.adopt_world(self);
         *self = candidate;
         Ok(kept)
@@ -578,8 +790,18 @@ impl Runtime {
             world.module = module.into();
             world.params = serde_json::json!({});
         }
-        if let Ok(runtime) = Self::from_document(&document, &self.registry) {
-            *self = runtime;
+        let _ = self.reconfigure(&document);
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        if let Ok(state) = self.presentation.get_mut()
+            && let Some(pending) = state.pending.take()
+            && let Ok(renderer) = self.renderer.get_mut()
+        {
+            // The backend retains execution resources until real completion.
+            let _ = renderer.discard_presented(pending.ticket);
         }
     }
 }
@@ -723,6 +945,253 @@ mod tests {
     use crate::{
         Mesh, RenderItem, Transform, demo_document, make_edge, make_node, world_descriptor,
     };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    #[derive(Default)]
+    struct AsyncRendererState {
+        ready: bool,
+        busy: bool,
+        submitted: Vec<(Camera, [usize; 2], usize)>,
+        frames: BTreeMap<u64, Frame>,
+        discarded: Vec<u64>,
+    }
+
+    struct AsyncRenderer(Arc<Mutex<AsyncRendererState>>);
+
+    impl FrameRenderer for AsyncRenderer {
+        fn render(
+            &mut self,
+            scene: &SceneSnapshot,
+            camera: Camera,
+            width: usize,
+            height: usize,
+            _: &RenderOverrides,
+        ) -> Result<Frame, String> {
+            Ok(crate::render_scene(scene, width, height, camera))
+        }
+
+        fn render_presented(
+            &mut self,
+            _: &SceneSnapshot,
+            camera: Camera,
+            width: usize,
+            height: usize,
+            overrides: &RenderOverrides,
+        ) -> Result<RenderSubmission, String> {
+            let mut state = self.0.lock().unwrap();
+            if state.busy {
+                return Ok(RenderSubmission::Busy);
+            }
+            state
+                .submitted
+                .push((camera, [width, height], overrides.resource_commands.len()));
+            let ticket = state.submitted.len() as u64;
+            state.frames.insert(
+                ticket,
+                Frame {
+                    width,
+                    height,
+                    rgba: vec![ticket as u8; width * height * 4],
+                    gpu: None,
+                    stats: Default::default(),
+                },
+            );
+            Ok(RenderSubmission::Pending(ticket))
+        }
+
+        fn poll_presented(&mut self, ticket: u64) -> Result<Option<Frame>, String> {
+            let mut state = self.0.lock().unwrap();
+            Ok(if state.ready {
+                state.frames.remove(&ticket)
+            } else {
+                None
+            })
+        }
+
+        fn discard_presented(&mut self, ticket: u64) -> Result<(), String> {
+            self.0.lock().unwrap().discarded.push(ticket);
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &str {
+            "Deterministic asynchronous test renderer"
+        }
+        fn validate_overrides(&self, _: &RenderOverrides) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn async_runtime() -> (Runtime, Arc<Mutex<AsyncRendererState>>) {
+        let mut runtime = Runtime::from_document(
+            &demo_document(WorldKind::Objects),
+            &ModuleRegistry::builtin(),
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(AsyncRendererState::default()));
+        runtime.renderer = Mutex::new(Box::new(AsyncRenderer(state.clone())));
+        (runtime, state)
+    }
+
+    #[test]
+    fn asynchronous_runtime_keeps_submitted_camera_and_revision_and_admits_next_on_completion() {
+        let (mut runtime, state) = async_runtime();
+        let first = Camera::default();
+        let second = Camera {
+            yaw: first.yaw + 0.4,
+            ..first
+        };
+        assert!(runtime.render_presented(32, 24, first).unwrap().is_none());
+        assert!(runtime.has_pending_presentation());
+        assert_eq!(runtime.last_presented_camera(), None);
+        runtime.step(0.1, 1.);
+        assert!(runtime.render_presented(40, 24, second).unwrap().is_none());
+        assert_eq!(state.lock().unwrap().submitted.len(), 1);
+        state.lock().unwrap().ready = true;
+        let old = runtime.render_presented(40, 24, second).unwrap().unwrap();
+        assert_eq!((old.width, old.rgba[0]), (32, 1));
+        assert_eq!(runtime.last_presented_camera(), Some(first));
+        assert_eq!(runtime.last_presented_revision(), Some(0));
+        assert_eq!(state.lock().unwrap().submitted.len(), 2);
+        assert!(runtime.has_pending_presentation());
+        let current = runtime.render_presented(40, 24, second).unwrap().unwrap();
+        assert_eq!((current.width, current.rgba[0]), (40, 2));
+        assert_eq!(runtime.last_presented_camera(), Some(second));
+        assert_eq!(runtime.last_presented_revision(), Some(1));
+        assert!(!runtime.has_pending_presentation());
+        assert_eq!(
+            state.lock().unwrap().submitted.len(),
+            2,
+            "Completing unchanged static input must not create a perpetual submit loop"
+        );
+    }
+
+    #[test]
+    fn asynchronous_runtime_retains_unadmitted_commands_and_consumes_each_prefix_once() {
+        let (mut runtime, state) = async_runtime();
+        let clear = |name: &str| {
+            ControlCommand::Render(crate::RenderCommand::ClearResource {
+                name: name.into(),
+                value: [0.; 4],
+            })
+        };
+        runtime.apply_controls(&[clear("first")]).unwrap();
+        state.lock().unwrap().busy = true;
+        assert!(
+            runtime
+                .render_presented(16, 12, Camera::default())
+                .unwrap()
+                .is_none()
+        );
+        runtime.begin_frame();
+        assert_eq!(runtime.overrides.resource_commands.len(), 1);
+        state.lock().unwrap().busy = false;
+        runtime.render_presented(16, 12, Camera::default()).unwrap();
+        runtime.apply_controls(&[clear("second")]).unwrap();
+        runtime.begin_frame();
+        assert_eq!(runtime.overrides.resource_commands.len(), 1);
+        assert!(
+            runtime
+                .render_presented(16, 12, Camera::default())
+                .unwrap()
+                .is_none()
+        );
+        runtime.begin_frame();
+        assert_eq!(runtime.overrides.resource_commands.len(), 1);
+        state.lock().unwrap().ready = true;
+        runtime
+            .render_presented(16, 12, Camera::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .submitted
+                .iter()
+                .map(|entry| entry.2)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        runtime.begin_frame();
+        assert!(runtime.overrides.resource_commands.is_empty());
+        runtime
+            .render_presented(16, 12, Camera::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.lock().unwrap().submitted.len(), 2);
+    }
+
+    #[test]
+    fn asynchronous_runtime_hidden_poll_buffers_completion_without_new_work_or_camera_relabeling() {
+        let (runtime, state) = async_runtime();
+        let camera = Camera::default();
+        runtime.render_presented(16, 12, camera).unwrap();
+        runtime.poll_presentation().unwrap();
+        assert!(runtime.has_pending_presentation());
+        state.lock().unwrap().ready = true;
+        runtime.poll_presentation().unwrap();
+        assert!(!runtime.has_pending_presentation());
+        assert!(runtime.has_ready_authored_presentation());
+        assert_eq!(runtime.last_presented_camera(), None);
+        for _ in 0..3 {
+            runtime.poll_presentation().unwrap();
+        }
+        assert_eq!(state.lock().unwrap().submitted.len(), 1);
+        let frame = runtime.render_presented(16, 12, camera).unwrap().unwrap();
+        assert_eq!(frame.rgba[0], 1);
+        assert!(!runtime.has_ready_authored_presentation());
+        assert_eq!(runtime.last_presented_camera(), Some(camera));
+        assert_eq!(state.lock().unwrap().submitted.len(), 1);
+        // A later explicit idle refresh must still enter the renderer so its
+        // ordinary external HLSL dependency check remains reachable.
+        assert!(runtime.render_presented(16, 12, camera).unwrap().is_none());
+        assert_eq!(state.lock().unwrap().submitted.len(), 2);
+    }
+
+    struct TestPresentationTarget;
+    impl crate::PresentationTarget for TestPresentationTarget {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn asynchronous_runtime_rejects_target_or_readback_conflicts_and_discards_replaced_ticket() {
+        let (mut runtime, state) = async_runtime();
+        let target: Arc<dyn crate::PresentationTarget> = Arc::new(TestPresentationTarget);
+        runtime
+            .set_presentation_target(Some(target.clone()))
+            .unwrap();
+        runtime.render_presented(16, 12, Camera::default()).unwrap();
+        runtime
+            .set_presentation_target(Some(target.clone()))
+            .unwrap();
+        assert!(
+            runtime
+                .set_presentation_target(None)
+                .unwrap_err()
+                .contains("pending")
+        );
+        assert!(
+            runtime
+                .render(16, 12, Camera::default())
+                .unwrap_err()
+                .contains("pending")
+        );
+        let mut rejected = demo_document(WorldKind::Objects);
+        rejected.root.edges.clear();
+        assert!(runtime.reconfigure(&rejected).is_err());
+        assert!(runtime.has_pending_presentation());
+        assert!(state.lock().unwrap().discarded.is_empty());
+        runtime
+            .reconfigure(&demo_document(WorldKind::Objects))
+            .unwrap();
+        assert_eq!(state.lock().unwrap().discarded, vec![1]);
+        assert!(!runtime.has_pending_presentation());
+        assert_eq!(runtime.last_presented_camera(), None);
+        let retained = runtime.presentation.lock().unwrap().target.clone().unwrap();
+        assert!(Arc::ptr_eq(&retained, &target));
+    }
 
     #[test]
     fn live_property_ids_are_bound_to_the_accepted_world_source() {

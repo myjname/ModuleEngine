@@ -48,6 +48,34 @@ sample-cap hits. Probe/source hashes and the archived observer sources are in th
 report. These measurements do not assess Editor cold-start, hardware Linux or
 hosted acceptance.
 
+## Debug proof hashing
+
+The root workspace optimizes only `sha2` in dev/test builds with
+`[profile.dev.package.sha2] opt-level = 3`. Source/SDK freshness proofs stream
+large toolchain binaries through SHA-256 on interactive preparation paths.
+Editor and other application code retain Debug optimization, assertions and
+overflow checks; the release profile and dependency pins are unchanged.
+This does not skip integrity checks, remove proof inputs or broaden cache admission.
+The exact root `Cargo.toml` is itself a freshness input, so this change invalidates
+the previous SDK proof. Generated Custom workspaces have independent profiles.
+
+The [P0 evidence](../outputs/p0-stabilization-20261017/debug-baseline-results.json)
+records the unchanged Scene-preparation test failing its 30-second deadline before
+the change (30.29 s test time, 35.391 s wall time) and passing afterwards
+(22.50 s test time, 28.235 s wall time). CargoJSON confirms optimized `sha2` with
+the Editor still at optimization level 0 and Debug checks enabled. These isolated
+runs had uncontrolled OS/file caches; they are not a universal speedup estimate
+or a replacement for the separate cold Editor criterion. All five subsequent
+native checks passed, including actual context cacheability and Stop/reuse.
+
+The following broad Debug run passed 596 tests before Cargo stopped at a fixture
+creation failure: the restricted environment denied `cmd.exe mklink /J` in the
+Windows junction cleanup test. The same exact test passed with ordinary
+permissions on unchanged sources, checking that external data survived cleanup.
+The original run remains failed, not a full workspace pass. Final-source
+functional and performance acceptance is recorded separately in
+[current status](current-status.md).
+
 ## Hosted Cargo cache contract
 
 [scripts/ci_cache.py](../scripts/ci_cache.py) is invoked as

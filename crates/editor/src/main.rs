@@ -49,7 +49,11 @@ fn main() {
     // The native window is already closed. Finish detached Game owners here
     // so their persistent Custom children are destroyed before process exit.
     let cleanup = game_worker::finish_after_ui();
-    if let Err(error) = result.and(cleanup) {
+    // All producers are stopped before joining GUI-owned GPU retirements.
+    let gpu_cleanup = module_engine_player::gpu_presentation::finish_gpu_retirements()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    if let Err(error) = result.and(cleanup).and(gpu_cleanup) {
         eprintln!("ModuleEngine: {error}");
         std::process::exit(1);
     }
@@ -534,11 +538,13 @@ fn run() -> Result<(), String> {
         Box::new(move |cc| {
             module_engine_player::ui::report_graphics(cc);
             app::configure_style(&cc.egui_ctx);
-            let mut editor = app::Editor::new_with_diagnostic_personal_root(
+            let bridge = module_engine_player::ui::presentation_bridge(cc)?;
+            let mut editor = app::Editor::new_native_with_diagnostic_personal_root(
                 document,
                 path,
                 distribution,
                 diagnostic_personal_root,
+                bridge,
             );
             if open_custom {
                 editor.show_custom();

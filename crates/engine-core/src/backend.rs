@@ -3,10 +3,11 @@
 use crate::{Camera, Frame, GraphDocument, Node, RenderOverrides, SceneSnapshot, render_scene};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Measured cumulative work. Unsupported backend operations remain zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RendererPerformance {
     pub render_calls: u64,
     pub prepare_calls: u64,
@@ -16,6 +17,17 @@ pub struct RendererPerformance {
     pub pipeline_creations: u64,
     pub pipeline_build_attempts: u64,
     pub prepare_ns: u64,
+    /// Actual pixel bytes mapped/copied to CPU by explicit render/readback.
+    pub cpu_readback_bytes: u64,
+    /// Successful GPU-resident producer frames, excluding skipped pool rents.
+    pub gpu_presentation_frames: u64,
+    pub gpu_presentation_bytes: u64,
+    /// Accepted native producer submissions, distinct from completed frames.
+    pub gpu_submissions: u64,
+    /// Nonblocking native producer completion status checks.
+    pub gpu_completion_polls: u64,
+    /// Native requests rejected before submission because resources are busy.
+    pub gpu_busy_skips: u64,
 }
 
 /// Adapter-discovered stable identities, independent of graphics API handles.
@@ -89,6 +101,17 @@ fn reject_unsupported_controls(controls: &RenderOverrides) -> Result<(), String>
     }
 }
 
+/// Admission of one native presentation request. A pending ticket means the
+/// renderer accepted the request and owns its resources through actual GPU
+/// completion, even if publication is discarded. Busy admits no work and
+/// consumes no one-shot commands.
+#[derive(Debug)]
+pub enum RenderSubmission {
+    Ready(Frame),
+    Pending(u64),
+    Busy,
+}
+
 /// A compiled-in rendering module with an API-independent scene/control input.
 /// A host may share one device between candidates, but each candidate owns its
 /// graph configuration. Returning an error allows the host to retain the last
@@ -102,6 +125,42 @@ pub trait FrameRenderer: Send {
         height: usize,
         overrides: &RenderOverrides,
     ) -> Result<Frame, String>;
+
+    /// Install a typed native endpoint. CPU/software renderers need no endpoint.
+    /// Unsupported GPU endpoints must be reported by their rendering module.
+    fn set_presentation_target(
+        &mut self,
+        _target: Option<Arc<dyn crate::PresentationTarget>>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Native display output. Busy submits no work. Pending accepts the frozen
+    /// request, including its one-shot commands; only polling publishes a frame.
+    /// The explicit `render` contract remains CPU-readable for tools/capture.
+    fn render_presented(
+        &mut self,
+        scene: &SceneSnapshot,
+        camera: Camera,
+        width: usize,
+        height: usize,
+        overrides: &RenderOverrides,
+    ) -> Result<RenderSubmission, String> {
+        self.render(scene, camera, width, height, overrides)
+            .map(RenderSubmission::Ready)
+    }
+
+    /// Check one accepted request without waiting or admitting new GPU work.
+    /// A completed frame is returned once and belongs to the ticket's inputs.
+    fn poll_presented(&mut self, _ticket: u64) -> Result<Option<Frame>, String> {
+        Err("This renderer has no pending presentation ticket".into())
+    }
+
+    /// Abandon publication without waiting. Native resources remain owned by
+    /// the backend until actual GPU completion; discard is never completion.
+    fn discard_presented(&mut self, _ticket: u64) -> Result<(), String> {
+        Ok(())
+    }
 
     fn backend_name(&self) -> &str;
     fn performance(&self) -> RendererPerformance {

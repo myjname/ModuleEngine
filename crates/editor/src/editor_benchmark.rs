@@ -56,8 +56,14 @@ pub fn run(
         Box::new(move |cc| {
             let gui_graphics = module_engine_player::ui::report_graphics(cc);
             super::configure_style(&cc.egui_ctx);
-            let mut editor =
-                Editor::new_with_distribution(document.clone(), path.clone(), distribution);
+            let bridge = module_engine_player::ui::presentation_bridge(cc)?;
+            let mut editor = Editor::new_native_with_diagnostic_personal_root(
+                document.clone(),
+                path.clone(),
+                distribution,
+                None,
+                bridge,
+            );
             editor.workspace = WorkspaceKind::Engine;
             editor.engine_layout = fixed_layout();
             editor.engine_panes.clear();
@@ -344,7 +350,7 @@ impl NativeEditorBenchmark {
                 .editor
                 .engine_panes
                 .get(&SCENE_PANE)
-                .is_some_and(|pane| pane.scene_view.texture.is_some()),
+                .is_some_and(|pane| pane.scene_view.texture_id().is_some()),
         }
     }
 
@@ -676,7 +682,7 @@ impl App for NativeEditorBenchmark {
                 .editor
                 .engine_panes
                 .get(&SCENE_PANE)
-                .is_some_and(|pane| pane.scene_view.texture.is_some());
+                .is_some_and(|pane| pane.scene_view.texture_id().is_some());
             self.previous =
                 Some(FrameSample {
                     started: Some(start),

@@ -3,6 +3,9 @@
 #[path = "compat_tests.rs"]
 mod compat_tests;
 #[cfg(test)]
+#[path = "presentation_tests.rs"]
+pub(crate) mod presentation_tests;
+#[cfg(test)]
 #[path = "test_support.rs"]
 mod test_support;
 use crate::activity::{ActivitySnapshot, BuildProgress};
@@ -14,7 +17,7 @@ use module_engine_script::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -550,6 +553,132 @@ fn generic_script_input(input: &GameInput) -> Value {
     serde_json::to_value(input).expect("Portable input contains JSON values")
 }
 
+/// Why a successful presentation was eligible; this never represents a fake tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum PresentationOrigin {
+    CommittedState,
+    InterpolatedPose,
+    Invalidated,
+}
+
+/// Provenance paired with completed pixels. Endpoint ticks/times are committed
+/// simulation data; alpha is the evaluated pose fraction, never an invented tick.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PresentationProvenance {
+    pub generation: u64,
+    pub previous_tick: u64,
+    pub current_tick: u64,
+    pub previous_time: f64,
+    pub current_time: f64,
+    pub alpha: f64,
+    pub visual_time: f64,
+    pub origin: PresentationOrigin,
+}
+
+pub struct RenderedPresentation {
+    pub frame: Arc<Frame>,
+    pub camera: Camera,
+    pub source_revision: u64,
+    pub provenance: PresentationProvenance,
+}
+
+#[derive(Clone, PartialEq)]
+struct PresentationSample {
+    scene: String,
+    tick: u64,
+    time: f64,
+    snapshot: SceneSnapshot,
+    identities: BTreeMap<u64, PresentationIdentity>,
+    target: Option<[f32; 3]>,
+}
+impl PresentationSample {
+    fn capture(host: &GameHost) -> Self {
+        let state = host.session.state();
+        let identities =
+            if host.renderer.is_none() || host.session.world_kind() == WorldKind::Custom {
+                BTreeMap::new()
+            } else {
+                state
+                    .world
+                    .entity_ids()
+                    .filter_map(|id| {
+                        Some((
+                            id,
+                            PresentationIdentity {
+                                lifetime: state.world.lifetime(id)?,
+                                parent: state.world.object(id)?.parent,
+                            },
+                        ))
+                    })
+                    .collect()
+            };
+        Self {
+            scene: state.scene.clone(),
+            tick: state.tick,
+            time: state.time,
+            snapshot: if host.renderer.is_some() {
+                host.session.snapshot()
+            } else {
+                SceneSnapshot::default()
+            },
+            identities,
+            target: host.frame_target(),
+        }
+    }
+}
+struct PresentationEvaluation {
+    generation: u64,
+    tick: u64,
+    revision: u64,
+    size: [usize; 2],
+    source_camera: Camera,
+    camera: Camera,
+    models: Vec<(u64, [[f32; 4]; 4])>,
+    controls: RenderOverrides,
+}
+
+#[derive(Clone, PartialEq)]
+struct AuthoredPresentationRequest {
+    generation: u64,
+    revision: u64,
+    size: [usize; 2],
+    camera: Camera,
+    snapshot: SceneSnapshot,
+    controls: RenderOverrides,
+}
+
+enum PendingPresentationKind {
+    Authored {
+        owner: u64,
+        request: AuthoredPresentationRequest,
+    },
+    Interpolated {
+        evaluation: PresentationEvaluation,
+        provenance: PresentationProvenance,
+    },
+}
+
+struct PendingPresentation {
+    ticket: u64,
+    started: Instant,
+    kind: PendingPresentationKind,
+}
+
+/// Private owner identity for a native interpolated submission, never pixels
+/// or metadata inferred from the current simulation state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingPresentationIdentity {
+    pub ticket: u64,
+    pub generation: u64,
+    pub source_revision: u64,
+    pub current_tick: u64,
+}
+
+enum CompletedPresentation {
+    Authored(u64, Frame, Camera, u64),
+    Interpolated(RenderedPresentation),
+}
+
 pub struct GameHost {
     pub session: GameSession,
     pub content: ContentLibrary,
@@ -564,6 +693,7 @@ pub struct GameHost {
     document: GraphDocument,
     live_document: Arc<Mutex<GraphDocument>>,
     renderer: Option<Box<dyn FrameRenderer>>,
+    presentation_target: Option<Arc<dyn PresentationTarget>>,
     composition: CompositionContext,
     options: HostOptions,
     retired: Arc<std::sync::atomic::AtomicBool>,
@@ -579,6 +709,17 @@ pub struct GameHost {
     rejected_preparation_dependencies: Option<RendererDependencyWatch>,
     presentation_revision: u64,
     contributions: Vec<GameContribution>,
+    presentation_previous: Option<PresentationSample>,
+    presentation_current: Option<PresentationSample>,
+    presentation_generation: u64,
+    presentation_evaluation: Option<PresentationEvaluation>,
+    pending_presentation: Option<PendingPresentation>,
+    authored_presentation_requests: BTreeMap<u64, AuthoredPresentationRequest>,
+    authored_presentation_owners: BTreeSet<u64>,
+    authored_presentation_waiters: VecDeque<u64>,
+    last_presented_camera: Option<Camera>,
+    last_presented_revision: Option<u64>,
+    ready_authored_presentations: BTreeMap<u64, (Frame, Camera, u64)>,
 }
 fn next_presentation_revision() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -629,6 +770,7 @@ impl GameHost {
     pub fn invalidate_content(&mut self) {
         self.content.invalidate();
         self.presentation_revision = next_presentation_revision();
+        self.reset_presentation_history();
     }
     pub fn set_detailed_stats(&mut self, enabled: bool) {
         if let Some(renderer) = &mut self.renderer {
@@ -898,6 +1040,7 @@ impl GameHost {
             contributions,
             live_document,
             renderer,
+            presentation_target: None,
             composition,
             options,
             retired,
@@ -912,6 +1055,17 @@ impl GameHost {
             rejected_preparation: None,
             rejected_preparation_dependencies: None,
             presentation_revision: next_presentation_revision(),
+            presentation_previous: None,
+            presentation_current: None,
+            presentation_generation: next_presentation_revision(),
+            presentation_evaluation: None,
+            pending_presentation: None,
+            authored_presentation_requests: BTreeMap::new(),
+            authored_presentation_owners: BTreeSet::from([0]),
+            authored_presentation_waiters: VecDeque::new(),
+            last_presented_camera: None,
+            last_presented_revision: None,
+            ready_authored_presentations: BTreeMap::new(),
         })
     }
     /// Replace only the authored preview, retaining GPU resources, decoded
@@ -1096,6 +1250,8 @@ impl GameHost {
             self.services = services;
         }
         self.presentation_revision = next_presentation_revision();
+        drop(live);
+        self.reset_presentation_history();
         Ok(())
     }
     pub fn step(&mut self, dt: f64, input: &GameInput) -> Result<usize, String> {
@@ -1119,17 +1275,51 @@ impl GameHost {
         }
         self.simulation_started = true;
         let started = Instant::now();
-        self.overrides
-            .lock()
-            .map_err(|_| "Render controls poisoned")?
-            .begin_frame();
-        let ticks = self.session.step_budget(dt, input, max_ticks)?;
-        self.presentation_revision = next_presentation_revision();
+        let before = PresentationSample::capture(self);
+        // Rendered hosts retain ordered resource operations until a request is
+        // accepted. RenderOverrides enforces the existing 4096-operation bound;
+        // a full backlog rejects the next tick transaction instead of dropping it.
+        // Headless hosts execute no GPU effects and discard each call's bounded batch.
+        if self.renderer.is_none() {
+            self.overrides
+                .lock()
+                .map_err(|_| "Render controls poisoned")?
+                .begin_frame();
+        }
+        let result = self.session.step_budget(dt, input, max_ticks);
+        if self.renderer.is_none() {
+            self.overrides
+                .lock()
+                .map_err(|_| "Render controls poisoned")?
+                .begin_frame();
+        }
+        if result.is_err() {
+            if self.session.state().tick != before.tick
+                || self.session.state().scene != before.scene
+            {
+                self.reset_presentation_history();
+            }
+            return result;
+        }
+        let ticks = result?;
+        self.follow_camera();
+        if ticks > 0 {
+            let current = PresentationSample::capture(self);
+            let reset = self.session.events().iter().any(|event| {
+                event.name == "SceneChanged" || event.name == PRESENTATION_RESET_EVENT
+            });
+            if ticks == 1 && current.scene == before.scene && !reset {
+                self.presentation_previous = Some(before);
+                self.presentation_current = Some(current);
+            } else {
+                self.reset_presentation_history();
+            }
+            self.presentation_revision = next_presentation_revision();
+        }
         self.last_step_ms = started.elapsed().as_secs_f64() * 1000.;
         if let Err(error) = self.services.consume(self.session.events()) {
             self.record_service_error("step", error);
         }
-        self.follow_camera();
         Ok(ticks)
     }
     /// Restart the whole hosted game, including state held outside GameSession.
@@ -1162,12 +1352,31 @@ impl GameHost {
         self.last_step_ms = 0.;
         self.last_render_ms = 0.;
         self.presentation_revision = next_presentation_revision();
+        self.reset_presentation_history();
         Ok(())
+    }
+    /// Snap future presentations after a discontinuity, retaining the last good
+    /// published frame on failure. Native modules may emit PresentationReset in
+    /// a committed tick; Custom uses its existing emit_event("PresentationReset")
+    /// envelope. No velocity/distance heuristic guesses whether motion teleports.
+    pub fn reset_presentation_history(&mut self) {
+        self.discard_pending_presentation();
+        self.authored_presentation_requests.clear();
+        self.authored_presentation_waiters.clear();
+        self.ready_authored_presentations.clear();
+        self.presentation_previous = None;
+        self.presentation_current = None;
+        self.presentation_generation = next_presentation_revision();
     }
     /// The exact renderer-neutral geometry/materials displayed by Scene and Game.
     /// Imported primitives retain their authored object IDs for picking.
     pub fn author_snapshot(&mut self) -> Result<SceneSnapshot, String> {
-        let mut snapshot = self.session.snapshot();
+        self.enrich_presentation(self.session.snapshot())
+    }
+    fn enrich_presentation(
+        &mut self,
+        mut snapshot: SceneSnapshot,
+    ) -> Result<SceneSnapshot, String> {
         self.content
             .enrich_snapshot(&mut snapshot, &self.session.asset_bindings())?;
         for item in &mut snapshot.items {
@@ -1204,8 +1413,537 @@ impl GameHost {
             .as_mut()
             .ok_or("Headless host has no renderer")?
             .render(&snapshot, self.camera, width, height, &overrides)?;
+        self.consume_render_batch(controls.resource_commands.len())?;
         self.last_render_ms = started.elapsed().as_secs_f64() * 1000.;
         Ok(frame)
+    }
+
+    /// Install a window-owned native endpoint transactionally, before the next
+    /// display render. Explicit CPU render/capture APIs remain unchanged.
+    pub fn set_presentation_target(
+        &mut self,
+        target: Option<Arc<dyn PresentationTarget>>,
+    ) -> Result<(), String> {
+        if match (&self.presentation_target, &target) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        } {
+            return Ok(());
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_presentation_target(target.clone())?;
+            self.device = renderer.backend_name().into();
+        }
+        self.presentation_target = target;
+        self.reset_presentation_history();
+        Ok(())
+    }
+
+    pub fn has_pending_presentation(&self) -> bool {
+        self.pending_presentation.is_some()
+    }
+
+    pub(crate) fn pending_interpolated_identity(&self) -> Option<PendingPresentationIdentity> {
+        let pending = self.pending_presentation.as_ref()?;
+        let PendingPresentationKind::Interpolated {
+            evaluation,
+            provenance,
+        } = &pending.kind
+        else {
+            return None;
+        };
+        Some(PendingPresentationIdentity {
+            ticket: pending.ticket,
+            generation: evaluation.generation,
+            source_revision: evaluation.revision,
+            current_tick: provenance.current_tick,
+        })
+    }
+
+    pub fn has_ready_authored_presentation(&self) -> bool {
+        !self.ready_authored_presentations.is_empty()
+    }
+
+    pub fn has_ready_authored_presentation_for(&self, owner: u64) -> bool {
+        self.ready_authored_presentations.contains_key(&owner)
+    }
+
+    pub fn has_pending_authored_presentation_for(&self, owner: u64) -> bool {
+        self.authored_presentation_waiters.contains(&owner)
+            || matches!(
+                self.pending_presentation.as_ref().map(|pending| &pending.kind),
+                Some(PendingPresentationKind::Authored { owner: pending_owner, .. })
+                    if *pending_owner == owner
+            )
+    }
+
+    /// Called after all authored panes were visited for a UI frame. Hidden or
+    /// closed panes release their mailbox and queue position; their submitted
+    /// native resources remain protected by the renderer's completion owner.
+    /// Owner zero is the compatibility route for callers without pane identity.
+    pub fn retain_authored_presentation_owners(&mut self, visible: &BTreeSet<u64>) {
+        let keep = |owner: &u64| *owner == 0 || visible.contains(owner);
+        if matches!(
+            self.pending_presentation.as_ref().map(|pending| &pending.kind),
+            Some(PendingPresentationKind::Authored { owner, .. }) if !keep(owner)
+        ) {
+            self.discard_pending_presentation();
+        }
+        self.authored_presentation_owners.retain(keep);
+        self.authored_presentation_waiters.retain(keep);
+        self.authored_presentation_requests
+            .retain(|owner, _| keep(owner));
+        self.ready_authored_presentations
+            .retain(|owner, _| keep(owner));
+    }
+
+    /// Metadata of the completed authored frame returned most recently. A newer
+    /// accepted request never changes the camera of the retained pixels.
+    pub fn last_presented_camera(&self) -> Option<Camera> {
+        self.last_presented_camera
+    }
+
+    pub fn last_presented_revision(&self) -> Option<u64> {
+        self.last_presented_revision
+    }
+
+    fn discard_pending_presentation(&mut self) {
+        if let Some(pending) = self.pending_presentation.take()
+            && let Some(renderer) = &mut self.renderer
+        {
+            // Abandon only publication. The renderer retains submitted native
+            // resources through completion, including after wrapper replacement.
+            let _ = renderer.discard_presented(pending.ticket);
+        }
+    }
+
+    fn poll_pending_presentation(&mut self) -> Result<Option<CompletedPresentation>, String> {
+        let Some(pending) = self.pending_presentation.take() else {
+            return Ok(None);
+        };
+        let result = self
+            .renderer
+            .as_mut()
+            .ok_or("Headless host has no renderer")?
+            .poll_presented(pending.ticket);
+        let frame = match result {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                self.pending_presentation = Some(pending);
+                return Ok(None);
+            }
+            Err(error) => {
+                if let Some(renderer) = &mut self.renderer {
+                    let _ = renderer.discard_presented(pending.ticket);
+                }
+                // Accepted one-shots cannot be replayed after an uncertain GPU
+                // error. Only a new request may be attempted on recovery.
+                if let PendingPresentationKind::Authored { owner, .. } = &pending.kind {
+                    self.authored_presentation_requests.remove(owner);
+                }
+                return Err(error);
+            }
+        };
+        self.last_render_ms = pending.started.elapsed().as_secs_f64() * 1000.;
+        Ok(Some(match pending.kind {
+            PendingPresentationKind::Authored { owner, request } => {
+                CompletedPresentation::Authored(owner, frame, request.camera, request.revision)
+            }
+            PendingPresentationKind::Interpolated {
+                evaluation,
+                provenance,
+            } => {
+                let camera = evaluation.camera;
+                let source_revision = evaluation.revision;
+                self.presentation_evaluation = Some(evaluation);
+                CompletedPresentation::Interpolated(RenderedPresentation {
+                    frame: Arc::new(frame),
+                    camera,
+                    source_revision,
+                    provenance,
+                })
+            }
+        }))
+    }
+
+    /// Poll independently of simulation and submission cadence. Discontinuities
+    /// discard the saved envelope before it can acquire a new epoch or revision.
+    pub fn poll_interpolated_presentation(
+        &mut self,
+    ) -> Result<Option<RenderedPresentation>, String> {
+        if !matches!(
+            self.pending_presentation
+                .as_ref()
+                .map(|pending| &pending.kind),
+            Some(PendingPresentationKind::Interpolated { .. })
+        ) {
+            return Ok(None);
+        }
+        match self.poll_pending_presentation()? {
+            Some(CompletedPresentation::Interpolated(rendered)) => Ok(Some(rendered)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Complete hidden authored work without starting another render. Keep its
+    /// output and frozen metadata for the next visible authored render call.
+    /// Buffered output does not count as a pending GPU ticket or require polling.
+    pub fn poll_authored_presentation(&mut self) -> Result<(), String> {
+        if !matches!(
+            self.pending_presentation
+                .as_ref()
+                .map(|pending| &pending.kind),
+            Some(PendingPresentationKind::Authored { .. })
+        ) {
+            return Ok(());
+        }
+        if let Some(CompletedPresentation::Authored(owner, frame, camera, revision)) =
+            self.poll_pending_presentation()?
+        {
+            self.ready_authored_presentations
+                .insert(owner, (frame, camera, revision));
+        }
+        Ok(())
+    }
+
+    /// Native authored/paused viewport route. Busy preserves the pending one-shot
+    /// batch. Accepted requests consume only their submitted prefix. Completion
+    /// retains its submitted camera/revision while current inputs can advance.
+    pub fn render_presented(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> Result<Option<Frame>, String> {
+        self.render_presented_for(0, width, height)
+    }
+
+    /// One stable pane identity owns its pending and completed authored output.
+    /// At most 64 owner registrations (including compatibility owner zero) are
+    /// retained; callers release hidden owners after their complete UI frame.
+    pub fn render_presented_for(
+        &mut self,
+        owner: u64,
+        width: usize,
+        height: usize,
+    ) -> Result<Option<Frame>, String> {
+        if !self.authored_presentation_owners.contains(&owner) {
+            if self.authored_presentation_owners.len() == 64 {
+                return Err("Authored presentation exceeds 64 registered owners".into());
+            }
+            self.authored_presentation_owners.insert(owner);
+        }
+        if matches!(
+            self.pending_presentation
+                .as_ref()
+                .map(|pending| &pending.kind),
+            Some(PendingPresentationKind::Interpolated { .. })
+        ) {
+            self.discard_pending_presentation();
+        }
+        self.poll_authored_presentation()?;
+        let completed = self.ready_authored_presentations.remove(&owner);
+        let result = self.submit_authored_presentation(owner, width, height, completed.is_some());
+        if result.is_err() {
+            // A bad owner's request must not block other live panes in FIFO.
+            self.authored_presentation_waiters
+                .retain(|queued| *queued != owner);
+        }
+        let output = match result {
+            Ok(Some(output)) => Some(output),
+            Ok(None) => completed,
+            // Completion and successor admission are independent operations.
+            // A failure preparing or submitting the successor must still publish
+            // the accepted completed sample. A later attempt reports its error.
+            Err(_) if completed.is_some() => completed,
+            Err(error) => return Err(error),
+        };
+        Ok(output.map(|(frame, camera, revision)| {
+            self.last_presented_camera = Some(camera);
+            self.last_presented_revision = Some(revision);
+            frame
+        }))
+    }
+
+    fn submit_authored_presentation(
+        &mut self,
+        owner: u64,
+        width: usize,
+        height: usize,
+        completed: bool,
+    ) -> Result<Option<(Frame, Camera, u64)>, String> {
+        if self.pending_presentation.is_some() && !completed {
+            if !self.has_pending_authored_presentation_for(owner) {
+                self.authored_presentation_waiters.push_back(owner);
+            }
+            return Ok(None);
+        }
+        let started = Instant::now();
+        let snapshot = self.author_snapshot()?;
+        let controls = self
+            .overrides
+            .lock()
+            .map_err(|_| "Render controls poisoned")?
+            .clone();
+        let overrides =
+            effective_render_controls(&self.document, self.session.state().time, &controls)?;
+        let mut persistent = overrides.clone();
+        persistent.resource_commands.clear();
+        let request = AuthoredPresentationRequest {
+            generation: self.presentation_generation,
+            revision: self.presentation_revision,
+            size: [width, height],
+            camera: self.camera,
+            snapshot: snapshot.clone(),
+            controls: persistent,
+        };
+        if completed
+            && controls.resource_commands.is_empty()
+            && self.authored_presentation_requests.get(&owner) == Some(&request)
+        {
+            self.authored_presentation_waiters
+                .retain(|queued| *queued != owner);
+            return Ok(None);
+        }
+        if self.pending_presentation.is_some() {
+            if !self.has_pending_authored_presentation_for(owner) {
+                self.authored_presentation_waiters.push_back(owner);
+            }
+            return Ok(None);
+        }
+        if !self.authored_presentation_waiters.contains(&owner) {
+            self.authored_presentation_waiters.push_back(owner);
+        }
+        if self.authored_presentation_waiters.front() != Some(&owner) {
+            return Ok(None);
+        }
+        let submission = self
+            .renderer
+            .as_mut()
+            .ok_or("Headless host has no renderer")?
+            .render_presented(&snapshot, self.camera, width, height, &overrides)?;
+        match submission {
+            RenderSubmission::Busy => Ok(None),
+            RenderSubmission::Pending(ticket) => {
+                self.pending_presentation = Some(PendingPresentation {
+                    ticket,
+                    started,
+                    kind: PendingPresentationKind::Authored {
+                        owner,
+                        request: request.clone(),
+                    },
+                });
+                self.authored_presentation_waiters.pop_front();
+                self.authored_presentation_requests.insert(owner, request);
+                self.consume_render_batch(controls.resource_commands.len())?;
+                Ok(None)
+            }
+            RenderSubmission::Ready(frame) => {
+                self.consume_render_batch(controls.resource_commands.len())?;
+                self.last_render_ms = started.elapsed().as_secs_f64() * 1000.;
+                let camera = request.camera;
+                let revision = request.revision;
+                self.authored_presentation_waiters.pop_front();
+                self.authored_presentation_requests.insert(owner, request);
+                Ok(Some((frame, camera, revision)))
+            }
+        }
+    }
+    fn consume_render_batch(&mut self, count: usize) -> Result<(), String> {
+        let mut controls = self
+            .overrides
+            .lock()
+            .map_err(|_| "Render controls poisoned")?;
+        // Only the submitted prefix is consumed, never a later accepted batch.
+        let count = count.min(controls.resource_commands.len());
+        controls.resource_commands.drain(..count);
+        Ok(())
+    }
+    /// Render a one-fixed-tick-delayed pose without stepping gameplay, Custom,
+    /// audio or input. A new committed tick/configuration keeps the historical
+    /// one-render entitlement. Additional presentations require changed evaluated
+    /// models/camera, not alpha or visual time alone. None retains the caller's
+    /// entire previous successful frame/provenance/completion tuple.
+    pub fn try_render_interpolated(
+        &mut self,
+        width: usize,
+        height: usize,
+        alpha: f64,
+    ) -> Result<Option<RenderedPresentation>, String> {
+        if !alpha.is_finite() {
+            return Err("Presentation alpha must be finite".into());
+        }
+        if self.renderer.is_none() {
+            return Err("Headless host has no renderer".into());
+        }
+        let observed = PresentationSample::capture(self);
+        if self.presentation_current.as_ref() != Some(&observed) {
+            // Also catches direct same-tick session.apply_commands, public session
+            // restart/transition, and external authoring not routed through Host.
+            self.reset_presentation_history();
+            self.presentation_current = Some(observed);
+        }
+        if matches!(
+            self.pending_presentation
+                .as_ref()
+                .map(|pending| &pending.kind),
+            Some(PendingPresentationKind::Authored { .. })
+        ) {
+            self.discard_pending_presentation();
+        }
+        if let Some(rendered) = self.poll_interpolated_presentation()? {
+            return Ok(Some(rendered));
+        }
+        if self.pending_presentation.is_some() {
+            return Ok(None);
+        }
+        let current = self.presentation_current.as_ref().unwrap();
+        let previous = self
+            .presentation_previous
+            .as_ref()
+            .filter(|_| !current.identities.is_empty())
+            .unwrap_or(current);
+        let mut alpha = if previous.tick == current.tick {
+            1.
+        } else {
+            alpha.clamp(0., 1.)
+        };
+        let mut raw = interpolate_scene_models(
+            &previous.snapshot,
+            &current.snapshot,
+            &previous.identities,
+            &current.identities,
+            alpha,
+        );
+        let mut camera = self.camera;
+        // The neutral follow callback supplies a point, not the followed entity's
+        // identity. Any birth/death/reparent/lifetime change therefore snaps the
+        // camera conservatively; per-object geometry can still interpolate safely.
+        if let (Some(a), Some(b)) = (previous.target, current.target)
+            && self.camera.target == b
+            && !current.identities.is_empty()
+            && previous.identities == current.identities
+        {
+            camera.target = std::array::from_fn(|i| a[i] + alpha as f32 * (b[i] - a[i]));
+        }
+        let current_models = current
+            .snapshot
+            .items
+            .iter()
+            .map(|item| (item.id, item.model));
+        let snapped = alpha < 1.
+            && camera == self.camera
+            && raw
+                .items
+                .iter()
+                .map(|item| (item.id, item.model))
+                .eq(current_models)
+            && previous
+                .snapshot
+                .items
+                .iter()
+                .map(|item| (item.id, item.model))
+                .ne(current
+                    .snapshot
+                    .items
+                    .iter()
+                    .map(|item| (item.id, item.model)));
+        if snapped {
+            alpha = 1.;
+        }
+        let visual_time = previous.time + alpha * (current.time - previous.time);
+        raw.time = visual_time as f32;
+        let models = raw
+            .items
+            .iter()
+            .map(|item| (item.id, item.model))
+            .collect::<Vec<_>>();
+        let controls = self
+            .overrides
+            .lock()
+            .map_err(|_| "Render controls poisoned")?
+            .clone();
+        let batch_len = controls.resource_commands.len();
+        // Authored project control evaluation retains its committed simulation
+        // clock. Visual time alone cannot create extra presentation eligibility.
+        let mut persistent =
+            effective_render_controls(&self.document, self.session.state().time, &controls)?;
+        let actual_controls = persistent.clone();
+        persistent.resource_commands.clear();
+        let origin = match &self.presentation_evaluation {
+            None => PresentationOrigin::Invalidated,
+            Some(old)
+                if old.generation != self.presentation_generation
+                    || (old.revision != self.presentation_revision && old.tick == current.tick)
+                    || old.size != [width, height]
+                    || old.source_camera != self.camera
+                    || old.controls != persistent =>
+            {
+                PresentationOrigin::Invalidated
+            }
+            Some(old) if old.tick != current.tick => PresentationOrigin::CommittedState,
+            Some(_) if batch_len > 0 => PresentationOrigin::Invalidated,
+            Some(old) if old.models != models || old.camera != camera => {
+                PresentationOrigin::InterpolatedPose
+            }
+            Some(_) => return Ok(None),
+        };
+        let provenance = PresentationProvenance {
+            generation: self.presentation_generation,
+            previous_tick: if snapped { current.tick } else { previous.tick },
+            current_tick: current.tick,
+            previous_time: if snapped { current.time } else { previous.time },
+            current_time: current.time,
+            alpha,
+            visual_time,
+            origin,
+        };
+        let evaluation = PresentationEvaluation {
+            generation: self.presentation_generation,
+            tick: current.tick,
+            revision: self.presentation_revision,
+            size: [width, height],
+            source_camera: self.camera,
+            camera,
+            models,
+            controls: persistent,
+        };
+        let started = Instant::now();
+        let snapshot = self.enrich_presentation(raw)?;
+        let submission = self.renderer.as_mut().unwrap().render_presented(
+            &snapshot,
+            camera,
+            width,
+            height,
+            &actual_controls,
+        )?;
+        match submission {
+            RenderSubmission::Busy => Ok(None),
+            RenderSubmission::Pending(ticket) => {
+                self.pending_presentation = Some(PendingPresentation {
+                    ticket,
+                    started,
+                    kind: PendingPresentationKind::Interpolated {
+                        evaluation,
+                        provenance,
+                    },
+                });
+                self.consume_render_batch(batch_len)?;
+                Ok(None)
+            }
+            RenderSubmission::Ready(frame) => {
+                self.consume_render_batch(batch_len)?;
+                self.last_render_ms = started.elapsed().as_secs_f64() * 1000.;
+                let source_revision = evaluation.revision;
+                self.presentation_evaluation = Some(evaluation);
+                Ok(Some(RenderedPresentation {
+                    frame: Arc::new(frame),
+                    camera,
+                    source_revision,
+                    provenance,
+                }))
+            }
+        }
     }
     pub fn apply_candidate(
         &mut self,
@@ -1236,6 +1974,7 @@ impl GameHost {
         for (slot, replacement) in replacements {
             *slot.lock().map_err(|_| "Custom slot poisoned")? = replacement;
         }
+        self.reset_presentation_history();
         Ok(())
     }
     pub fn apply_candidate_migrated(
@@ -1263,6 +2002,7 @@ impl GameHost {
         for (slot, replacement) in replacements {
             *slot.lock().map_err(|_| "Custom slot poisoned")? = replacement;
         }
+        self.reset_presentation_history();
         Ok(())
     }
     pub fn has_renderer(&self) -> bool {
@@ -1343,10 +2083,12 @@ impl GameHost {
                 } else {
                     None
                 };
-                Ok(Some(match candidate {
+                let mut candidate = match candidate {
                     Some(candidate) => candidate,
                     None => modules.create_renderer(node, document)?,
-                }))
+                };
+                candidate.set_presentation_target(self.presentation_target.clone())?;
+                Ok(Some(candidate))
             } else {
                 Ok(None)
             }
@@ -1504,7 +2246,7 @@ impl GameHost {
             retire_in_background(result);
             return Ok(());
         }
-        let candidate = result.and_then(|candidate| {
+        let candidate = result.and_then(|mut candidate| {
             let validation = (|| {
                 let current = self
                     .overrides
@@ -1523,6 +2265,7 @@ impl GameHost {
                     &controls,
                     self.session.state().time,
                 )?;
+                candidate.set_presentation_target(self.presentation_target.clone())?;
                 self.accept_render_document(document, controls)
             })();
             if let Err(error) = validation {
@@ -1572,6 +2315,9 @@ impl GameHost {
         *live = document.clone();
         *overrides = controls;
         self.presentation_revision = next_presentation_revision();
+        drop(overrides);
+        drop(live);
+        self.reset_presentation_history();
         Ok(())
     }
     fn accept_document(&mut self, document: &GraphDocument) -> Result<(), String> {
@@ -1582,5 +2328,11 @@ impl GameHost {
         self.document = document.clone();
         *live = document.clone();
         Ok(())
+    }
+}
+
+impl Drop for GameHost {
+    fn drop(&mut self) {
+        self.discard_pending_presentation();
     }
 }

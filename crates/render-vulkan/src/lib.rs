@@ -4,6 +4,8 @@ mod adapter;
 mod compiler;
 mod geometry;
 mod graph;
+pub mod presentation;
+mod retirement;
 mod vulkan;
 pub use adapter::{VulkanAdapter, install};
 pub use compiler::shader_dependency_revision_at;
@@ -19,4 +21,5 @@ pub use graph::{
 };
 pub use graph::{custom_fullscreen_manifest, demo_custom_fullscreen_source};
 pub use module_engine_core::RendererPerformance;
+pub use retirement::{ProducerRetirementReport, finish_producer_retirements};
 pub use vulkan::{RenderGraphValidator, VulkanRenderer, validate_overrides, validate_overrides_at};

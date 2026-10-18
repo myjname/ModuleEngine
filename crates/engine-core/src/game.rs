@@ -39,6 +39,11 @@ pub struct GameEvent {
     pub payload: Value,
 }
 impl GameEvent {
+    /// Request a presentation snap after this tick commits, for example after a
+    /// teleport. Does not change simulation, scene identity or the event wire format.
+    pub fn presentation_reset() -> Self {
+        Self::new(crate::PRESENTATION_RESET_EVENT, Value::Null)
+    }
     pub fn new(name: impl Into<String>, payload: Value) -> Self {
         Self {
             name: name.into(),
