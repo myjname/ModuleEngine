@@ -33,10 +33,14 @@ pub fn migrate_copy(
 ) -> Result<(SavedProject, module_engine_project::MigrationReport), String> {
     let source = absolute_path(source_path)?;
     let destination = absolute_path(destination_path)?;
-    if source
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&destination.to_string_lossy())
-    {
+    let same_source = if cfg!(windows) {
+        source
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&destination.to_string_lossy())
+    } else {
+        source == destination
+    };
+    if same_source {
         return Err(
             "Migration writes a separate copy; source filename cannot be its destination".into(),
         );
@@ -1323,6 +1327,92 @@ mod tests {
                 b"legacy author file"
             );
         }
+        cleanup(&root);
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn migration_copy_accepts_case_distinct_filename_and_preserves_legacy_source() {
+        let root = fixture();
+        let source = root.join("legacy");
+        fs::create_dir_all(source.join("assets/unassigned")).unwrap();
+        let resource = source.join("assets/unassigned/notes.bin");
+        let resource_bytes = b"legacy author resource\0\xff";
+        fs::write(&resource, resource_bytes).unwrap();
+        let mut document = crate::game_templates::puzzle_document();
+        let capability = distribution(&document, DistributionProfile::Full);
+        document.schema_version = 3;
+        document.engine_lock = None;
+        document.engine_profile = None;
+        document.legacy_archive.clear();
+        let opaque = serde_json::json!({"literal.key":null,"nested":[false,{"0":"opaque"}]});
+        document
+            .properties
+            .inactive
+            .global
+            .insert("future.global".into(), opaque.clone());
+        let mut value = serde_json::to_value(&document).unwrap();
+        value["unknown_source_record"] = opaque.clone();
+        let mut original = vec![0xef, 0xbb, 0xbf];
+        original.extend(serde_json::to_vec_pretty(&value).unwrap());
+        original.extend(b"\r\n");
+        let json = source.join("project.json");
+        fs::write(&json, &original).unwrap();
+        let binding = project_binding_path(&json).unwrap();
+        let original_binding = serde_json::to_vec_pretty(
+            &ProjectEngineBinding::from_distribution(&capability).unwrap(),
+        )
+        .unwrap();
+        fs::write(&binding, &original_binding).unwrap();
+        let case_distinct = source.join("PROJECT.json");
+        assert!(
+            !case_distinct.exists(),
+            "Case-distinct migration requires a case-sensitive fixture filesystem"
+        );
+        let assert_source_preserved = || {
+            assert_eq!(fs::read(&json).unwrap(), original);
+            assert_eq!(fs::read(&binding).unwrap(), original_binding);
+            assert_eq!(fs::read(&resource).unwrap(), resource_bytes);
+        };
+
+        let kind = crate::engine_profiles::ProfileKind::Puzzle;
+        let (control, _) = migrate_copy(&json, &source.join("migrated.json"), kind).unwrap();
+        assert_eq!(
+            crate::project::read(&control.path).unwrap(),
+            control.document
+        );
+        assert_eq!(
+            control.document.legacy_archive["/unknown_source_record"],
+            opaque
+        );
+        assert_source_preserved();
+        let same_file = migrate_copy(&json, &json, kind).unwrap_err();
+        assert!(same_file.contains("source filename cannot be its destination"));
+        assert_source_preserved();
+
+        let result = migrate_copy(&json, &case_distinct, kind);
+        assert_source_preserved();
+        let (migrated, report) = result
+            .expect("A distinct case-sensitive filename must be accepted as a migration copy");
+        assert_eq!(migrated.path, case_distinct);
+        assert_eq!(report.source_schema, 3);
+        assert_eq!(
+            report.source_sha256,
+            module_engine_project::hash_bytes(&original)
+        );
+        assert_eq!(
+            crate::project::read(&migrated.path).unwrap(),
+            migrated.document
+        );
+        assert_eq!(migrated.document, control.document);
+        assert_eq!(
+            migrated.document.properties.inactive.global["future.global"],
+            opaque
+        );
+        assert_eq!(
+            fs::read(project_binding_path(&migrated.path).unwrap()).unwrap(),
+            original_binding
+        );
+        assert_source_preserved();
         cleanup(&root);
     }
     #[test]

@@ -1,6 +1,6 @@
 use crate::{SceneSnapshot, transform_point};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{any::Any, collections::BTreeSet, sync::Arc};
 
 /// Orbit camera in radians. The renderer sanitizes nonfinite values and clamps
 /// pitch and distance to keep the camera basis well-defined.
@@ -40,13 +40,48 @@ pub struct RenderStats {
     pub shaded_pixels: usize,
 }
 
-/// RGBA8 output ready for a native GUI texture or a PNG encoder.
+/// An API-specific, immutable GPU frame lease. The implementation retains its
+/// native allocations until both CPU ownership and actual consumer GPU work end.
+/// Core never interprets native handles or depends on a graphics/window API.
+pub trait GpuFrame: std::fmt::Debug + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// A native presentation endpoint supplied explicitly by the window composition.
+/// Rendering modules discover their own typed endpoint through this boundary.
+pub trait PresentationTarget: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Rendered output. Explicit CPU rendering provides RGBA8; native presentation
+/// may instead provide a GPU lease with an empty `rgba`. These are alternatives,
+/// never an implicit request to read GPU pixels back on the window thread.
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
+    pub gpu: Option<Arc<dyn GpuFrame>>,
     pub stats: RenderStats,
+}
+
+impl Frame {
+    /// A frame has exactly one complete representation, never partial CPU data.
+    pub fn is_valid(&self) -> bool {
+        let Some(bytes) = self
+            .width
+            .checked_mul(self.height)
+            .and_then(|p| p.checked_mul(4))
+        else {
+            return false;
+        };
+        self.width > 0
+            && self.height > 0
+            && match &self.gpu {
+                Some(_) => self.rgba.is_empty(),
+                None => self.rgba.len() == bytes,
+            }
+    }
 }
 
 const NEAR: f32 = 0.08;
@@ -67,6 +102,7 @@ pub fn render_scene(scene: &SceneSnapshot, width: usize, height: usize, camera: 
         width,
         height,
         rgba: BACKGROUND.repeat(pixels),
+        gpu: None,
         stats: RenderStats {
             objects: scene.items.len(),
             ..RenderStats::default()
@@ -162,6 +198,7 @@ fn empty_frame() -> Frame {
         width: 0,
         height: 0,
         rgba: vec![],
+        gpu: None,
         stats: RenderStats::default(),
     }
 }

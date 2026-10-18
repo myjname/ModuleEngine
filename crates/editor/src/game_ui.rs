@@ -163,6 +163,10 @@ pub struct GameWorkbench {
     pub selected: Option<u64>,
     pub input: GameInput,
     texture: Option<egui::TextureHandle>,
+    gpu_texture: module_engine_player::gpu_presentation::GpuTexture,
+    gpu_bridge: Option<Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>>,
+    displayed_camera: Option<Camera>,
+    visible_scene_owners: BTreeSet<u64>,
     pub error: Option<String>,
     render_error: Option<String>,
     field_key: Option<(String, u64)>,
@@ -243,6 +247,10 @@ impl Default for GameWorkbench {
             selected: Some(1),
             input: GameInput::default(),
             texture: None,
+            gpu_texture: Default::default(),
+            gpu_bridge: None,
+            displayed_camera: None,
+            visible_scene_owners: BTreeSet::new(),
             error: None,
             render_error: None,
             field_key: None,
@@ -334,6 +342,30 @@ impl Drop for GameWorkbench {
     }
 }
 impl GameWorkbench {
+    pub fn poll_gpu_presentation(&mut self) -> Result<(), String> {
+        for host in [&mut self.host, &mut self.preview_host]
+            .into_iter()
+            .flatten()
+        {
+            host.poll_authored_presentation()?;
+        }
+        if let Some(bridge) = &self.gpu_bridge {
+            self.gpu_texture.poll(bridge)?;
+        }
+        Ok(())
+    }
+    pub fn has_pending_gpu_presentation(&self) -> bool {
+        [&self.host, &self.preview_host]
+            .into_iter()
+            .flatten()
+            .any(GameHost::has_pending_presentation)
+    }
+    pub fn set_gpu_presentation(
+        &mut self,
+        bridge: Option<Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>>,
+    ) {
+        self.gpu_bridge = bridge;
+    }
     fn cancel_pending_custom(&mut self) {
         self.pending_job.take();
         if let Some(pending) = self.pending.take() {
@@ -399,8 +431,9 @@ impl GameWorkbench {
                 kind: host.session.world_kind(),
             });
         }
-        self.worker = Some(GameWorker::spawn(
+        self.worker = Some(GameWorker::spawn_with_presentation_target(
             host,
+            self.gpu_bridge.as_ref().map(|bridge| bridge.target()),
             self.repaint.clone().map(|ctx| {
                 std::sync::Arc::new(move || ctx.request_repaint())
                     as std::sync::Arc<dyn Fn() + Send + Sync>
@@ -430,8 +463,18 @@ impl GameWorkbench {
     }
     pub fn begin_ui_frame(&mut self) {
         self.worker_view_visible = false;
+        self.visible_scene_owners.clear();
+    }
+    pub fn mark_scene_view_visible(&mut self, owner: u64) {
+        self.visible_scene_owners.insert(owner);
     }
     pub fn finish_ui_frame(&mut self) {
+        for host in [&mut self.host, &mut self.preview_host]
+            .into_iter()
+            .flatten()
+        {
+            host.retain_authored_presentation_owners(&self.visible_scene_owners);
+        }
         if self.worker.is_some()
             && !self.worker_view_visible
             && self.worker_viewport != Some([0, 0])
@@ -947,6 +990,7 @@ impl GameWorkbench {
         let worker_progress = progress.clone();
         let programs = self.programs.clone();
         let dependencies = game_host::ShaderDependencyWatch::new(document, &context.backend_root);
+        let presentation_target = self.gpu_bridge.as_ref().map(|bridge| bridge.target());
         let (receiver, job) = module_engine_script::spawn_job(move |cancelled| {
             crate::game_host::new_at_with_controls(
                 worker_document,
@@ -960,9 +1004,11 @@ impl GameWorkbench {
                     programs,
                 },
             )
-            .map(|mut host| {
+            .and_then(|mut host| {
+                worker_progress.stage("Подготовка GPU-представления окна");
+                host.set_presentation_target(presentation_target)?;
                 host.services.set_enabled(false);
-                host
+                Ok(host)
             })
         });
         *slot = Some(HostPreparation {
@@ -1259,6 +1305,8 @@ impl GameWorkbench {
         self.game_document = None;
         self.input = GameInput::default();
         self.texture = None;
+        self.gpu_texture = Default::default();
+        self.displayed_camera = None;
         self.game_frame = GameFrameCache::default();
         update_render_diagnostic(&mut self.error, &mut self.render_error, Ok(()));
         self.play_session = false;
@@ -1639,6 +1687,8 @@ impl GameWorkbench {
             host.invalidate_content();
         }
         self.texture = None;
+        self.gpu_texture = Default::default();
+        self.displayed_camera = None;
         self.game_frame = GameFrameCache::default();
         self.field_key = None;
     }
@@ -1763,7 +1813,7 @@ impl GameWorkbench {
                     ui,
                     &response,
                     rect,
-                    host.camera,
+                    self.displayed_camera.unwrap_or(host.camera),
                     true,
                 )
             } else {
@@ -1797,19 +1847,58 @@ impl GameWorkbench {
                     time: host.session.state().time,
                 };
                 let now = ui.input(|input| input.time);
-                if self
-                    .game_frame
-                    .should_render(key, ui.ctx().cumulative_frame_nr(), now, *playing)
+                if host.has_pending_presentation()
+                    || host.has_ready_authored_presentation()
+                    || self.game_frame.should_render(
+                        key,
+                        ui.ctx().cumulative_frame_nr(),
+                        now,
+                        *playing,
+                    )
                 {
                     self.performance.game_render_calls += 1;
-                    match host.render(width, height) {
-                        Ok(frame) => {
-                            player::update_texture(ui, &mut self.texture, &frame);
-                            update_render_diagnostic(
-                                &mut self.error,
-                                &mut self.render_error,
-                                Ok(()),
-                            );
+                    let rendered = host.render_presented(width, height);
+                    match rendered {
+                        Ok(Some(frame)) => {
+                            match player::update_presented_texture(
+                                ui,
+                                &mut self.texture,
+                                &mut self.gpu_texture,
+                                self.gpu_bridge.as_deref(),
+                                &frame,
+                            ) {
+                                Ok(true) => {
+                                    self.displayed_camera = host.last_presented_camera();
+                                    self.game_frame.key = Some(GameFrameKey {
+                                        camera: host.last_presented_camera().unwrap_or(key.camera),
+                                        revision: host
+                                            .last_presented_revision()
+                                            .unwrap_or(key.revision),
+                                        ..key
+                                    });
+                                    if host.has_pending_presentation() {
+                                        ui.ctx().request_repaint();
+                                    }
+                                    update_render_diagnostic(
+                                        &mut self.error,
+                                        &mut self.render_error,
+                                        Ok(()),
+                                    );
+                                }
+                                Ok(false) => {
+                                    self.game_frame = GameFrameCache::default();
+                                    ui.ctx().request_repaint_after(Duration::from_millis(1));
+                                }
+                                Err(error) => update_render_diagnostic(
+                                    &mut self.error,
+                                    &mut self.render_error,
+                                    Err(error),
+                                ),
+                            }
+                        }
+                        Ok(None) => {
+                            self.game_frame = GameFrameCache::default();
+                            ui.ctx().request_repaint_after(Duration::from_millis(1));
                         }
                         Err(error) => update_render_diagnostic(
                             &mut self.error,
@@ -1827,9 +1916,11 @@ impl GameWorkbench {
                 } else {
                     Duration::from_millis(250)
                 });
-                if let Some(texture) = &self.texture {
+                if let Some(texture) =
+                    player::presentation_texture_id(&self.texture, &self.gpu_texture)
+                {
                     ui.painter().image(
-                        texture.id(),
+                        texture,
                         rect,
                         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1., 1.)),
                         Color32::WHITE,
@@ -1840,7 +1931,7 @@ impl GameWorkbench {
                     ui,
                     rect,
                     host.session.state(),
-                    host.camera,
+                    self.displayed_camera.unwrap_or(host.camera),
                     aim,
                 ) {
                     let _ = self.restart_game();
@@ -1868,7 +1959,7 @@ impl GameWorkbench {
                 ui,
                 &response,
                 rect,
-                snapshot.camera,
+                self.displayed_camera.unwrap_or(snapshot.camera),
                 true,
             )
         } else {
@@ -1911,16 +2002,33 @@ impl GameWorkbench {
                 .as_ref()
                 .is_none_or(|previous| !Arc::ptr_eq(previous, frame))
             {
-                player::update_texture(ui, &mut self.texture, frame);
-                self.worker_frame = Some(frame.clone());
-                self.performance.game_render_calls += 1;
+                match player::update_presented_texture(
+                    ui,
+                    &mut self.texture,
+                    &mut self.gpu_texture,
+                    self.gpu_bridge.as_deref(),
+                    frame,
+                ) {
+                    Ok(true) => {
+                        self.worker_frame = Some(frame.clone());
+                        self.displayed_camera = Some(snapshot.camera);
+                        self.performance.game_render_calls += 1;
+                        update_render_diagnostic(&mut self.error, &mut self.render_error, Ok(()));
+                    }
+                    Ok(false) => ui.ctx().request_repaint(),
+                    Err(error) => update_render_diagnostic(
+                        &mut self.error,
+                        &mut self.render_error,
+                        Err(error),
+                    ),
+                }
             } else {
                 self.performance.game_frame_reuses += 1;
             }
         }
-        if let Some(texture) = &self.texture {
+        if let Some(texture) = player::presentation_texture_id(&self.texture, &self.gpu_texture) {
             ui.painter().image(
-                texture.id(),
+                texture,
                 rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1., 1.)),
                 Color32::WHITE,
@@ -1939,7 +2047,7 @@ impl GameWorkbench {
             ui,
             rect,
             &snapshot.state,
-            snapshot.camera,
+            self.displayed_camera.unwrap_or(snapshot.camera),
             aim,
         ) {
             let _ = self.restart_game();
@@ -2889,6 +2997,8 @@ if ui.button("+ Resource").clicked(){let name=unique_name("resource",draft.resou
                 self.preview_document = Some(runtime_document);
                 self.host = None;
                 self.texture = None;
+                self.gpu_texture = Default::default();
+                self.displayed_camera = None;
                 self.graph_draft = None;
                 self.graph_text_dirty = false;
                 self.field_key = None;

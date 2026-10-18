@@ -6,7 +6,13 @@ use std::{
 fn main() {
     let result = run();
     let cleanup = module_engine_host::game_worker::finish_after_ui();
-    if let Err(error) = result.and(cleanup) {
+    #[cfg(feature = "ui")]
+    let gpu_cleanup = module_engine_player::gpu_presentation::finish_gpu_retirements()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    #[cfg(not(feature = "ui"))]
+    let gpu_cleanup = Ok(());
+    if let Err(error) = result.and(cleanup).and(gpu_cleanup) {
         eprintln!("ModuleEngine Player: {error}");
         std::process::exit(1);
     }
@@ -53,9 +59,10 @@ fn run() -> Result<(), String> {
 }
 #[cfg(feature = "ui")]
 fn play(root: &Path) -> Result<(), String> {
-    module_engine_player::run_host(module_engine_player::package::build_package_host(
-        root, false, true,
-    )?)
+    let host = module_engine_player::ui::prepare_host(|| {
+        module_engine_player::package::build_package_host(root, false, true)
+    })?;
+    module_engine_player::run_host(host)
 }
 #[cfg(not(feature = "ui"))]
 fn play(_: &Path) -> Result<(), String> {
@@ -63,10 +70,10 @@ fn play(_: &Path) -> Result<(), String> {
 }
 #[cfg(feature = "ui")]
 fn benchmark(root: &Path, output: &Path) -> Result<(), String> {
-    module_engine_player::run_benchmark_host(
-        module_engine_player::package::build_package_host(root, false, true)?,
-        output,
-    )
+    let host = module_engine_player::ui::prepare_host(|| {
+        module_engine_player::package::build_package_host(root, false, true)
+    })?;
+    module_engine_player::run_benchmark_host(host, output)
 }
 #[cfg(not(feature = "ui"))]
 fn benchmark(_: &Path, _: &Path) -> Result<(), String> {

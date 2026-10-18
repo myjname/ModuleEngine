@@ -3,7 +3,7 @@
 use super::{Editor, GraphDocument, WorldKind, egui};
 use crate::{
     game_ui,
-    scene_view_ui::{SceneAction, SceneViewportState},
+    scene_view_ui::{PresentedSceneFrame, SceneAction, SceneViewportState},
 };
 use module_engine_core::{AuthoredObject, Transform, WorldObject};
 use module_engine_project::AssetManifest;
@@ -136,10 +136,12 @@ impl Editor {
         }
     }
     pub(super) fn scene_panel(&mut self, ui: &mut egui::Ui, view: &mut SceneViewportState) {
+        let owner = view.presentation_owner();
         if self.document.game.is_none() {
             ui.label("Create or open a game project through File.");
             return;
         }
+        self.game_workbench.mark_scene_view_visible(owner);
         let (root, compile, kind) = self.game_context();
         if let Err(error) =
             self.game_workbench
@@ -179,6 +181,13 @@ impl Editor {
             .session
             .world_objects();
         let selection = self.scene_selection().map(|(_, id)| id);
+        view.set_render_revision(
+            self.game_workbench
+                .preview_host
+                .as_ref()
+                .unwrap()
+                .presentation_revision(),
+        );
         let actions = view.interact(
             ui,
             &objects,
@@ -211,14 +220,26 @@ impl Editor {
                 objects = host.session.world_objects();
             }
             view.set_render_revision(host.presentation_revision());
-            view.paint(
+            view.set_gpu_presentation(self.gpu_bridge.clone());
+            if host.has_pending_authored_presentation_for(owner)
+                || host.has_ready_authored_presentation_for(owner)
+            {
+                view.request_presentation_refresh();
+            }
+            view.paint_presented(
                 ui,
                 &objects,
                 &snapshot,
                 selected,
                 &mut |camera, width, height| {
                     host.camera = camera;
-                    host.render(width, height)
+                    let frame = host.render_presented_for(owner, width, height)?;
+                    Ok(frame.map(|frame| PresentedSceneFrame {
+                        frame,
+                        camera: host.last_presented_camera().unwrap_or(camera),
+                        revision: host.last_presented_revision(),
+                        pending: host.has_pending_authored_presentation_for(owner),
+                    }))
                 },
             );
         }

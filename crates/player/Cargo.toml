@@ -9,7 +9,7 @@ default = []
 ui = ["dep:eframe", "dep:winit", "module-engine-arpg?/ui", "module-engine-project-puzzle?/ui"]
 arpg = ["dep:module-engine-arpg"]
 puzzle = ["dep:module-engine-project-puzzle"]
-vulkan = ["dep:module-engine-vulkan"]
+vulkan = ["dep:module-engine-vulkan", "dep:ash", "dep:windows"]
 audio = ["module-engine-host-services/audio"]
 
 [dependencies]
@@ -26,8 +26,16 @@ serde_json.workspace = true
 png.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ash = { version = "0.38", optional = true }
 eframe = { workspace = true, optional = true, features = ["wayland", "x11"] }
 winit = { version = "0.30.13", default-features = false, features = ["wayland", "wayland-dlopen", "x11"], optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", default-features = false, optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common", "Win32_Security"] }
+
 [dev-dependencies]
 module-engine-two-arenas = { path = "../example-two-arenas" }
+
+[[example]]
+name = "gpu_presentation_check"
+required-features = ["ui", "vulkan"]

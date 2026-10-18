@@ -1406,6 +1406,7 @@ dependencies = [
  "module-engine-script",
  "module-engine-two-arenas",
  "module-engine-vulkan",
+ "serde",
  "serde_json",
 ]
 
@@ -1423,6 +1424,7 @@ dependencies = [
 name = "module-engine-player"
 version = "0.4.0"
 dependencies = [
+ "ash",
  "eframe",
  "module-engine-arpg",
  "module-engine-core",
@@ -1435,6 +1437,7 @@ dependencies = [
  "png",
  "serde",
  "serde_json",
+ "windows",
  "winit",
 ]
 

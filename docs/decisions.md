@@ -26,7 +26,7 @@ This log separates the accepted product scope from selected implementation detai
 
 ## Selected Implementation Details
 
-- The game renderer runs offscreen with synchronous readback; egui presents its frames through WGPU/DX12 on Windows and WGPU/Vulkan on Linux. Version 0.4 uses persistent buffers/images and cached readback memory; a game-renderer swapchain and frames in flight remain separate work. Renderer, GameHost, and the real window loop are measured separately.
+- Native Vulkan presentation uses opaque Core GPU leases and explicit application-supplied targets to remove the GPU→CPU→GPU pixel roundtrip while keeping Host/Core independent of native APIs. Windows uses shared D3D12 resources with WGPU/DX12; Linux uses dedicated OPAQUE_FD memory with WGPU/Vulkan and exact device/driver UUIDs. Four producer leases and actual consumer GPU completion bound reuse. Normal native presentation admits one `RenderSubmission::Pending(ticket)` at a time, polls that exact request without waiting, and reports `Busy` without accepting work; `Ready(Frame)` supports immediate CPU/software output. Completed pixels retain their submitted metadata. Pending work, cancellation and background retirement preserve native resource ownership until real GPU completion. Interop failures preserve the last image and report an error without implicit readback fallback. Explicit CPU/software/diagnostic rendering and its synchronous readback remain available; conflicting CPU rendering is rejected while native work is pending. Cancellation drops publication without waiting; renderer destruction transfers unfinished work to an owned background retirement job with a bounded fence wait and explicit failed/unconfirmed reporting. A game-renderer swapchain and several simultaneous producer submissions remain separate work. The [async GPU stage](gpu-async-20261018.md) requires its own final source-bound evidence and independent conclusion; no acceptance follows from this decision alone. [Historical source-bound results](gpu-presentation-20261018.md) record Windows source15 21 cases/16 exact-image checks, Host 64 ordinary/one ignored, selected 18-file Player export/relocation and all 12 normal A/B processes passing unchanged gates with preserved data. Linux 21/16interop evidence remains separately bound to source11/WSL llvmpipe; it is not a current15Linux build or hardware certification. Source11 strict p95/shutdown failures remain historical failures. Small current samples confirm the agreed normal criteria, not uniform improvement, statistical non-inferiority or all-frame maximum latency. Cold ≤45 s remains OPEN; final source/documentation binding and independent conclusion are recorded separately in the report. The small observed-collision/reset-only phase policy is defined in [GameWorker](game-worker.md); diagnostic14 is not production-fixture acceptance.
 - Rust compiles into a worker executable and exchanges owned JSON packets without a Rust DLL ABI. In 0.2/0.3, a worker was created on every tick. In 0.4, the process is persistent, state is explicitly declared and owned by the host; a timeout stops the worker, and the next tick restores the last accepted state. This does not isolate OS access or promise migration of globals.
 - The root Cargo.lock is authoritative for worker dependencies as well. The generated worker build checks package versions and sources before an offline --locked build; its own package has the technical version 0.0.0.
 - Tools are pinned in toolchain-manifest.json: Rust 1.99.0, DXC 1.9.2609.5. Doctor does not modify the system; explicit Restore installs tools into the project directory and verifies DXC hashes.
@@ -86,3 +86,34 @@ Historical 0.3 boundary: the inactive archive was preserved by Full/local histor
 | Documentation accompanies changes. | API/contracts, the purpose of each module, data, actual editor actions, checks, and boundaries are described in docs. |
 
 Working assumption: long-term game saves are outside this stage. Linux, seamless streaming, networking, temporal AA, and physical exclusion of unused native code remain future tasks. The glTF/GLB and PNG/JPEG assumption was chosen for implementation; the user did not specify particular formats individually. [next-stage.md](next-stage.md) connects the decisions to the implemented subsystems.
+
+## Accepted long-term portfolio goal — 17 October 2026
+
+| User decision | Consequence |
+| --- | --- |
+| Develop 5–10 distinct finished games to demonstrate engine configurability. | Use several playable projects as the product-level proof of reuse; existing technical examples do not automatically satisfy finished-game acceptance. |
+| Cover 2D, 2.5D and 3D, pixel art, polygonal, realistic and simple mobile-style graphics, with different genres and mechanics. | Track visual, spatial and gameplay coverage explicitly; variants of one example are insufficient. |
+| Mobile-style currently concerns the game, mechanics and graphics on PC. | Mobile ports are future work, with their OS targets still to be chosen; this portfolio does not require current device ports and does not claim phone support. |
+| Fix the current problems before starting development of the portfolio games. | P0 includes audit, repair of all confirmed defects and measured performance problems in existing features, and final rechecks. P1 implementation starts after P0 passes; unchanged ARPG/cold-start criteria and required checks cannot remain failed or unverified. Missing future subsystems stay in later phases. |
+
+The [portfolio roadmap](portfolio-roadmap.md) proposes a minimum five-game matrix,
+up to five additional candidates, capability dependencies and common acceptance
+gates. Those exact genres, game briefs, order and budgets are planning proposals,
+not additional user selections. The finite portfolio demonstrates the named
+cases, not universal suitability for every possible project. Each implementation
+increment still needs a bounded goal and checks; this decision does not reopen all
+future subsystems in unrelated tasks or mark existing performance targets passed.
+
+## Accepted P0 presentation change — 17 October 2026
+
+The user approved separating fixed 60 Hz simulation from more frequent, genuine
+interpolated presentation to address the measured Player cadence failure.
+Conventional interpolation between completed states adds about one fixed tick
+of visual delay. It must preserve authoritative gameplay, input/event/Custom
+execution, authored data and the existing mean/p95/load criteria. Additional
+sub-tick frames must use changed evaluated poses or camera; repeating the same
+presentation or changing counters/timestamps cannot establish a performance pass.
+History requires explicit lifetime/discontinuity boundaries, including a module
+signal for teleports, scene changes and accepted code/configuration replacements.
+Implementation and final native verification belong to P0; this decision alone
+does not close the failed gate. See the [shared Host](shared-game-host.md).

@@ -1,3 +1,6 @@
+use crate::presentation::{
+    DeviceLifetime, PresentationPool, SharedImage, VulkanPresentationTarget,
+};
 #[cfg(test)]
 use crate::{compiler::compile_hlsl, graph::build_plan};
 use crate::{
@@ -7,13 +10,17 @@ use crate::{
 };
 use ash::{Entry, vk};
 use module_engine_core::{
-    Camera, Frame, Graph, RenderOverrides, RenderResourceCommand, RenderStats, RendererPerformance,
-    SceneSnapshot,
+    Camera, Frame, Graph, RenderOverrides, RenderResourceCommand, RenderStats, RenderSubmission,
+    RendererPerformance, SceneSnapshot,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString},
     hash::{Hash, Hasher},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -139,7 +146,7 @@ struct FrameResources {
     key: FrameResourceKey,
     images: BTreeMap<String, Image>,
     vertex: Buffer,
-    staging: Buffer,
+    staging: Option<Buffer>,
 }
 /// Allocation identity is independent from shader/pipeline identity. Reusing a
 /// pipeline under a new pass ID must still allocate its newly named resources.
@@ -274,6 +281,48 @@ struct AtlasGpu {
     atlas: geometry::TextureAtlas,
     image: Image,
 }
+/// Everything referenced by the recorded command buffer remains untouched until
+/// its fence signals. In particular uploads and evicted pipelines cannot drop.
+struct ProducerFlight {
+    ticket: u64,
+    fence: vk::Fence,
+    shared: Option<Arc<SharedImage>>,
+    resources: FrameResources,
+    atlas: AtlasGpu,
+    _upload: Option<Buffer>,
+    _pipelines: Vec<Arc<Pipeline>>,
+    _context: Arc<DeviceLifetime>,
+    size: [usize; 2],
+    stats: RenderStats,
+    cancelled: Arc<AtomicBool>,
+    failure: Option<String>,
+}
+struct ProducerRetirement {
+    device: ash::Device,
+    flight: Option<ProducerFlight>,
+    pipelines: BTreeMap<String, Arc<Pipeline>>,
+    resources: Option<FrameResources>,
+    atlas: Option<AtlasGpu>,
+    pool: vk::CommandPool,
+    descriptors: vk::DescriptorPool,
+    _context: Arc<DeviceLifetime>,
+}
+impl Drop for ProducerRetirement {
+    fn drop(&mut self) {
+        // This owner is dropped only after completion has been established.
+        unsafe {
+            if let Some(flight) = &self.flight {
+                self.device.destroy_fence(flight.fence, None);
+            }
+            self.device.destroy_descriptor_pool(self.descriptors, None);
+            self.device.destroy_command_pool(self.pool, None);
+        }
+        self.flight = None;
+        self.pipelines.clear();
+        self.resources = None;
+        self.atlas = None;
+    }
+}
 impl Drop for Pipeline {
     fn drop(&mut self) {
         unsafe {
@@ -286,17 +335,23 @@ impl Drop for Pipeline {
 }
 pub struct VulkanRenderer {
     resource_root: std::path::PathBuf,
-    _entry: Entry,
+    context: Arc<DeviceLifetime>,
     instance: ash::Instance,
     device: ash::Device,
     physical: vk::PhysicalDevice,
     memory: vk::PhysicalDeviceMemoryProperties,
     queue: vk::Queue,
+    family: u32,
+    presentation_target: Option<Arc<VulkanPresentationTarget>>,
+    presentation_slots: PresentationPool<SharedImage>,
     pool: vk::CommandPool,
     command: vk::CommandBuffer,
     descriptor_pool: vk::DescriptorPool,
     name: String,
-    pipelines: BTreeMap<String, Pipeline>,
+    pipelines: BTreeMap<String, Arc<Pipeline>>,
+    pending: Option<ProducerFlight>,
+    next_ticket: u64,
+    producer_error: Option<String>,
     prepared: Option<Plan>,
     diagnostics: Vec<String>,
     frame_resources: Option<FrameResources>,
@@ -316,6 +371,12 @@ impl VulkanRenderer {
     }
     /// Bind this backend's shader compilation to one explicit package root.
     pub fn new_at(resource_root: std::path::PathBuf) -> Result<Self, String> {
+        Self::new_at_target(resource_root, None)
+    }
+    fn new_at_target(
+        resource_root: std::path::PathBuf,
+        presentation_target: Option<Arc<VulkanPresentationTarget>>,
+    ) -> Result<Self, String> {
         unsafe {
             let entry = Entry::load().map_err(|e| format!("Vulkan loader: {e}"))?;
             let app = CString::new("ModuleEngine GPU graph").unwrap();
@@ -334,6 +395,24 @@ impl VulkanRenderer {
             let selected = candidates
                 .into_iter()
                 .filter_map(|physical| {
+                    if let Some(target) = &presentation_target {
+                        if !crate::presentation::matches_adapter(
+                            &instance,
+                            physical,
+                            &target.identity,
+                        ) {
+                            return None;
+                        }
+                        let extensions = instance
+                            .enumerate_device_extension_properties(physical)
+                            .ok()?;
+                        if !extensions.iter().any(|extension| {
+                            CStr::from_ptr(extension.extension_name.as_ptr())
+                                == crate::presentation::extension_name()
+                        }) {
+                            return None;
+                        }
+                    }
                     let properties = instance.get_physical_device_properties(physical);
                     if properties.api_version < vk::API_VERSION_1_3 {
                         return None;
@@ -363,7 +442,11 @@ impl VulkanRenderer {
                 });
             let Some((physical, family, properties)) = selected else {
                 instance.destroy_instance(None);
-                return Err("No Vulkan 1.3 graphics+compute adapter with dynamic rendering; a compatible GPU driver is required".into());
+                return Err(if presentation_target.is_some() {
+                    "No matching GUI adapter with Vulkan 1.3 dynamic rendering and external-memory import".into()
+                } else {
+                    "No Vulkan 1.3 graphics+compute adapter with dynamic rendering; a compatible GPU driver is required".into()
+                });
             };
             let name = CStr::from_ptr(properties.device_name.as_ptr())
                 .to_string_lossy()
@@ -374,15 +457,29 @@ impl VulkanRenderer {
                 .queue_priorities(&priorities)];
             let mut rendering =
                 vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+            let extensions = if presentation_target.is_some() {
+                vec![crate::presentation::extension_name().as_ptr()]
+            } else {
+                Vec::new()
+            };
             let device = instance
                 .create_device(
                     physical,
                     &vk::DeviceCreateInfo::default()
                         .queue_create_infos(&queues)
+                        .enabled_extension_names(&extensions)
                         .push_next(&mut rendering),
                     None,
                 )
                 .map_err(|e| format!("Vulkan device {name}: {e:?}"))?;
+            let context = Arc::new(DeviceLifetime {
+                _entry: entry,
+                instance: instance.clone(),
+                device: device.clone(),
+            });
+            if presentation_target.is_some() {
+                crate::presentation::validate_external_format(&context, physical, 1, 1)?;
+            }
             let queue = device.get_device_queue(family, 0);
             let memory = instance.get_physical_device_memory_properties(physical);
             let pool = device
@@ -420,12 +517,15 @@ impl VulkanRenderer {
                 )
                 .map_err(vk_error)?;
             Ok(Self {
-                _entry: entry,
+                context,
                 instance,
                 device,
                 physical,
                 memory,
                 queue,
+                family,
+                presentation_target,
+                presentation_slots: PresentationPool::default(),
                 pool,
                 command,
                 descriptor_pool,
@@ -435,6 +535,9 @@ impl VulkanRenderer {
                 diagnostics: vec![],
                 resource_root,
                 frame_resources: None,
+                pending: None,
+                next_ticket: 0,
+                producer_error: None,
                 atlas: None,
                 detailed_stats: true,
                 prepared_inputs: None,
@@ -449,6 +552,39 @@ impl VulkanRenderer {
     }
     pub fn device_name(&self) -> &str {
         &self.name
+    }
+    /// Installing a different GUI device is transactional: prepare a compatible
+    /// backend before retiring the accepted one. Outstanding leases are never
+    /// invalidated, and target churn cannot multiply the four-slot pool.
+    pub fn set_presentation_target(
+        &mut self,
+        target: Option<Arc<VulkanPresentationTarget>>,
+    ) -> Result<(), String> {
+        if match (&self.presentation_target, &target) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.identity == b.identity && Arc::ptr_eq(&a.allocator, &b.allocator)
+            }
+            _ => false,
+        } {
+            return Ok(());
+        }
+        if self.presentation_slots.busy() {
+            return Err("GPU presentation target still has leased frames".into());
+        }
+        let Some(target) = target else {
+            self.presentation_slots.clear();
+            self.presentation_target = None;
+            return Ok(());
+        };
+        let mut replacement = Self::new_at_target(self.resource_root.clone(), Some(target))?;
+        replacement.detailed_stats = self.detailed_stats;
+        replacement.next_ticket = self.next_ticket;
+        if let Some((graph, sources, _)) = &self.prepared_inputs {
+            replacement.prepare(graph, sources)?;
+        }
+        *self = replacement;
+        Ok(())
     }
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -552,7 +688,7 @@ impl VulkanRenderer {
                                 pass.id
                             ));
                         }
-                        self.pipelines.insert(key, pipeline);
+                        self.pipelines.insert(key, Arc::new(pipeline));
                         self.performance.pipeline_creations += 1;
                     }
                     Err(error) => {
@@ -1062,6 +1198,167 @@ impl VulkanRenderer {
         sources: &BTreeMap<String, String>,
         overrides: &RenderOverrides,
     ) -> Result<Frame, String> {
+        if self.pending.is_some() {
+            return Err("GPU producer submission is still in flight; poll or discard its ticket before CPU readback".into());
+        }
+        self.render_output(
+            scene, camera, width, height, graph, sources, overrides, None,
+        )
+        .and_then(|frame| frame.ok_or_else(|| "CPU render did not complete".into()))
+    }
+    /// Render to one of four leased shared images, without host pixel transfer.
+    /// Backpressure does no GPU work and leaves portable resource commands pending.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_presented(
+        &mut self,
+        scene: &SceneSnapshot,
+        camera: Camera,
+        width: usize,
+        height: usize,
+        graph: &Graph,
+        sources: &BTreeMap<String, String>,
+        overrides: &RenderOverrides,
+    ) -> Result<RenderSubmission, String> {
+        if width == 0
+            || height == 0
+            || width > 4096
+            || height > 4096
+            || width
+                .checked_mul(height)
+                .is_none_or(|pixels| pixels > 4_194_304)
+        {
+            return Err("GPU viewport must be nonzero, <=4096 per axis and <=4M pixels".into());
+        }
+        let Some(target) = self.presentation_target.clone() else {
+            // No presentation target is the explicit legacy/readback mode used
+            // by headless callers. A rejected requested target never falls back.
+            return self
+                .render(scene, camera, width, height, graph, sources, overrides)
+                .map(RenderSubmission::Ready);
+        };
+        if let Some(error) = &self.producer_error {
+            return Err(error.clone());
+        }
+        if let Some(flight) = &self.pending {
+            if flight.cancelled.load(Ordering::Acquire) {
+                let ticket = flight.ticket;
+                let _ = self.poll_presented(ticket)?;
+            }
+            if self.pending.is_some() {
+                self.performance.gpu_busy_skips += 1;
+                return Ok(RenderSubmission::Busy);
+            }
+        }
+        let size = [width as u32, height as u32];
+        let context = self.context.clone();
+        let physical = self.physical;
+        let memory = self.memory;
+        let Some(slot) = self.presentation_slots.reserve(size, || {
+            let shared = target.allocator.allocate(size[0], size[1])?;
+            SharedImage::import(context, physical, &memory, size[0], size[1], shared)
+        })?
+        else {
+            self.performance.gpu_busy_skips += 1;
+            return Ok(RenderSubmission::Busy);
+        };
+        self.render_output(
+            scene,
+            camera,
+            width,
+            height,
+            graph,
+            sources,
+            overrides,
+            Some(&slot),
+        )
+        .map(|_| RenderSubmission::Pending(self.next_ticket))
+    }
+
+    pub(crate) fn cancellation(&self, ticket: u64) -> Option<Arc<AtomicBool>> {
+        self.pending
+            .as_ref()
+            .filter(|flight| flight.ticket == ticket)
+            .map(|flight| flight.cancelled.clone())
+    }
+    /// Only this exact request can complete; polling never submits or waits.
+    pub fn poll_presented(&mut self, ticket: u64) -> Result<Option<Frame>, String> {
+        if ticket == 0 || ticket > self.next_ticket {
+            return Err("Unknown GPU producer presentation ticket".into());
+        }
+        if let Some(error) = &self.producer_error {
+            return Err(error.clone());
+        }
+        let Some(flight) = self
+            .pending
+            .as_ref()
+            .filter(|flight| flight.ticket == ticket)
+        else {
+            return Ok(None);
+        };
+        self.performance.gpu_completion_polls += 1;
+        match unsafe { self.device.get_fence_status(flight.fence) } {
+            Ok(false) => return Ok(None),
+            Err(error) => {
+                let error = format!("GPU producer completion: {error:?}; resources remain pinned");
+                self.pending.as_mut().unwrap().failure = Some(error.clone());
+                self.producer_error = Some(error.clone());
+                return Err(error);
+            }
+            Ok(true) => {}
+        }
+        let flight = self.pending.take().unwrap();
+        unsafe {
+            self.device.destroy_fence(flight.fence, None);
+        }
+        let shared = flight
+            .shared
+            .as_ref()
+            .expect("native producer shared image");
+        shared.completed();
+        let frame = if flight.cancelled.load(Ordering::Acquire) {
+            None
+        } else {
+            self.performance.gpu_presentation_frames += 1;
+            self.performance.gpu_presentation_bytes += (flight.size[0] * flight.size[1] * 4) as u64;
+            Some(Frame {
+                width: flight.size[0],
+                height: flight.size[1],
+                rgba: Vec::new(),
+                gpu: Some(shared.frame()),
+                stats: flight.stats,
+            })
+        };
+        self.frame_resources = Some(flight.resources);
+        self.atlas = Some(flight.atlas);
+        Ok(frame)
+    }
+    pub fn discard_presented(&mut self, ticket: u64) -> Result<(), String> {
+        if ticket == 0 || ticket > self.next_ticket {
+            return Err("Unknown GPU producer presentation ticket".into());
+        }
+        if let Some(flight) = &self.pending
+            && flight.ticket == ticket
+        {
+            flight.cancelled.store(true, Ordering::Release);
+        }
+        // Do not wait and do not fabricate completion, even on a fast device.
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_output(
+        &mut self,
+        scene: &SceneSnapshot,
+        camera: Camera,
+        width: usize,
+        height: usize,
+        graph: &Graph,
+        sources: &BTreeMap<String, String>,
+        overrides: &RenderOverrides,
+        presentation: Option<&Arc<SharedImage>>,
+    ) -> Result<Option<Frame>, String> {
+        if let Some(error) = &self.producer_error {
+            return Err(error.clone());
+        }
         if width == 0
             || height == 0
             || width > 4096
@@ -1093,7 +1390,11 @@ impl VulkanRenderer {
         }
         let mut atlas = atlas.unwrap();
         let (vertex_bytes, submitted) = geometry::vertices(scene, &atlas.atlas.rects);
-        let readback = frame_readback(&plan, width, height, self.detailed_stats);
+        let readback = if presentation.is_some() {
+            Vec::new()
+        } else {
+            frame_readback(&plan, width, height, self.detailed_stats)
+        };
         let resource_key = frame_resource_key(&plan, width, height, &readback);
         let mut reused = self
             .frame_resources
@@ -1158,7 +1459,7 @@ impl VulkanRenderer {
             &images.keys().map(String::as_str).collect(),
             &readback,
         )?;
-        let new_staging = if reused.is_none() {
+        let new_staging = if reused.is_none() && presentation.is_none() {
             Some(self.buffer(
                 readback.iter().map(|(_, _, size)| *size as u64).sum(),
                 vk::BufferUsageFlags::TRANSFER_DST,
@@ -1166,9 +1467,11 @@ impl VulkanRenderer {
         } else {
             None
         };
-        let staging = new_staging
-            .as_ref()
-            .unwrap_or_else(|| &reused.as_ref().unwrap().staging);
+        let staging = new_staging.as_ref().or_else(|| {
+            reused
+                .as_ref()
+                .and_then(|resources| resources.staging.as_ref())
+        });
         let atlas_upload = if upload {
             Some(self.buffer(
                 atlas.atlas.rgba.len() as u64,
@@ -1566,6 +1869,23 @@ impl VulkanRenderer {
             }
         }
         let mut offset = 0u64;
+        if let Some(shared) = presentation {
+            let output = images
+                .get_mut(&plan.output)
+                .ok_or("GPU presentation output has no allocated image")?;
+            if output.format != vk::Format::R8G8B8A8_UNORM {
+                return Err("GPU presentation requires RGBA8_UNORM graph output".into());
+            }
+            transition(
+                &self.device,
+                self.command,
+                output,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_READ,
+            );
+            shared.record_copy(self.command, output.image, self.family);
+        }
         for (name, _, size) in &readback {
             let image = images.get_mut(name).unwrap();
             transition(
@@ -1594,7 +1914,7 @@ impl VulkanRenderer {
                     self.command,
                     image.image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    staging.buffer,
+                    staging.unwrap().buffer,
                     &[region],
                 );
             }
@@ -1603,35 +1923,103 @@ impl VulkanRenderer {
         unsafe {
             // Make transfer writes available and visible to host reads. Waiting
             // for the queue alone is not the graph's memory dependency contract.
-            let host_read = vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .buffer(staging.buffer)
-                .offset(0)
-                .size(staging.size);
-            self.device.cmd_pipeline_barrier(
-                self.command,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[host_read],
-                &[],
-            );
+            if presentation.is_none() {
+                let staging = staging.unwrap();
+                let host_read = vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::HOST_READ)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .buffer(staging.buffer)
+                    .offset(0)
+                    .size(staging.size);
+                self.device.cmd_pipeline_barrier(
+                    self.command,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[host_read],
+                    &[],
+                );
+            }
             self.device
                 .end_command_buffer(self.command)
                 .map_err(vk_error)?;
-            self.device
-                .queue_submit(
-                    self.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[self.command])],
-                    vk::Fence::null(),
-                )
-                .map_err(vk_error)?;
-            self.device.queue_wait_idle(self.queue).map_err(vk_error)?;
         }
+        let resources = if let Some(mut resources) = reused {
+            resources.images = images;
+            resources
+        } else {
+            FrameResources {
+                key: resource_key,
+                images,
+                vertex: new_vertex.unwrap(),
+                staging: new_staging,
+            }
+        };
+        let ticket = if presentation.is_some() {
+            self.next_ticket
+                .checked_add(1)
+                .ok_or("GPU presentation ticket exhausted")?
+        } else {
+            0
+        };
+        let fence =
+            unsafe { self.device.create_fence(&Default::default(), None) }.map_err(vk_error)?;
+        // Install ownership BEFORE submission. Any submit/completion failure
+        // leaves this entire bundle pinned, including pools and upload buffers.
+        self.pending = Some(ProducerFlight {
+            ticket,
+            fence,
+            shared: presentation.cloned(),
+            resources,
+            atlas,
+            _upload: atlas_upload,
+            _pipelines: self.pipelines.values().cloned().collect(),
+            _context: self.context.clone(),
+            size: [width, height],
+            stats: RenderStats {
+                objects: scene.items.len(),
+                submitted_triangles: submitted,
+                ..Default::default()
+            },
+            cancelled: Arc::new(AtomicBool::new(false)),
+            failure: None,
+        });
+        if let Err(error) = unsafe {
+            self.device.queue_submit(
+                self.queue,
+                &[vk::SubmitInfo::default().command_buffers(&[self.command])],
+                fence,
+            )
+        } {
+            let error = format!("GPU producer submit: {error:?}; resources remain pinned");
+            self.pending.as_mut().unwrap().failure = Some(error.clone());
+            self.producer_error = Some(error.clone());
+            return Err(error);
+        }
+        if presentation.is_some() {
+            self.next_ticket = ticket;
+            self.performance.gpu_submissions += 1;
+            return Ok(None);
+        }
+        // Explicit CPU capture/readback is the only render call that waits.
+        if let Err(error) = unsafe { self.device.wait_for_fences(&[fence], true, 30_000_000_000) } {
+            let error = format!("GPU diagnostic completion: {error:?}; resources remain pinned");
+            self.pending.as_mut().unwrap().failure = Some(error.clone());
+            self.producer_error = Some(error.clone());
+            return Err(error);
+        }
+        let flight = self.pending.take().unwrap();
+        unsafe {
+            self.device.destroy_fence(fence, None);
+        }
+        let staging = flight
+            .resources
+            .staging
+            .as_ref()
+            .expect("CPU readback allocation");
         let mut data = vec![0u8; staging.size as usize];
         unsafe {
             let mapped = self
@@ -1640,6 +2028,7 @@ impl VulkanRenderer {
                 .map_err(vk_error)?;
             std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), data.as_mut_ptr(), data.len());
             self.device.unmap_memory(staging.memory);
+            self.performance.cpu_readback_bytes += staging.size;
         }
         let mut stats = RenderStats {
             objects: scene.items.len(),
@@ -1694,35 +2083,50 @@ impl VulkanRenderer {
             height,
             rgba: data,
             stats,
+            gpu: None,
         };
-        let resources = if let Some(mut resources) = reused {
-            resources.images = images;
-            resources
-        } else {
-            FrameResources {
-                key: resource_key,
-                images,
-                vertex: new_vertex.unwrap(),
-                staging: new_staging.unwrap(),
-            }
-        };
-        self.frame_resources = Some(resources);
-        self.atlas = Some(atlas);
-        Ok(frame)
+        self.frame_resources = Some(flight.resources);
+        self.atlas = Some(flight.atlas);
+        Ok(Some(frame))
     }
 }
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.device.device_wait_idle();
-            self.pipelines.clear();
-            self.frame_resources = None;
-            self.atlas = None;
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device.destroy_command_pool(self.pool, None);
-            self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
+        let bundle = ProducerRetirement {
+            device: self.device.clone(),
+            flight: self.pending.take(),
+            pipelines: std::mem::take(&mut self.pipelines),
+            resources: self.frame_resources.take(),
+            atlas: self.atlas.take(),
+            pool: self.pool,
+            descriptors: self.descriptor_pool,
+            _context: self.context.clone(),
+        };
+        self.presentation_slots.clear();
+        if bundle.flight.is_some() {
+            let mut pinned = std::mem::ManuallyDrop::new(bundle);
+            crate::retirement::retire(move || {
+                let flight = pinned.flight.as_ref().unwrap();
+                if let Some(error) = &flight.failure {
+                    return Err(error.clone());
+                }
+                // Only a background retirement owner may wait. Timeout/error
+                // deliberately leaks ALL native owners and their device pin.
+                unsafe {
+                    pinned
+                        .device
+                        .wait_for_fences(&[flight.fence], true, 30_000_000_000)
+                }
+                .map_err(|error| {
+                    format!("GPU producer retirement: {error:?}; resources remain pinned")
+                })?;
+                unsafe {
+                    std::mem::ManuallyDrop::drop(&mut pinned);
+                }
+                Ok(())
+            });
+        } else {
+            drop(bundle);
         }
     }
 }
@@ -2273,7 +2677,7 @@ mod tests {
                         .any(|resource| resource.starts_with(&format!("{previous}.")))
                 );
                 assert_eq!(
-                    resources.staging.size,
+                    resources.staging.as_ref().unwrap().size,
                     resources
                         .key
                         .readback
@@ -2288,7 +2692,14 @@ mod tests {
                 .unwrap();
             assert_eq!(resized.rgba.len(), 128 * 72 * 4);
             assert_eq!(
-                renderer.frame_resources.as_ref().unwrap().staging.size,
+                renderer
+                    .frame_resources
+                    .as_ref()
+                    .unwrap()
+                    .staging
+                    .as_ref()
+                    .unwrap()
+                    .size,
                 128 * 72 * 4
             );
         }

@@ -11,6 +11,7 @@ module-engine-project = { path = "../project-tools" }
 module-engine-script = { path = "../runtime-script" }
 module-engine-host-services = { path = "../host-services", default-features = false }
 serde_json.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }

@@ -56,6 +56,12 @@ contracts, checks resources and compiles the Custom code in use before publicati
 The source file is not overwritten. The command prints a report with a hash of the source bytes
 and a list of changes; save it with the project history.
 
+The destination must be a distinct project file. On a case-sensitive Linux
+filesystem, `project.json` and `PROJECT.json` can be separate source/copy names;
+Windows retains case-insensitive path comparison. A true source alias or an
+occupied destination is still rejected by path/publication checks. Migration
+preserves the original JSON, Engine binding and resource bytes.
+
 Unknown fields of typed records are preserved in `legacy_archive`, and unknown
 inactive component JSON in authored data. An unknown active contract
 or invalid known field rejects migration. The adapter supports known

@@ -94,6 +94,9 @@ pub struct Editor {
     time: f64,
     camera: Camera,
     texture: Option<egui::TextureHandle>,
+    gpu_texture: module_engine_player::gpu_presentation::GpuTexture,
+    gpu_bridge:
+        Option<std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>>,
     last_render: f64,
     last_tick: f64,
     stats: String,
@@ -138,6 +141,51 @@ pub struct Editor {
 }
 
 impl Editor {
+    fn poll_gpu_presentation(&mut self) {
+        if let Some(runtime) = &self.runtime
+            && let Err(error) = runtime.poll_presentation()
+        {
+            self.runtime_error = Some(error);
+        }
+        let producer_error = self.game_workbench.poll_gpu_presentation().err();
+        let Some(bridge) = &self.gpu_bridge else {
+            if let Some(error) = producer_error {
+                self.status = error;
+            }
+            return;
+        };
+        let mut error = self.gpu_texture.poll(bridge).err().or(producer_error);
+        // Hidden panes still own pending copies. Reap them even if no new source
+        // frame exists, otherwise a shared producer pool can never become free.
+        for pane in self
+            .engine_panes
+            .values_mut()
+            .chain(self.project_panes.values_mut())
+        {
+            if let Err(problem) = pane.gpu_texture.poll(bridge) {
+                error = Some(problem);
+            }
+            if let Err(problem) = pane.scene_view.poll_gpu_presentation() {
+                error = Some(problem);
+            }
+        }
+        if let Some(error) = error {
+            self.status = error;
+        }
+    }
+    #[allow(dead_code)] // Compatibility for embeddings; native windows pass the bridge before the initial rebuild.
+    pub(crate) fn set_gpu_presentation(
+        &mut self,
+        bridge: Option<
+            std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>,
+        >,
+    ) {
+        self.preview_builder
+            .set_presentation_target(bridge.as_ref().map(|bridge| bridge.target()));
+        self.game_workbench.set_gpu_presentation(bridge.clone());
+        self.gpu_bridge = bridge;
+        self.rebuild();
+    }
     /// Bind legacy PropertySchema dependency scans to the accepted live world.
     /// A pending world replacement cannot borrow the previous provider's IDs.
     pub(super) fn asset_property_object_ids(&self) -> Option<std::collections::BTreeSet<u64>> {
@@ -267,6 +315,7 @@ impl Editor {
         editor.workspace = WorkspaceKind::Engine;
         editor
     }
+    #[cfg(test)]
     pub fn new_with_distribution(
         document: GraphDocument,
         path: PathBuf,
@@ -284,6 +333,26 @@ impl Editor {
     ) -> Self {
         Self::new_with_policy_and_personal_root(document, path, Some(distribution), personal_root)
     }
+    /// Bind the native presentation endpoint before launching any renderer
+    /// preparation. Shader/device work stays in the existing background jobs.
+    pub(crate) fn new_native_with_diagnostic_personal_root(
+        document: GraphDocument,
+        path: PathBuf,
+        distribution: crate::distribution::Distribution,
+        personal_root: Option<PathBuf>,
+        bridge: Option<
+            std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>,
+        >,
+    ) -> Self {
+        Self::new_with_policy_and_personal_root_and_presentation(
+            document,
+            path,
+            Some(distribution),
+            personal_root,
+            bridge,
+        )
+    }
+    #[cfg(test)]
     fn new_with_policy(
         document: GraphDocument,
         path: PathBuf,
@@ -296,6 +365,23 @@ impl Editor {
         path: PathBuf,
         distribution: Option<crate::distribution::Distribution>,
         diagnostic_personal_root: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_policy_and_personal_root_and_presentation(
+            document,
+            path,
+            distribution,
+            diagnostic_personal_root,
+            None,
+        )
+    }
+    fn new_with_policy_and_personal_root_and_presentation(
+        document: GraphDocument,
+        path: PathBuf,
+        distribution: Option<crate::distribution::Distribution>,
+        diagnostic_personal_root: Option<PathBuf>,
+        bridge: Option<
+            std::sync::Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>,
+        >,
     ) -> Self {
         let mut canvas = CanvasState::new("engine-graph");
         canvas.zoom = 0.82;
@@ -324,7 +410,11 @@ impl Editor {
         };
         let mut editor = Self {
             interactive_ui: false,
-            game_workbench: crate::game_ui::GameWorkbench::default(),
+            game_workbench: {
+                let mut workbench = crate::game_ui::GameWorkbench::default();
+                workbench.set_gpu_presentation(bridge.clone());
+                workbench
+            },
             assets: assets_workspace_ui::AssetsWorkbench::default(),
             scene_gesture_before: None,
             scene_gesture_scene: None,
@@ -358,11 +448,17 @@ impl Editor {
             time: 0.,
             camera: Camera::default(),
             texture: None,
+            gpu_texture: Default::default(),
+            gpu_bridge: bridge.clone(),
             last_render: -1.,
             last_tick: 0.,
             stats: String::new(),
             scripts,
-            preview_builder: PreviewBuilder::new(),
+            preview_builder: {
+                let mut builder = PreviewBuilder::new();
+                builder.set_presentation_target(bridge.as_ref().map(|bridge| bridge.target()));
+                builder
+            },
             rust_edits: BTreeMap::new(),
             current_shader: String::new(),
             history,
@@ -401,7 +497,7 @@ impl Editor {
             project_library_graph: None,
             module_search: String::new(),
         };
-        if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
+        if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() && editor.gpu_bridge.is_none() {
             // eframe's test-only capture exits after two frames. Prepare the real
             // Vulkan route before those frames so the capture verifies its UI.
             editor.diagnostics = validate_graph(&editor.document, &editor.registry);
@@ -1126,6 +1222,8 @@ impl Editor {
                 self.registry = registry;
                 self.game_workbench = crate::game_ui::GameWorkbench::default();
                 self.game_workbench
+                    .set_gpu_presentation(self.gpu_bridge.clone());
+                self.game_workbench
                     .set_deferred_preparation(self.interactive_ui);
                 self.game_workbench
                     .set_background_game(self.interactive_ui, None);
@@ -1148,6 +1246,9 @@ impl Editor {
                     self.status = error;
                 }
                 self.preview_builder = PreviewBuilder::new();
+                self.preview_builder.set_presentation_target(
+                    self.gpu_bridge.as_ref().map(|bridge| bridge.target()),
+                );
                 self.runtime = None;
                 self.authored_object_ids.clear();
                 self.time = 0.;
@@ -2145,7 +2246,10 @@ impl Editor {
             ui.label(RichText::new(error).size(10.5));
         }
         if let Some(runtime) = &self.runtime
-            && (now - self.last_render > 0.04 || self.last_render < 0.0)
+            && (runtime.has_pending_presentation()
+                || runtime.has_ready_authored_presentation()
+                || now - self.last_render > 0.04
+                || self.last_render < 0.0)
         {
             let camera = Camera {
                 yaw: self.camera.yaw,
@@ -2153,38 +2257,48 @@ impl Editor {
                 distance: self.camera.distance,
                 target: self.camera.target,
             };
-            match runtime.render(600, 390, camera) {
-                Ok(frame) => {
-                    self.runtime_error = None;
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width, frame.height],
-                        &frame.rgba,
-                    );
-                    if let Some(texture) = &mut self.texture {
-                        texture.set(image, egui::TextureOptions::LINEAR);
-                    } else {
-                        self.texture = Some(ui.ctx().load_texture(
-                            "3d-scene",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+            let rendered = runtime.render_presented(600, 390, camera);
+            match rendered {
+                Ok(Some(frame)) => {
+                    match module_engine_player::ui::update_presented_texture(
+                        ui,
+                        &mut self.texture,
+                        &mut self.gpu_texture,
+                        self.gpu_bridge.as_deref(),
+                        &frame,
+                    ) {
+                        Ok(true) => {
+                            self.runtime_error = None;
+                            self.stats = format!(
+                                "{} объектов · t = {:.2} с",
+                                runtime.object_count(),
+                                self.time
+                            );
+                            self.last_render = now;
+                            if runtime.has_pending_presentation() {
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        Ok(false) => ui
+                            .ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(1)),
+                        Err(error) => self.runtime_error = Some(error),
                     }
-                    self.stats = format!(
-                        "{} объектов · t = {:.2} с",
-                        runtime.object_count(),
-                        self.time
-                    );
-                    self.last_render = now;
                 }
+                Ok(None) => ui
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(1)),
                 Err(error) if error.starts_with("GPU готовит новую конфигурацию;") =>
                     {}
                 Err(error) => self.runtime_error = Some(error),
             }
         }
-        if let Some(texture) = &self.texture {
+        if let Some(texture) =
+            module_engine_player::ui::presentation_texture_id(&self.texture, &self.gpu_texture)
+        {
             let width = ui.available_width();
             let response = ui.add(
-                egui::Image::new(texture)
+                egui::Image::new((texture, Vec2::new(600., 390.)))
                     .fit_to_exact_size(Vec2::new(width, width * 0.65))
                     .sense(egui::Sense::drag()),
             );
@@ -2724,6 +2838,18 @@ impl eframe::App for Editor {
         self.workflow_capture_input(input);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_gpu_presentation();
+        // Hidden panes reap submitted producers too. A buffered completion does
+        // not keep this timer alive after its fence has completed.
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(Runtime::has_pending_presentation)
+            || self.game_workbench.has_pending_gpu_presentation()
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(1));
+        }
         self.interactive_ui = true;
         self.game_workbench.set_deferred_preparation(true);
         self.game_workbench

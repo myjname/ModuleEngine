@@ -6,13 +6,16 @@ use crate::{
 };
 use module_engine_core::{
     Camera, Frame, FrameRenderer, Graph, GraphDocument, ModuleDescriptor, ModuleRegistry, Node,
-    PortDescriptor, RenderControlTargets, RenderOverrides, RendererAdapter, RendererPerformance,
-    SceneSnapshot,
+    PortDescriptor, RenderControlTargets, RenderOverrides, RenderSubmission, RendererAdapter,
+    RendererPerformance, SceneSnapshot,
 };
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Install contracts and factories without opening a device or loading tools.
@@ -135,6 +138,8 @@ struct VulkanFrameRenderer {
     graph: Graph,
     sources: BTreeMap<String, String>,
     name: String,
+    pending: Option<(u64, Arc<AtomicBool>)>,
+    busy_skips: u64,
 }
 
 impl VulkanFrameRenderer {
@@ -149,7 +154,18 @@ impl VulkanFrameRenderer {
             graph: graph.clone(),
             sources: document.shader_sources.clone(),
             name,
+            pending: None,
+            busy_skips: 0,
         })
+    }
+}
+impl Drop for VulkanFrameRenderer {
+    fn drop(&mut self) {
+        // Candidate replacement cannot steal another wrapper's completion, and
+        // never takes a device lock or waits for the abandoned producer work.
+        if let Some((_, cancelled)) = &self.pending {
+            cancelled.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -181,11 +197,107 @@ impl FrameRenderer for VulkanFrameRenderer {
         &self.name
     }
 
+    fn set_presentation_target(
+        &mut self,
+        target: Option<Arc<dyn module_engine_core::PresentationTarget>>,
+    ) -> Result<(), String> {
+        let target = target
+            .map(|target| {
+                let target = target
+                    .as_any()
+                    .downcast_ref::<crate::presentation::VulkanPresentationTarget>()
+                    .ok_or("Vulkan renderer requires a VulkanPresentationTarget")?;
+                Ok::<_, String>(Arc::new(crate::presentation::VulkanPresentationTarget {
+                    identity: target.identity.clone(),
+                    allocator: target.allocator.clone(),
+                }))
+            })
+            .transpose()?;
+        let mut backend = self
+            .backend
+            .lock()
+            .map_err(|_| "Vulkan device lock is poisoned")?;
+        backend.set_presentation_target(target)?;
+        self.name = format!("Vulkan / {}", backend.device_name());
+        Ok(())
+    }
+
+    fn render_presented(
+        &mut self,
+        scene: &SceneSnapshot,
+        camera: Camera,
+        width: usize,
+        height: usize,
+        overrides: &RenderOverrides,
+    ) -> Result<RenderSubmission, String> {
+        if self.pending.is_some() {
+            self.busy_skips += 1;
+            return Ok(RenderSubmission::Busy);
+        }
+        let mut backend = match self.backend.try_lock() {
+            Ok(backend) => backend,
+            Err(TryLockError::WouldBlock) => {
+                self.busy_skips += 1;
+                return Ok(RenderSubmission::Busy);
+            }
+            Err(_) => return Err("Vulkan device lock is poisoned".into()),
+        };
+        let submitted = backend.render_presented(
+            scene,
+            camera,
+            width,
+            height,
+            &self.graph,
+            &self.sources,
+            overrides,
+        )?;
+        if let RenderSubmission::Pending(ticket) = submitted {
+            let cancel = backend
+                .cancellation(ticket)
+                .expect("accepted producer owns a cancellation flag");
+            self.pending = Some((ticket, cancel));
+        }
+        Ok(submitted)
+    }
+
+    fn poll_presented(&mut self, ticket: u64) -> Result<Option<Frame>, String> {
+        let Some((owned, _)) = &self.pending else {
+            return Ok(None);
+        };
+        if *owned != ticket {
+            return Err("GPU presentation ticket belongs to another renderer request".into());
+        }
+        let mut backend = match self.backend.try_lock() {
+            Ok(backend) => backend,
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(_) => return Err("Vulkan device lock is poisoned".into()),
+        };
+        let completed = backend.poll_presented(ticket)?;
+        if backend.cancellation(ticket).is_none() {
+            self.pending = None;
+        }
+        Ok(completed)
+    }
+
+    fn discard_presented(&mut self, ticket: u64) -> Result<(), String> {
+        if let Some((owned, cancelled)) = &self.pending {
+            if *owned != ticket {
+                return Err("GPU presentation ticket belongs to another renderer request".into());
+            }
+            cancelled.store(true, Ordering::Release);
+            self.pending = None;
+        }
+        Ok(())
+    }
+
     fn performance(&self) -> RendererPerformance {
-        self.backend
+        let mut performance = self
+            .backend
             .lock()
             .map(|backend| backend.performance())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        performance.gpu_busy_skips += self.busy_skips;
+        performance
     }
 
     fn set_detailed_stats(&mut self, enabled: bool) {
@@ -210,6 +322,8 @@ impl FrameRenderer for VulkanFrameRenderer {
             graph: graph.clone(),
             sources: document.shader_sources.clone(),
             name: self.name.clone(),
+            pending: None,
+            busy_skips: 0,
         })))
     }
 

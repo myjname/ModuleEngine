@@ -275,6 +275,10 @@ pub fn export_with_package_root(
         ".gitignore",
         ".gitattributes",
         "README.md",
+        "README.ru.md",
+        "AGENTS.md",
+        ".agents/skills/moduleengine-debug/SKILL.md",
+        ".codex/config.toml",
         "LICENSE",
         "run.ps1",
         "run.sh",
@@ -285,7 +289,11 @@ pub fn export_with_package_root(
     ] {
         let source = root.join(relative);
         if source.is_file() {
-            copy_new(&source, &target.join(relative))?;
+            let destination = target.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            copy_new(&source, &destination)?;
         } else if matches!(
             relative,
             "Cargo.toml" | "Cargo.lock" | "toolchain-manifest.json"
@@ -1116,6 +1124,27 @@ mod tests {
         );
         let target = temp.join("export with spaces");
         let output = export_with_asset_root(&target, &doc, &asset_root).unwrap();
+        let package: crate::distribution::PackageManifest =
+            serde_json::from_slice(&fs::read(output.join(".module-engine-package.json")).unwrap())
+                .unwrap();
+        for path in [
+            "README.md",
+            "README.ru.md",
+            "AGENTS.md",
+            ".agents/skills/moduleengine-debug/SKILL.md",
+            ".codex/config.toml",
+        ] {
+            assert_eq!(
+                fs::read(output.join(path)).unwrap(),
+                fs::read(source_root().join(path)).unwrap(),
+                "Full export must preserve exact public guidance bytes: {path}"
+            );
+            assert_eq!(
+                package.backend_files.get(path),
+                Some(&hash_file(&source_root().join(path)).unwrap()),
+                "Full backend inventory must pin its public guidance: {path}"
+            );
+        }
         for path in [
             "crates/render-vulkan/Cargo.toml",
             "crates/runtime-script/Cargo.toml",
