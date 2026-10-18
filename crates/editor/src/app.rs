@@ -3026,6 +3026,23 @@ mod tests {
     use super::*;
     use module_engine_core::demo_document;
 
+    pub(super) fn isolated_editor(
+        document: GraphDocument,
+    ) -> (module_engine_script::TestArtifactGuard, Editor) {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/test-temp");
+        let sources =
+            module_engine_script::TestArtifactGuard::new(&base, "app-full-source").unwrap();
+        crate::distribution::copy_native_fixture(sources.path());
+        crate::distribution::write_full_manifest(sources.path(), &document).unwrap();
+        let editor = Editor::new(document, sources.path().join("unused.json"));
+        assert!(editor.can_author_engine());
+        assert_eq!(
+            editor.distribution.as_ref().unwrap().package_root,
+            sources.path()
+        );
+        (sources, editor)
+    }
+
     #[test]
     fn asset_property_scan_uses_live_ids_and_rejects_a_pending_world_change() {
         let document = demo_document(WorldKind::Objects);
@@ -4508,10 +4525,7 @@ mod tests {
     }
     #[test]
     fn invalid_custom_keeps_text_and_last_good_graph() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let before = editor.program.as_ref().unwrap().source().to_owned();
         editor
             .document
@@ -4524,10 +4538,7 @@ mod tests {
     }
     #[test]
     fn world_switch_preserves_renderer_and_custom() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let renderer = editor
             .document
             .root
@@ -4556,10 +4567,7 @@ mod tests {
     }
     #[test]
     fn applying_invalid_json_does_not_replace_model_or_draft() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let before = editor.document.clone();
         editor.json_draft = "{ incomplete".into();
         editor.json_dirty = true;
@@ -4575,10 +4583,7 @@ mod tests {
 
     #[test]
     fn file_draft_is_resolved_before_other_views_edit_the_document() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let mut draft = editor.document.clone();
         draft.name = "From file".into();
         editor.json_draft = serde_json::to_string(&draft).unwrap();
@@ -4619,10 +4624,7 @@ mod tests {
 
     #[test]
     fn custom_layout_and_literal_edits_survive_document_roundtrip() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let id = editor
             .program
             .as_ref()
@@ -4647,7 +4649,7 @@ mod tests {
         assert!(Runtime::from_document(&editor.document, &editor.registry).is_ok());
         let reloaded = Editor::new(
             serde_json::from_str(&serde_json::to_string(&editor.document).unwrap()).unwrap(),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
+            editor.path.clone().into(),
         );
         assert_eq!(reloaded.code_positions[&id], [241.0, 362.0]);
         assert_eq!(
@@ -4665,10 +4667,7 @@ mod tests {
 
     #[test]
     fn editing_two_sources_then_switching_tabs_compiles_each_correct_source() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         for id in ["a", "b"] {
             editor.document.root.nodes.push(make_node(
                 id,
@@ -4706,10 +4705,7 @@ mod tests {
 
     #[test]
     fn compiled_scalar_timeout_pauses_simulation_and_is_not_repeated() {
-        let mut editor = Editor::new(
-            demo_document(WorldKind::Objects),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json"),
-        );
+        let (_sources, mut editor) = isolated_editor(demo_document(WorldKind::Objects));
         let source = "fn speed(_time:f64,_base:f64)->f64 { loop {} }";
         let root = crate::project::source_root();
         let compiled =

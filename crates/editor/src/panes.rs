@@ -1309,8 +1309,7 @@ mod editor_choice_regression {
     #[test]
     fn viewport_to_rust_editor_parses_shared_source_without_a_text_change() {
         let document = module_engine_core::demo_document(WorldKind::Objects);
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json");
-        let mut editor = Editor::new(document, path);
+        let (_sources, mut editor) = super::super::tests::isolated_editor(document);
         editor.preview_builder = PreviewBuilder::new();
         editor.playing = false;
         editor.workspace = WorkspaceKind::Project;
@@ -1361,8 +1360,7 @@ mod authored_object_regression {
             &crate::project::source_root(),
         )
         .unwrap();
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../unused.json");
-        let mut editor = Editor::new(document, path);
+        let (_sources, mut editor) = super::super::tests::isolated_editor(document);
         editor
             .runtime
             .as_mut()

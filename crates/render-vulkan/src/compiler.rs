@@ -230,7 +230,7 @@ fn dxc_command(path: &Path) -> Result<Command, String> {
 pub(crate) fn dependency_fingerprint_at(root: &Path, source: &str) -> Result<u64, String> {
     DEPENDENCY_WALKS.fetch_add(1, Ordering::Relaxed);
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hash);
+    shader_root_text(source).as_ref().hash(&mut hash);
     // Builtins and most inline shaders have no includes. Their source is the
     // entire dependency set, so even explicit prepare needs no filesystem IO.
     if literal_includes(source)?.is_empty() {
@@ -460,9 +460,18 @@ pub fn compile_hlsl_at(
     let _ = std::fs::remove_file(input);
     Ok(result)
 }
+// Embedded and authored root text may carry different Windows line endings.
+// Includes still contribute their exact bytes to the dependency fingerprint.
+fn shader_root_text(source: &str) -> std::borrow::Cow<'_, str> {
+    if source.contains("\r\n") {
+        std::borrow::Cow::Owned(source.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    }
+}
 fn shader_key(root: &Path, source: &str, entry: &str, profile: &str) -> Result<u64, String> {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hash);
+    shader_root_text(source).as_ref().hash(&mut hash);
     dependency_fingerprint_at(root, source)?.hash(&mut hash);
     entry.hash(&mut hash);
     profile.hash(&mut hash);
@@ -655,6 +664,151 @@ pub(crate) fn verify_shader(pass: &Pass, words: &[u32], vertex: bool) -> Result<
 #[cfg(test)]
 mod dependency_tests {
     use super::*;
+
+    fn eol_fixture(label: &str) -> PathBuf {
+        let parent = std::env::temp_dir().canonicalize().unwrap();
+        let root = parent.join(format!(
+            "module-hlsl-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn root_eol_identity_preserves_content_entry_profile_and_lone_cr() {
+        let absent = std::env::temp_dir().join("module-hlsl-eol-no-root-needed");
+        let lf = "// root comment\n#define GAIN (1 + \\\n2)\nfloat gain = GAIN;\n";
+        let crlf = lf.replace('\n', "\r\n");
+        let mixed = lf.replacen('\n', "\r\n", 1);
+        let fingerprint = dependency_fingerprint_at(&absent, lf).unwrap();
+        let key = shader_key(&absent, lf, "main", "cs_6_0").unwrap();
+        for source in [crlf.as_str(), mixed.as_str()] {
+            assert_eq!(
+                dependency_fingerprint_at(&absent, source).unwrap(),
+                fingerprint
+            );
+            assert_eq!(shader_key(&absent, source, "main", "cs_6_0").unwrap(), key);
+        }
+        for source in [lf.replace("1 +", "3 +"), lf.replacen('\n', "\r", 1)] {
+            assert_ne!(
+                dependency_fingerprint_at(&absent, &source).unwrap(),
+                fingerprint
+            );
+            assert_ne!(shader_key(&absent, &source, "main", "cs_6_0").unwrap(), key);
+        }
+        assert_ne!(shader_key(&absent, lf, "other", "cs_6_0").unwrap(), key);
+        assert_ne!(shader_key(&absent, lf, "main", "ps_6_0").unwrap(), key);
+    }
+
+    #[test]
+    fn root_eol_identity_keeps_nested_include_bytes_and_old_mtime_changes_exact() {
+        let root = eol_fixture("includes");
+        std::fs::create_dir_all(root.join("assets/gpu/sub")).unwrap();
+        std::fs::write(
+            root.join("assets/gpu/shared.hlsli"),
+            "#include \"sub/gain.hlsli\"\n",
+        )
+        .unwrap();
+        let include = root.join("assets/gpu/sub/gain.hlsli");
+        std::fs::write(&include, "float gain = 0.2;\n").unwrap();
+        let before_time = std::fs::metadata(&include).unwrap().modified().unwrap();
+        let lf = "// root\n#include \"shared.hlsli\"\n";
+        let first = dependency_fingerprint_at(&root, lf).unwrap();
+        let key = shader_key(&root, lf, "main", "cs_6_0").unwrap();
+        assert_eq!(
+            dependency_fingerprint_at(&root, &lf.replace('\n', "\r\n")).unwrap(),
+            first
+        );
+        assert_eq!(
+            shader_key(&root, &lf.replace('\n', "\r\n"), "main", "cs_6_0").unwrap(),
+            key
+        );
+        std::fs::write(&include, "float gain = 0.8;\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&include)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before_time))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&include).unwrap().modified().unwrap(),
+            before_time
+        );
+        assert_ne!(dependency_fingerprint_at(&root, lf).unwrap(), first);
+        assert_ne!(shader_key(&root, lf, "main", "cs_6_0").unwrap(), key);
+        std::fs::write(&include, "float gain = 0.2;\r\n").unwrap();
+        assert_ne!(
+            dependency_fingerprint_at(&root, lf).unwrap(),
+            first,
+            "Included EOL bytes remain exact"
+        );
+        assert_ne!(shader_key(&root, lf, "main", "cs_6_0").unwrap(), key);
+        std::fs::write(&include, "float gain = 0.2;\n").unwrap();
+        assert_eq!(dependency_fingerprint_at(&root, lf).unwrap(), first);
+        assert_eq!(shader_key(&root, lf, "main", "cs_6_0").unwrap(), key);
+        assert_eq!(root.canonicalize().unwrap(), root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn genuine_dxc_shader_sealed_lookup_accepts_root_eol_only_without_fallback() {
+        let package = eol_fixture("sealed");
+        let source = format!(
+            "// unique fixture {}\n[[vk::binding(0,0)]] RWStructuredBuffer<uint> result;\n#define VALUE (1u + \\\n2u)\n[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) {{ result[0] = VALUE; }}\n",
+            package.file_name().unwrap().to_string_lossy()
+        );
+        let compiler_root = resource_root();
+        let compiled = compile_hlsl_at(&compiler_root, &source, "main", "cs_6_0").unwrap();
+        assert_ne!(compiled.diagnostics, "Cached SPIR-V");
+        assert_ne!(compiled.diagnostics, "Precompiled Player SPIR-V");
+        let key = shader_key(&package, &source, "main", "cs_6_0").unwrap();
+        let sealed = package.join(".spirv");
+        std::fs::create_dir(&sealed).unwrap();
+        let artifact = sealed.join(format!("{key:016x}.spv"));
+        let bytes: Vec<_> = compiled
+            .words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        std::fs::write(&artifact, &bytes).unwrap();
+        let dxc_before = shader_performance().dxc_invocations;
+        for source in [
+            &source,
+            &source.replace('\n', "\r\n"),
+            &source.replacen('\n', "\r\n", 1),
+        ] {
+            let loaded = compile_hlsl_at(&package, source, "main", "cs_6_0").unwrap();
+            assert_eq!(loaded.words, compiled.words);
+            assert_eq!(loaded.diagnostics, "Precompiled Player SPIR-V");
+        }
+        let error = compile_hlsl_at(&package, &source.replace("1u +", "3u +"), "main", "cs_6_0")
+            .unwrap_err();
+        assert!(
+            error.contains("Precompiled Player shader") && error.contains("re-export"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&artifact).unwrap(), bytes);
+        std::fs::remove_file(&artifact).unwrap();
+        assert!(
+            compile_hlsl_at(&package, &source, "main", "cs_6_0")
+                .unwrap_err()
+                .contains("re-export")
+        );
+        // Like the native GPU checks, run this global-counter delta serially.
+        assert_eq!(shader_performance().dxc_invocations, dxc_before);
+        assert!(
+            !package.join(".work").exists(),
+            "A sealed lookup must not enter compiler/cache fallback"
+        );
+        assert_eq!(package.canonicalize().unwrap(), package);
+        std::fs::remove_dir_all(package).unwrap();
+    }
+
     #[test]
     fn native_dxc_discovery_is_deterministic_and_missing_tool_is_actionable() {
         let root = std::env::temp_dir().join(format!(

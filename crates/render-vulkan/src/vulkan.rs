@@ -2202,6 +2202,115 @@ mod content_player_tests {
         }
     }
     #[test]
+    fn sealed_custom_root_eol_variants_render_equal_without_dxc_and_content_changes_fail() {
+        let parent = std::env::temp_dir().canonicalize().unwrap();
+        let package = parent.join(format!(
+            "module-native-sealed-eol-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&package).unwrap();
+        let source = format!(
+            "// unique fixture {}\n{}",
+            package.file_name().unwrap().to_string_lossy(),
+            crate::graph::builtin_source("gpu.fxaa").replace("\r\n", "\n")
+        );
+        let mut graph = default_graph(RenderPath::Forward);
+        let fxaa = graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.module == "gpu.fxaa")
+            .unwrap();
+        fxaa.module = "gpu.custom".into();
+        fxaa.params = serde_json::json!({
+            "source_id": "eol-fxaa",
+            "manifest": crate::graph::builtin_manifest("gpu.fxaa").unwrap()
+        });
+        let sources = BTreeMap::from([("eol-fxaa".into(), source.clone())]);
+        let dxc_initial = crate::compiler::shader_performance().dxc_invocations;
+        precompile_graph_at(
+            &graph,
+            &sources,
+            &crate::compiler::resource_root(),
+            &package,
+        )
+        .unwrap();
+        assert!(
+            crate::compiler::shader_performance().dxc_invocations > dxc_initial,
+            "Unique Custom source must exercise real DXC before sealing"
+        );
+        let dxc_sealed = crate::compiler::shader_performance().dxc_invocations;
+        let scene = ObjectsWorld::demo().snapshot();
+        let mut baseline = None;
+        for source in [
+            &source,
+            &source.replace('\n', "\r\n"),
+            &source.replacen('\n', "\r\n", 1),
+        ] {
+            let mut renderer = VulkanRenderer::new_at(package.clone()).unwrap();
+            renderer.set_detailed_stats(false);
+            let frame = renderer
+                .render(
+                    &scene,
+                    Camera::default(),
+                    96,
+                    72,
+                    &graph,
+                    &BTreeMap::from([("eol-fxaa".into(), source.to_string())]),
+                    &RenderOverrides::default(),
+                )
+                .unwrap();
+            assert_eq!(frame.rgba.len(), 96 * 72 * 4);
+            if let Some(baseline) = &baseline {
+                assert_eq!(
+                    &frame.rgba, baseline,
+                    "Root EOL must preserve actual sealed GPU pixels"
+                );
+            } else {
+                baseline = Some(frame.rgba);
+            }
+        }
+        assert!(source.contains("0.0833"));
+        let changed = BTreeMap::from([("eol-fxaa".into(), source.replacen("0.0833", "0.1833", 1))]);
+        let error = VulkanRenderer::new_at(package.clone())
+            .unwrap()
+            .prepare(&graph, &changed)
+            .unwrap_err();
+        assert!(
+            error.contains("Precompiled Player shader") && error.contains("re-export"),
+            "{error}"
+        );
+        let artifact = std::fs::read_dir(package.join(".spirv"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(artifact).unwrap();
+        let error = VulkanRenderer::new_at(package.clone())
+            .unwrap()
+            .prepare(&graph, &sources)
+            .unwrap_err();
+        assert!(
+            error.contains("Precompiled Player shader") && error.contains("re-export"),
+            "{error}"
+        );
+        // Native checks run serially; sealed consumers must not compile on PATH.
+        assert_eq!(
+            crate::compiler::shader_performance().dxc_invocations,
+            dxc_sealed
+        );
+        assert!(!package.join(".work").exists());
+        let cleanup = package.canonicalize().unwrap();
+        assert_eq!(cleanup, package);
+        assert_eq!(cleanup.parent(), Some(parent.as_path()));
+        std::fs::remove_dir_all(cleanup).unwrap();
+    }
+
+    #[test]
     fn sealed_player_renders_from_exported_spirv_without_dxc_and_missing_artifact_fails() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let package = root.join(format!(
@@ -3176,7 +3285,7 @@ mod include_regression {
         let mut renderer =
             VulkanRenderer::new().expect("Real Vulkan adapter required for GPU regression");
         let name = format!("include-regression-{}", std::process::id());
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workspace = crate::compiler::resource_root();
         let directory = workspace.join(".work").join(&name);
         std::fs::create_dir_all(directory.join("child")).unwrap();
         std::fs::write(
