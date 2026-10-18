@@ -24,3 +24,17 @@
 *.backup-*
 *.module-engine-project.json
 /work/workflow-efficiency-20261017/
+
+# Generated native verification targets and captured inventory output.
+# Keep authored plans and research notes in work/ visible.
+/work/ct[cCdDnN][0-9][0-9]/
+/work/gpuCold[0-9][0-9]/
+/work/gpuColdA[0-9][0-9]/
+/work/gs[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+/work/gsasync[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+/work/pc[0-9A-Fa-f]*-[0-9][0-9]/
+/work/pfCFin[0-9][0-9]/
+/work/pfCold[0-9][0-9]/
+/work/pfDiag[0-9][0-9]/
+/work/editor-diagnostics-tests/
+/work/editor-cyrillic-inventory-raw.txt
