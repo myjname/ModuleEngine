@@ -14,6 +14,7 @@ English is the primary documentation language. Every document below has a comple
 - [Working on ModuleEngine](../AGENTS.md)
 - [Current ModuleEngine Status](current-status.md)
 - [P0 current-version stabilization: evidence and decision status](p0-stabilization-20261017.md)
+- [Current P0 finalization: completed checks, source binding and decision](p0-finalization-20261018.md)
 - [Historical GPU presentation snapshot: normal criteria pass; cold gate open at that stage](gpu-presentation-20261018.md)
 - [Async GPU: current scoped Windows/Linux checks and performance limits](gpu-async-20261018.md)
 - [Historical pre-async P0 continuation: cold, GPU transport, window and authoring](p0-continuation-20261018.md)

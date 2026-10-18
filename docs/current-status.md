@@ -4,7 +4,7 @@
 
 [English](current-status.md) | [Русский](ru/current-status.md) | [Documentation](README.md)
 
-Summary as of 18 October 2026: current async runtime evidence is separately bound to Windows08/LinuxL01 in the new report; earlier results retain their own source/artifact snapshots. This is an index of current contracts and accumulated evidence, not a new acceptance of HEAD or a finished EXE. Test counts and measurements apply only to the snapshot of each report.
+Summary as of 18 October 2026: the [current P0 finalization](p0-finalization-20261018.md) records complete Windows and applicable Linux checks plus scoped real foreground observations. The [external final review](../outputs/reviews/p0-finalization-20261018/final-review.md) governs source-bound acceptance. [17 October P0](p0-stabilization-20261017.md), [pre-async continuation](p0-continuation-20261018.md) and [async evidence](gpu-async-20261018.md) retain their own artifacts and limits; this page does not turn its date into a new EXE acceptance.
 
 <a id="цели-и-границы"></a>
 
@@ -52,6 +52,18 @@ recording it does not itself close the evidence gates.
 - **Native Linux WAV and File/Folder dialogs are absent.** A verification project without audio and CLI operations do not confirm these services; production data must not silently lose sound. See [Linux services](linux-support.md#optional-services).
 - **Hardware Linux, portability across arbitrary ABIs/drivers, and manual foreground input-to-display QA are not certified.** WSLg software Vulkan and offscreen package verification cover a different scope.
 - The Custom worker manages process lifetimes, but **is not a sandbox for untrusted Rust**. Explicit diagnostic GPU readback, bounded background GPU-retirement waiting, the limited visual Rust subset, and other functional boundaries remain documented in their respective contracts.
+
+<a id="p0-finalization-20261018"></a>
+
+### Current P0 finalization — evidence and decision
+
+Actual candidate09 normal Editor `a3106737…` differs from measured source08 `dcaaf0f3…` despite equal 150/163 native inputs. Its unchanged six CLI routes, fresh cold and actual ARPG Editor/relocated Player validation are PASS: [CLI 6/6](../outputs/verification/p0-finalization-20261018/windows-cli-final-09/result.json), [fresh cold](../outputs/verification/p0-finalization-20261018/cold-final-09/launch.json), [current ARPG pair](../outputs/verification/p0-finalization-20261018/arpg-final-09/result.json); no source08 timing/physical result is relabeled as a new artifact measurement. Final binding follows source10/normal10/new Full10/data-proof10 records in the report and the external decision.
+
+Source08 passes complete default workspace runs: **Windows 712 ordinary/9 ignored; Linux 710/8**, each with all 14 actual artifacts and an explicit zero-test Player-bin harness. Required native/package cases pass separately: Windows 7; Linux 6 plus the explicit Windows-only executable-spelling skip. The fixture-emitter and historical catchup diagnostic remain excluded. Strict static/configuration checks, functional Full/Team/selected Player delivery and current GPU Windows 27/16/Linux 28/16 pass; counts and source/artifact boundaries are in the [report](p0-finalization-20261018.md).
+
+The revalidated candidate09 normal Windows Editor `a3106737…` native ARPG window and new relocated Player `4786c95a…` pass unchanged 1080p/20-enemy Playing gates: actual UI FPS **119.0092/119.8802**, p95 **14.1886/14.0567 ms**, zero measured CPU pixel/readback/upload. Fresh target-cold passes **36.172 s wall / 35.1084651 s internal**, including final Stop readiness. The report retains source08 metrics on `dcaaf0f3…` separately. These checks imply neither causal A/B savings nor clean-machine/scanout guarantees. Linux software-Vulkan Puzzle remains functional evidence with `target_met=false`, not a timing pass.
+
+Foreground01 records native Unicode Save As, Scene transforms/save/reopen, Cancel/Undo, rejected graph connection, Import Cancel and Play/restart/Stop with natural exit and preservation. Its exact 15 author-copy changes and six groups not newly physically certified are explicit; the broad helper checklist is not a new set of gates. Earlier failed attempts remain failed. Final documentation/tool delivery records and the [independent final decision](../outputs/reviews/p0-finalization-20261018/final-review.md) control current P0 closure; hardware Linux, native Linux audio/dialogs and physical input-to-display limits remain.
 
 ### Async GPU producer: scoped runtime gates PASS — 18 October 2026
 

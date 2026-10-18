@@ -14,6 +14,7 @@
 - [Работа над ModuleEngine](agent-guide.md)
 - [Текущее состояние ModuleEngine](current-status.md)
 - [Стабилизация текущей версии P0: доказательства и статус решения](p0-stabilization-20261017.md)
+- [Текущее завершение P0: выполненные проверки, привязка исходников и решение](p0-finalization-20261018.md)
 - [Исторический снимок показа кадров на GPU: обычные критерии пройдены, cold открыт на том этапе](gpu-presentation-20261018.md)
 - [Асинхронный GPU: текущие ограниченные проверки Windows/Linux и границы производительности](gpu-async-20261018.md)
 - [Историческое продолжение P0 до async: cold, GPU transport, window и authoring](p0-continuation-20261018.md)

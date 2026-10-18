@@ -42,7 +42,7 @@ Initially G1–G10 are proposed; G1/G2 have existing functional technical baseli
 See [current status](current-status.md), [architecture](architecture.md),
 [Puzzle](puzzle-project.md) and [game-stage scope](next-stage.md).
 
-Clippy, Editor diagnostics and CI cache work improve verification and iteration; those checks alone do not establish Player performance or cold Editor preparation. The 17 October P0 snapshot passed the unchanged Windows ARPG and target-cold criteria. The later [GPU presentation stage](gpu-presentation-20261018.md) passes current normal Windows criteria; the first eligible restored-normal cold attempt passes both unchanged ≤45 s clocks on its exact artifact; see the [continuation](p0-continuation-20261018.md). Earlier cold failures remain failed with unknown cause. The Scene-input correction has Windows/Linux green evidence and actual foreground checks of the three manipulators. See the [P0 report](p0-stabilization-20261017.md) for exact scope and the final independent decision record. Existing native, content and platform limits below remain applicable; this roadmap does not implement future portfolio systems.
+The [historical P0 report](p0-stabilization-20261017.md), [pre-async continuation](p0-continuation-20261018.md) and [async report](gpu-async-20261018.md) retain separate artifact-bound results. [Current finalization](p0-finalization-20261018.md) records complete Windows/applicable Linux ordinary, native/package, functional delivery and GPU checks, unchanged Windows ARPG/cold gates and scoped foreground observations. Earlier failures and platform/content limits remain explicit. Current P0 closure follows the [external final decision](../outputs/reviews/p0-finalization-20261018/final-review.md), not this roadmap or historical acceptance.
 
 ## Proposed minimum five games
 
@@ -80,7 +80,7 @@ five games. A chosen game that genuinely needs one creates its own scoped task.
 
 | Area | Existing boundary | Planned work and first consumer |
 | --- | --- | --- |
-| Runtime and presentation | Normal Vulkan presentation keeps pixels on GPU through opaque frame leases and platform-specific interop; fixed 60 Hz simulation and eligible interpolated presentation. [Windows source15 normal criteria pass](gpu-presentation-20261018.md) on the exact measured artifacts; the first eligible restored-normal cold attempt passes both unchanged ≤45 s clocks on its exact artifact; see the [continuation](p0-continuation-20261018.md). Earlier cold failures remain failed with unknown cause. Current Linux interop evidence is separately WSL llvmpipe-bound; the continuation records23 cases/16 exact comparisons, Windows22/16, and their exact inventories | Preserve the unchanged gates and source-bound evidence; resolve and recheck the documented continuation cases. G2 must retain and recheck them; Linux software-GPU functional checks do not establish hardware/FPS parity. |
+| Runtime and presentation | Native Vulkan uses asynchronous production/polling with bounded GPU leases/platform interop; simulation is 60 Hz and eligible presentation targets 120 Hz. [Current finalization](p0-finalization-20261018.md) records Windows/applicable Linux correctness and delivery, unchanged Windows ARPG/cold gates and scoped foreground observations. | Preserve the unchanged source/artifact-bound gates and recheck them in G2. P0 closure is controlled by its external final review before P1. Linux software-GPU functionality does not establish hardware/FPS parity, Linux ARPG/cold or scanout. |
 | Game services | Basic input, event-driven Windows WAV with one voice and no long-term game-save contract | Reusable input actions, game UI, multi-voice audio/mixing and versioned progress saves as required by G1/G2; keep game progress separate from authored scenes and Play copies. |
 | Animation and content | Static glTF/GLB and opaque base color; no skeletal animation, executed normal/roughness/metallic maps or mipmaps | Minimum character animation needed by G2; independent sprite animation for G3; material/lighting/filtering work for G5. Define content/reference quality and resource budgets before implementation. |
 | 2D | Existing board rules and 3D snapshots do not establish a general sprite/2D authoring pipeline | Optional sprite, atlas, camera/layer, alpha blending/masks, tile/level and collision contracts for G3. Low-level GPU infrastructure may be shared without exposing unused 3D settings. |
@@ -104,7 +104,7 @@ Detailed current boundaries: [content](content.md), [GPU/HLSL](gpu-hlsl.md),
 | P4 — realistic profile | G5, required material/lighting/content improvements and agreed visual references | The playable game meets its approved visual and frame/memory budgets on declared hardware, with actual imported content and a standalone package. A still image or renderer-only benchmark is insufficient. |
 | P5 — portfolio acceptance and optional expansion | Reuse/configuration matrix for five games; select G6–G10 only for uncovered capabilities | All mandatory coverage is present and every counted game passes on one declared common engine release. Extra games follow the same gates rather than resetting compatibility. |
 
-The 17 October P0 Windows timing/cold, scoped Windows/Linux functional checks and actual Scene manipulators have source-bound evidence. The [P0 report](p0-stabilization-20261017.md) records the exact scope, limits and final independent decision; the acceptance requirements above remain unchanged.
+The [17 October P0 acceptance](p0-stabilization-20261017.md) remains historical. [Current finalization](p0-finalization-20261018.md) records the completed existing-feature matrix and limits; the [external final review](../outputs/reviews/p0-finalization-20261018/final-review.md) determines current source-bound acceptance. The phase criteria above are unchanged.
 
 Performance, authoring, documentation and migration are continuous work across
 these phases. P0 is a prerequisite for P1 implementation and new game-driven
@@ -192,15 +192,11 @@ covered and no required per-game gate left open.
 
 ## Immediate next increment and later decisions
 
-Preserve the historical P0 acceptance and complete the current GPU presentation
-stage against the unchanged source-bound criteria before P1; the first eligible
-normal cold attempt now passes, and the continuation records the exact scope.
-A short G1 brief may be prepared in parallel: level/content scope, controls/UI,
-save requirements, visual reference and target budgets. Use separate
-verification projects; preserve the user's authored `game-project-v4.json`.
-GPU-resident presentation is implemented within the [documented scope](gpu-presentation-20261018.md).
-Further frames-in-flight or interop changes require profiling the complete frame
-path; CPU readback remains an explicit diagnostic/capture capability.
+The changed candidate09 normal EXE has a separate actual build identity. Current-artifact CLI/cold/ARPG revalidation is PASS: [CLI 6/6](../outputs/verification/p0-finalization-20261018/windows-cli-final-09/result.json), [fresh cold](../outputs/verification/p0-finalization-20261018/cold-final-09/launch.json), [current ARPG pair](../outputs/verification/p0-finalization-20261018/arpg-final-09/result.json); source08 matrix/foreground evidence retains its scope. Final source10 build/delivery/data records and the external verdict control closure; unchanged inputs alone do not prove binary equivalence.
+
+Use the [current P0 evidence](p0-finalization-20261018.md) and its external final decision to determine closure before P1. Retain the complete matrix, unchanged Windows ARPG/cold gates, scoped Linux/foreground coverage, preservation and all failed attempts; future changes need renewed applicable evidence.
+
+A short G1 brief may proceed: levels/content, controls/UI, saves, visual reference and budgets. Preserve authored `game-project-v4.json` and use separate verification projects. Asynchronous GPU-resident presentation is implemented within the [documented scope](gpu-async-20261018.md); further producer/interop changes require full frame-path evidence. CPU readback remains an explicit diagnostic/capture facility.
 
 Before each new game, confirm its brief and newly required modules. Still open:
 the exact game designs/lengths/assets, which optional entries are worthwhile,

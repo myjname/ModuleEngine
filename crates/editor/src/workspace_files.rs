@@ -1119,13 +1119,33 @@ mod tests {
         }
         document
     }
-    fn distribution(document: &GraphDocument, profile: DistributionProfile) -> Distribution {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        distribution::detect(&root.join("game-project.json"), document, Some(profile)).unwrap()
+    fn distribution(
+        document: &GraphDocument,
+        profile: DistributionProfile,
+    ) -> (module_engine_script::TestArtifactGuard, Distribution) {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/test-temp");
+        let sources =
+            module_engine_script::TestArtifactGuard::new(&base, "workspace-full-source").unwrap();
+        distribution::copy_native_fixture(sources.path());
+        distribution::write_full_manifest(sources.path(), document).unwrap();
+        let capability = distribution::detect(
+            &sources.path().join("game-project.json"),
+            document,
+            Some(profile),
+        )
+        .unwrap();
+        assert_eq!(capability.package_root, sources.path());
+        assert_eq!(capability.profile, profile);
+        if profile == DistributionProfile::Full {
+            assert!(
+                capability.can_author_engine(),
+                "{:?}",
+                capability.source_status
+            );
+        } else {
+            assert!(!capability.can_author_engine());
+        }
+        (sources, capability)
     }
     fn model_files(root: &Path) {
         fs::create_dir_all(root.join("resources/model")).unwrap();
@@ -1207,7 +1227,7 @@ mod tests {
             ("full", DistributionProfile::Full),
             ("team", DistributionProfile::Team),
         ] {
-            let capability = distribution(&document, profile);
+            let (_capability_sources, capability) = distribution(&document, profile);
             let saved = save_as(
                 &json,
                 &root.join(name).join("project.json"),
@@ -1244,7 +1264,7 @@ mod tests {
         )
         .unwrap();
         let mut document = crate::game_templates::puzzle_document();
-        let capability = distribution(&document, DistributionProfile::Full);
+        let (_capability_sources, capability) = distribution(&document, DistributionProfile::Full);
         document.schema_version = 3;
         document.engine_lock = None;
         document.engine_profile = None;
@@ -1339,7 +1359,7 @@ mod tests {
         let resource_bytes = b"legacy author resource\0\xff";
         fs::write(&resource, resource_bytes).unwrap();
         let mut document = crate::game_templates::puzzle_document();
-        let capability = distribution(&document, DistributionProfile::Full);
+        let (_capability_sources, capability) = distribution(&document, DistributionProfile::Full);
         document.schema_version = 3;
         document.engine_lock = None;
         document.engine_profile = None;
@@ -1471,7 +1491,8 @@ mod tests {
         )
         .unwrap();
         let original = fs::read(source.join("project.json")).unwrap();
-        let distribution = distribution(&document, DistributionProfile::Full);
+        let (_distribution_sources, distribution) =
+            distribution(&document, DistributionProfile::Full);
         let saved = save_as(
             &source.join("project.json"),
             &target.join("project.json"),
@@ -1528,7 +1549,8 @@ mod tests {
         fs::write(target.join("assets/file.txt"), b"different").unwrap();
         let document = document();
         let before = document.clone();
-        let distribution = distribution(&document, DistributionProfile::Full);
+        let (_distribution_sources, distribution) =
+            distribution(&document, DistributionProfile::Full);
         let result = save_as(
             &source.join("project.json"),
             &target.join("project.json"),
@@ -1594,7 +1616,8 @@ mod tests {
         )
         .unwrap();
         let document = document();
-        let distribution = distribution(&document, DistributionProfile::Full);
+        let (_distribution_sources, distribution) =
+            distribution(&document, DistributionProfile::Full);
         let source = installation.join("game-project.json");
         let original_bytes = serde_json::to_vec_pretty(&document).unwrap();
         fs::write(&source, &original_bytes).unwrap();
@@ -1628,7 +1651,8 @@ mod tests {
         let root = fixture();
         let document = document();
         fs::write(root.join("old.json"), b"old authored bytes").unwrap();
-        let distribution = distribution(&document, DistributionProfile::Full);
+        let (_distribution_sources, distribution) =
+            distribution(&document, DistributionProfile::Full);
         let saved = save_as(
             &root.join("old.json"),
             &root.join("new.json"),
@@ -1656,7 +1680,8 @@ mod tests {
     fn save_as_keeps_an_in_progress_disconnected_author_graph() {
         let root = fixture();
         let original = document();
-        let distribution = distribution(&original, DistributionProfile::Full);
+        let (_distribution_sources, distribution) =
+            distribution(&original, DistributionProfile::Full);
         let source = root.join("original.json");
         let original_bytes = serde_json::to_vec_pretty(&original).unwrap();
         fs::write(&source, &original_bytes).unwrap();
@@ -1717,7 +1742,7 @@ mod tests {
         let json = source.join("project.json");
         fs::write(&json, serde_json::to_vec_pretty(&current).unwrap()).unwrap();
         for profile in [DistributionProfile::Full, DistributionProfile::Team] {
-            let dist = distribution(&current, profile);
+            let (_dist_sources, dist) = distribution(&current, profile);
             let dependencies = module_engine_project::collect_hlsl_source_dependencies(
                 &dist.package_root,
                 "__inline__.hlsl",
@@ -1769,8 +1794,8 @@ mod tests {
         fs::write(target.join("assets/item.txt"), b"same resource").unwrap();
         fs::write(source.join("source.json"), b"original source bytes").unwrap();
         let document = document();
-        let full = distribution(&document, DistributionProfile::Full);
-        let team = distribution(&document, DistributionProfile::Team);
+        let (_full_sources, full) = distribution(&document, DistributionProfile::Full);
+        let (_team_sources, team) = distribution(&document, DistributionProfile::Team);
         let path = target.join("project.json");
         let old_json = b"previous project exact bytes\r\n";
         fs::write(&path, old_json).unwrap();
@@ -1842,8 +1867,32 @@ mod tests {
             "engine-source".into(),
             "fn value(_ctx: &ScriptContext) -> f64 { 7.0 }".into(),
         );
-        let full = distribution(&current, DistributionProfile::Full);
-        let team = distribution(&current, DistributionProfile::Team);
+        let (full_sources, full) = distribution(&current, DistributionProfile::Full);
+        // Two Arenas reads its real template resources from the installed package.
+        // Keep this content fixture local: other tests deliberately replace assets.
+        let template_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut template_assets = AssetManifest::default();
+        for relative in [
+            "assets/models/demo_crystal.glb",
+            "assets/audio/attack.wav",
+            "assets/audio/hit.wav",
+            "assets/audio/death.wav",
+            "assets/audio/victory.wav",
+        ] {
+            template_assets
+                .register(relative, relative, &template_root)
+                .unwrap();
+        }
+        template_assets.verify(&template_root).unwrap();
+        let exported = module_engine_project::export_assets(
+            &template_root,
+            &template_assets,
+            full_sources.path(),
+        )
+        .unwrap();
+        assert_eq!(exported.len(), template_assets.assets.len());
+        template_assets.verify(full_sources.path()).unwrap();
+        let (_team_sources, team) = distribution(&current, DistributionProfile::Team);
         for template in [ProjectTemplate::Empty, ProjectTemplate::TwoArenas] {
             let new = template_document(&current, template, &team).unwrap();
             assert_eq!(new.engine, current.engine);
@@ -1900,6 +1949,9 @@ mod tests {
             ProjectTemplate::TwoArenas,
         )
         .unwrap();
+        template_assets
+            .verify(saved.path.parent().unwrap())
+            .unwrap();
         assert_eq!(saved.document.game.unwrap().scenes.len(), 2);
         cleanup(&root);
     }
@@ -1932,7 +1984,7 @@ mod tests {
             .unwrap()
             .identity;
         for kind in [DistributionProfile::Full, DistributionProfile::Team] {
-            let capability = distribution(&current, kind);
+            let (_capability_sources, capability) = distribution(&current, kind);
             assert!(capability.can_edit_custom_source("root-project-controller", &current));
             assert!(!capability.can_edit_custom_source("protected-unused-engine-source", &current));
             let fresh = template_document(&current, ProjectTemplate::Empty, &capability).unwrap();
@@ -1998,7 +2050,7 @@ mod tests {
             "game-controller".into(),
             "fn update(ctx: &mut ScriptContext) { ctx.set_color(1,[9,8,7,255]); }".into(),
         );
-        let full = distribution(&shared, DistributionProfile::Full);
+        let (_full_sources, full) = distribution(&shared, DistributionProfile::Full);
         assert!(full.can_edit_custom_source("game-controller", &shared));
         let fresh = template_document(&shared, ProjectTemplate::TwoArenas, &full).unwrap();
         assert_eq!(fresh.root, shared.root);
@@ -2051,7 +2103,7 @@ mod tests {
             )
             .unwrap()
             .apply_to(&mut protected);
-        let full = distribution(&protected, DistributionProfile::Full);
+        let (_full_sources, full) = distribution(&protected, DistributionProfile::Full);
         assert!(!full.can_edit_custom_source("game-controller", &protected));
         let before = protected.clone();
         assert!(
@@ -2102,7 +2154,7 @@ mod tests {
             ("full", DistributionProfile::Full),
             ("team", DistributionProfile::Team),
         ] {
-            let context = distribution(&document, profile);
+            let (_context_sources, context) = distribution(&document, profile);
             let saved = save_as(
                 &source.join("project.json"),
                 &root.join(name).join("project.json"),
@@ -2155,7 +2207,7 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         let document = crate::game_host::puzzle_document();
         let before = document.clone();
-        let team = distribution(&document, DistributionProfile::Team);
+        let (_team_sources, team) = distribution(&document, DistributionProfile::Team);
         let path = source.join("project.json");
         let raw = serde_json::to_vec_pretty(&document).unwrap();
         fs::write(&path, &raw).unwrap();
