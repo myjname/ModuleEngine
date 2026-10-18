@@ -1599,6 +1599,7 @@ mod workflow_tests {
     use module_engine_core::{WorldKind, demo_document};
 
     struct Fixture {
+        owner: PathBuf,
         root: PathBuf,
         path: PathBuf,
     }
@@ -1610,15 +1611,18 @@ mod workflow_tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = base.join(format!("editor-workflow-{}-{stamp}", std::process::id()));
+            let owner = base.join(format!("editor-workflow-{}-{stamp}", std::process::id()));
+            fs::create_dir(&owner).unwrap();
+            let owner = owner.canonicalize().unwrap();
+            let root = owner.join("project");
             fs::create_dir(&root).unwrap();
-            let root = root.canonicalize().unwrap();
+            let installation = owner.join("engine");
+            crate::distribution::copy_native_fixture(&installation);
             let path = root.join("project.json");
             let mut document = demo_document(WorldKind::Objects);
             if game {
                 document.game = Some(module_engine_two_arenas::demo_project());
             }
-            let installation = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
             crate::engine_profiles::finish_template(
                 &mut document,
                 if game {
@@ -1629,11 +1633,13 @@ mod workflow_tests {
                 &installation,
             )
             .unwrap();
+            crate::distribution::write_full_manifest(&installation, &document).unwrap();
+            let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
             if let Some(game) = &document.game {
                 for path in game.audio_cues.values() {
                     let target = root.join(path);
                     fs::create_dir_all(target.parent().unwrap()).unwrap();
-                    fs::copy(installation.join(path), target).unwrap();
+                    fs::copy(checkout.join(path), target).unwrap();
                 }
             }
             let distribution = crate::distribution::detect(
@@ -1642,7 +1648,12 @@ mod workflow_tests {
                 Some(crate::distribution::DistributionProfile::Full),
             )
             .unwrap();
-            assert!(distribution.can_author_engine());
+            assert!(
+                distribution.can_author_engine(),
+                "{:?}",
+                distribution.source_status.diagnostics
+            );
+            assert_eq!(distribution.package_root, installation);
             fs::write(
                 crate::distribution::project_binding_path(&path).unwrap(),
                 serde_json::to_vec_pretty(
@@ -1656,7 +1667,12 @@ mod workflow_tests {
             let document = crate::project::read(&path).unwrap();
             let mut editor = Editor::new(document, path.clone());
             editor.playing = false;
-            (Self { root, path }, editor)
+            assert!(editor.can_author_engine());
+            assert_eq!(
+                editor.distribution.as_ref().unwrap().package_root,
+                installation
+            );
+            (Self { owner, root, path }, editor)
         }
     }
     impl Drop for Fixture {
@@ -1666,15 +1682,16 @@ mod workflow_tests {
                 .join("../../.work/test-temp")
                 .canonicalize()
                 .unwrap();
-            if let Ok(root) = self.root.canonicalize() {
-                assert!(root.starts_with(&allowed));
+            if let Ok(owner) = self.owner.canonicalize() {
+                assert!(owner.starts_with(&allowed));
                 assert!(
-                    root.file_name()
+                    owner
+                        .file_name()
                         .unwrap()
                         .to_string_lossy()
                         .starts_with("editor-workflow-")
                 );
-                let _ = fs::remove_dir_all(root);
+                let _ = fs::remove_dir_all(owner);
             }
         }
     }

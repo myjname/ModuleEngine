@@ -12,6 +12,8 @@ Summary as of 18 October 2026: current async runtime evidence is separately boun
 
 The PR preparation also closes a Full-source completeness gap: `crates/render-vulkan/src/retirement.rs` is now mandatory in the source inventory. Omitting it rejects Engine authoring; the source-omission regression covers this additional packaging guard separately from the historical async runtime measurements.
 
+Workflow and personal-layout tests now use [isolated, normally validated source installations](verification.md#isolated-source-fixtures), so a stale checkout manifest cannot stop their CI scenarios before the intended assertions. This changes test setup; runtime acceptance remains bound to the reports below.
+
 Shared modules and typed contracts must work independently of genre and specific examples. Authored data is separate from Play; rejecting a change preserves the working version and the user's work. Engine owns the architecture; Project changes what is permitted. Player is a separate native distribution with explicitly selected features, without Editor, Rust/Cargo/DXC on the player's machine.
 
 The accepted long-term goal is a [portfolio of 5–10 distinct finished games](portfolio-roadmap.md)

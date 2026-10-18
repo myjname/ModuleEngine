@@ -1064,6 +1064,20 @@ fn verify_team_backend(
 }
 
 #[cfg(test)]
+pub(crate) fn copy_native_fixture(root: &Path) {
+    let original = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    for relative in NATIVE_FILES {
+        let p = root.join(relative);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::copy(original.join(relative), p).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod delivery_tests {
     use super::*;
     use module_engine_core::WorldKind;
@@ -1083,18 +1097,6 @@ mod delivery_tests {
         let t = std::env::temp_dir().canonicalize().unwrap();
         assert!(p.starts_with(&t) && p != t);
         fs::remove_dir_all(p).unwrap();
-    }
-    fn copy_native_fixture(root: &Path) {
-        let original = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        for relative in NATIVE_FILES {
-            let p = root.join(relative);
-            fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::copy(original.join(relative), p).unwrap();
-        }
     }
     #[test]
     fn windows_binding_recognition_accepts_only_absolute_drive_paths() {
