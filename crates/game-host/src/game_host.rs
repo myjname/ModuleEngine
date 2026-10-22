@@ -836,7 +836,7 @@ impl GameHost {
         };
         let compile_root = options.compile_root.as_deref();
         if let Some(progress) = progress {
-            progress.stage("Проверка модулей и игровой сцены");
+            progress.stage("Validating modules and the game scene");
         }
         let mut game = document
             .game
@@ -869,7 +869,7 @@ impl GameHost {
         }
         let mut sources = BTreeMap::new();
         if let Some(progress) = progress {
-            progress.stage("Подготовка Rust Custom");
+            progress.stage("Preparing Rust Custom");
         }
         for id in script_ids(&game) {
             check_preparation_cancelled(cancelled)?;
@@ -973,7 +973,7 @@ impl GameHost {
         let mut renderer = match options.render {
             RenderMode::Graph => {
                 if let Some(progress) = progress {
-                    progress.stage("Подготовка выбранного рендера");
+                    progress.stage("Preparing the selected renderer");
                 }
                 let route = composition.modules.render_route(&document)?;
                 Some(
@@ -992,7 +992,7 @@ impl GameHost {
             .as_ref()
             .map_or_else(|| "Headless".into(), |r| r.backend_name().to_owned());
         if let Some(progress) = progress {
-            progress.stage("Загрузка моделей, текстур и звука");
+            progress.stage("Loading models, textures and audio");
         }
         let mut content = ContentLibrary::new(&root)?;
         let assets = module_engine_project::AssetManifest::from_value(&document.asset_manifest)?;
@@ -2137,7 +2137,7 @@ impl GameHost {
     pub fn cancel_preparation(&mut self) {
         if let Some(job) = self.render_preparation.take() {
             job.progress
-                .succeed("Запрос заменён; текущий рендер сохранён");
+                .succeed("Request superseded; current renderer preserved");
             job.retire();
         }
     }
@@ -2190,11 +2190,12 @@ impl GameHost {
         let controls = retained_render_controls(&modules, &self.document, document, &current)?;
         let worker_document = candidate.clone();
         let time = self.session.state().time;
-        let progress = BuildProgress::new("Рендер Game / Scene");
+        let progress = BuildProgress::new("Game / Scene renderer");
         let worker_progress = progress.clone();
         let dependencies = RendererDependencyWatch::new(document, &modules);
         let (receiver, job) = module_engine_script::spawn_job(move |cancelled| {
-            worker_progress.stage("Подготовка выбранного рендера; текущий кадр доступен");
+            worker_progress
+                .stage("Preparing the selected renderer; current frame remains available");
             (|| {
                 check_preparation_cancelled(cancelled)?;
                 validate_candidate_controls(&modules, &worker_document, &controls, time)?;
@@ -2236,13 +2237,13 @@ impl GameHost {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err("Поток подготовки рендера завершился без результата".into())
+                Err("Renderer preparation thread ended without a result".into())
             }
         };
         let job = self.render_preparation.take().unwrap();
         if !job.document.execution_eq(document) {
             job.progress
-                .succeed("Устаревший запрос заменён; текущий рендер сохранён");
+                .succeed("Stale request superseded; current renderer preserved");
             retire_in_background(result);
             return Ok(());
         }
@@ -2283,7 +2284,7 @@ impl GameHost {
                 self.rejected_preparation = None;
                 self.rejected_preparation_dependencies = None;
                 job.progress
-                    .succeed("Новый рендер применён; игровое состояние сохранено");
+                    .succeed("New renderer applied; game state preserved");
                 retire_in_background(old);
                 Ok(())
             }

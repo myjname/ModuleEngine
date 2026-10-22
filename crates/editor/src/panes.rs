@@ -532,7 +532,7 @@ impl Editor {
 
     pub(super) fn add_library_node(&mut self, module: &str) {
         let Some((id, _, _)) = self.library_graph_context() else {
-            self.status = "Сначала откройте нужный Module Graph.".into();
+            self.status = "Open the target Module Graph first.".into();
             return;
         };
         let mut memory = match self.workspace {
@@ -1306,6 +1306,64 @@ mod tests {
 #[cfg(test)]
 mod editor_choice_regression {
     use super::*;
+
+    #[test]
+    fn rust_toolbar_remains_separate_from_inspector_in_narrow_panes() {
+        let document = crate::game_host::demo_document();
+        let (_sources, mut editor) = super::super::tests::isolated_editor(document);
+        editor.preview_builder = PreviewBuilder::new();
+        editor.playing = false;
+        editor.current_source = "game-controller".into();
+        editor.custom_view = CustomView::Both;
+        editor.parse_custom();
+        editor.game_workbench.set_deferred_preparation(true);
+        assert!(editor.command_program.is_some());
+        let before = editor.document.clone();
+        for width in [440., 560., 800.] {
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(width, 600.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| editor.rust_area(ui),
+            );
+            let text_rect = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing text at pane width {width}: {label}"))
+            };
+            let help = text_rect(
+                "Select a command parameter: number, string, or flag. A visual edit changes Rust and starts candidate compilation.",
+            );
+            for label in [
+                "Custom / Rust",
+                "game-controller",
+                "Text",
+                "Graph",
+                "Side by side",
+            ] {
+                let control = text_rect(label);
+                assert!(
+                    control.right() <= help.left(),
+                    "{label} overlaps the inspector column at pane width {width}: {control:?}, {help:?}"
+                );
+            }
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(editor.document, before);
+    }
+
     #[test]
     fn viewport_to_rust_editor_parses_shared_source_without_a_text_change() {
         let document = module_engine_core::demo_document(WorldKind::Objects);

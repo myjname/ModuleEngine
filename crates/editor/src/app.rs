@@ -390,13 +390,10 @@ impl Editor {
             .map(|p| host::registry_at(&p.package_root))
             .unwrap_or_else(host::registry)
         {
-            Ok(registry) => (
-                registry,
-                "Готово. Изменяйте граф или откройте Custom.".into(),
-            ),
+            Ok(registry) => (registry, "Ready. Edit the graph or open Custom.".into()),
             Err(error) => (
                 ModuleRegistry::builtin(),
-                format!("Ошибка регистрации модулей: {error}"),
+                format!("Module registration error: {error}"),
             ),
         };
         let history = SnapshotHistory::new(document.clone(), 200);
@@ -464,7 +461,7 @@ impl Editor {
             history,
             history_dirty: false,
             history_edit_time: 0.,
-            checkpoint_label: "Версия проекта".into(),
+            checkpoint_label: "Project version".into(),
             merge_base: "project-base.json".into(),
             merge_theirs: "project-theirs.json".into(),
             merge_result: None,
@@ -608,7 +605,7 @@ impl Editor {
             return;
         }
         if self.history_dirty {
-            self.history.record("Изменение проекта", &self.document);
+            self.history.record("Project change", &self.document);
             self.history_dirty = false;
         }
     }
@@ -616,7 +613,9 @@ impl Editor {
     fn restore_document(&mut self, document: GraphDocument) {
         self.cancel_active_scene_gestures();
         if self.json_dirty || self.game_workbench.has_graph_draft() {
-            self.status = "Примените или отмените черновики JSON и Gameplay Systems перед восстановлением версии".into();
+            self.status =
+                "Apply or discard the JSON and Gameplay Systems drafts before restoring a version"
+                    .into();
             return;
         }
         if let Err(error) = self.validate_candidate(&document, self.can_author_engine()) {
@@ -674,11 +673,11 @@ impl Editor {
     fn undo(&mut self) {
         self.cancel_active_scene_gestures();
         if self.game_workbench.has_graph_draft() {
-            self.status = "Примените или отмените черновик Gameplay Systems перед Undo".into();
+            self.status = "Apply or discard the Gameplay Systems draft before Undo".into();
             return;
         }
         if self.json_dirty {
-            self.status = "Примените или отмените JSON-черновик перед Undo".into();
+            self.status = "Apply or discard the JSON draft before Undo".into();
             return;
         }
         self.flush_history();
@@ -697,18 +696,18 @@ impl Editor {
         }
         if let Some(document) = self.history.undo() {
             self.restore_document(document);
-            self.status = "Изменение отменено".into();
+            self.status = "Change undone".into();
         }
     }
 
     fn redo(&mut self) {
         self.cancel_active_scene_gestures();
         if self.game_workbench.has_graph_draft() {
-            self.status = "Примените или отмените черновик Gameplay Systems перед Redo".into();
+            self.status = "Apply or discard the Gameplay Systems draft before Redo".into();
             return;
         }
         if self.json_dirty {
-            self.status = "Примените или отмените JSON-черновик перед Redo".into();
+            self.status = "Apply or discard the JSON draft before Redo".into();
             return;
         }
         self.flush_history();
@@ -723,7 +722,7 @@ impl Editor {
         }
         if let Some(document) = self.history.redo() {
             self.restore_document(document);
-            self.status = "Изменение повторено".into();
+            self.status = "Change redone".into();
         }
     }
 
@@ -821,7 +820,7 @@ impl Editor {
             self.preview_builder.applied();
             self.runtime_error = None;
             self.last_render = -1.;
-            self.status = "Конфигурация рендера применена".into();
+            self.status = "Renderer configuration applied".into();
         }
         if self.history_dirty && self.last_tick - self.history_edit_time > 0.45 {
             self.flush_history();
@@ -993,7 +992,7 @@ impl Editor {
                 }
             }
         } else {
-            self.source_error = Some("Источник Custom отсутствует".into());
+            self.source_error = Some("Custom source is missing".into());
             self.program = None;
             self.command_program = None;
         }
@@ -1105,8 +1104,7 @@ impl Editor {
 
     fn apply_json(&mut self) -> bool {
         if self.game_workbench.has_graph_draft() {
-            self.status =
-                "Примените или отмените черновик Gameplay Systems перед применением JSON".into();
+            self.status = "Apply or discard the Gameplay Systems draft before applying JSON".into();
             return false;
         }
         match serde_json::from_str::<GraphDocument>(&self.json_draft) {
@@ -1116,11 +1114,11 @@ impl Editor {
                     return false;
                 }
                 self.apply_validated_json(document);
-                self.status = "Файл применён. Проверка графа обновлена.".into();
+                self.status = "File applied. Graph validation updated.".into();
                 true
             }
             Err(error) => {
-                self.status = format!("JSON не применён: {error}");
+                self.status = format!("JSON was not applied: {error}");
                 false
             }
         }
@@ -1167,7 +1165,7 @@ impl Editor {
         match project::save(&PathBuf::from(&self.path), &self.document) {
             Ok(()) => {
                 self.dirty = false;
-                self.status = format!("Сохранено: {}", self.path);
+                self.status = format!("Saved: {}", self.path);
                 true
             }
             Err(error) => {
@@ -1188,7 +1186,7 @@ impl Editor {
     fn discard_json_draft(&mut self) {
         self.json_draft = serde_json::to_string_pretty(&self.document).unwrap_or_default();
         self.json_dirty = false;
-        self.status = "JSON-черновик отменён. Показан текущий документ.".into();
+        self.status = "JSON draft discarded. Showing the current document.".into();
     }
 
     fn load(&mut self) -> bool {
@@ -1282,7 +1280,7 @@ impl Editor {
                 self.history = SnapshotHistory::new(self.document.clone(), 200);
                 self.history_dirty = false;
                 self.compile_connected_scripts();
-                self.status = format!("Открыто: {}", self.path);
+                self.status = format!("Opened: {}", self.path);
                 true
             }
             Err(error) => {
@@ -1324,7 +1322,8 @@ impl Editor {
             }
             self.policy_baseline = self.document.clone();
             self.changed(true);
-            self.status = "Изменён модуль мира. Рендер и его внутренний граф сохранены.".into();
+            self.status =
+                "World module changed. The renderer and its internal graph are preserved.".into();
         }
     }
 
@@ -1337,7 +1336,7 @@ impl Editor {
             return;
         }
         if !self.module_available_here(module) {
-            self.status = "Этот модуль недоступен в выбранном графе.".into();
+            self.status = "This module is unavailable in the selected graph.".into();
             return;
         }
         self.flush_history();
@@ -1461,7 +1460,7 @@ impl Editor {
         self.policy_baseline = self.document.clone();
         self.changed(true);
         self.flush_history();
-        self.status = "Узел добавлен. Соедините его совместимые пины.".into();
+        self.status = "Node added. Connect its compatible pins.".into();
     }
 
     fn engine_nodes(&self) -> Vec<CanvasNode> {
@@ -1587,11 +1586,11 @@ impl Editor {
                         .any(|d| d.severity == Severity::Error && d.message.contains("cycle"))
                     {
                         *self.graph_mut() = before;
-                        self.status = "Связь отклонена: она создаёт цикл зависимостей.".into();
+                        self.status = "Connection rejected: it creates a dependency cycle.".into();
                     } else {
                         self.changed(true);
                         self.flush_history();
-                        self.status = "Связь обновлена.".into();
+                        self.status = "Connection updated.".into();
                     }
                 }
                 CanvasAction::DeleteEdge(index) => {
@@ -1768,7 +1767,7 @@ impl Editor {
                         match program.connect(&from_node, &to_node, to_port.parse().unwrap_or(0)) {
                             Ok(()) => {
                                 self.sync_program_source(true);
-                                self.status = "Rust-команды обновлены".into();
+                                self.status = "Rust commands updated".into();
                             }
                             Err(error) => self.status = error.to_string(),
                         }
@@ -1778,14 +1777,14 @@ impl Editor {
                         match program.connect(&from_node, &to_node, to_port.parse().unwrap_or(0)) {
                             Ok(()) => {
                                 self.sync_program_source(true);
-                                self.status = "Граф изменён, Rust-исходник обновлён.".into();
+                                self.status = "Graph changed; Rust source updated.".into();
                             }
                             Err(error) => self.status = error.to_string(),
                         }
                     }
                 }
                 CanvasAction::DeleteEdge(_) => self.status =
-                    "Удаление входа Rust-выражения требует корректной замены в текстовом режиме."
+                    "Removing a Rust expression input requires a valid replacement in text mode."
                         .into(),
                 _ => {}
             }
@@ -2063,8 +2062,8 @@ impl Editor {
     }
 
     fn add_node_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("+ Узел", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.module_search).hint_text("Поиск модулей"));
+        ui.menu_button("+ Node", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.module_search).hint_text("Search modules"));
             let choices = self.module_choices(&self.graph_path);
             egui::ScrollArea::vertical()
                 .max_height(300.)
@@ -2084,19 +2083,19 @@ impl Editor {
     }
 
     fn library(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Модули");
+        ui.heading("Modules");
         ui.label(
-            RichText::new("Добавьте узел и соедините пины одного типа.")
+            RichText::new("Add a node and connect pins of the same type.")
                 .size(11.0)
                 .color(Color32::from_rgb(144, 158, 181)),
         );
         let target = self.library_graph_context();
         if let Some((id, _, label)) = &target {
-            ui.label(format!("Добавление в: {label} · окно {id}"));
+            ui.label(format!("Adding to: {label} · pane {id}"));
         } else {
-            ui.label("Откройте Module Graph и выберите граф для добавления.");
+            ui.label("Open Module Graph and select a graph to add nodes.");
         }
-        ui.add(egui::TextEdit::singleline(&mut self.module_search).hint_text("Поиск модулей"));
+        ui.add(egui::TextEdit::singleline(&mut self.module_search).hint_text("Search modules"));
         ui.add_space(6.0);
         let path = target
             .as_ref()
@@ -2127,21 +2126,21 @@ impl Editor {
                 }
             });
         ui.separator();
-        ui.label(RichText::new("КОНТРАКТЫ ПИНОВ").size(10.0).strong());
+        ui.label(RichText::new("PIN CONTRACTS").size(10.0).strong());
         let pins = if gpu_scope {
             vec![
-                ("Scene3D", "геометрия сцены"),
-                ("GpuColor", "текстура цвета"),
-                ("GpuNormals", "текстура нормалей"),
-                ("GpuDepth", "текстура глубины"),
-                ("Frame3D", "готовое изображение"),
+                ("Scene3D", "scene geometry"),
+                ("GpuColor", "color texture"),
+                ("GpuNormals", "normal texture"),
+                ("GpuDepth", "depth texture"),
+                ("Frame3D", "completed image"),
             ]
         } else {
             vec![
-                ("World", "состояние мира"),
-                ("Scene3D", "данные для рендера"),
-                ("Frame3D", "изображение"),
-                ("Scalar", "число"),
+                ("World", "world state"),
+                ("Scene3D", "render data"),
+                ("Frame3D", "image"),
+                ("Scalar", "number"),
             ]
         };
         for (kind, meaning) in pins {
@@ -2157,31 +2156,29 @@ impl Editor {
         }
         ui.add_space(14.0);
         ui.separator();
-        ui.label(RichText::new("ПРОЕКТ С ИСХОДНИКАМИ").size(10.0).strong());
-        if ui.button("Экспорт проекта…").clicked() {
+        ui.label(RichText::new("SOURCE PROJECT").size(10.0).strong());
+        if ui.button("Export project…").clicked() {
             self.dispatch_command(editor_workflow::Command::ExportSource, ui.ctx());
         }
         ui.label(
-            RichText::new("Экспорт включает workspace, документацию и текущий project.json.")
-                .size(10.5)
-                .color(Color32::from_rgb(136, 150, 172)),
+            RichText::new(
+                "Export includes the workspace, documentation, and current project.json.",
+            )
+            .size(10.5)
+            .color(Color32::from_rgb(136, 150, 172)),
         );
     }
 
     fn viewport_panel(&mut self, ui: &mut egui::Ui, now: f64) {
         ui.horizontal(|ui| {
-            ui.heading("3D-предпросмотр");
+            ui.heading("3D preview");
             if ui
-                .small_button(if self.playing {
-                    "Пауза"
-                } else {
-                    "Старт"
-                })
+                .small_button(if self.playing { "Pause" } else { "Start" })
                 .clicked()
             {
                 self.playing = !self.playing;
             }
-            if ui.small_button("Сброс").clicked() {
+            if ui.small_button("Reset").clicked() {
                 self.runtime = None;
                 self.authored_object_ids.clear();
                 self.time = 0.;
@@ -2195,7 +2192,7 @@ impl Editor {
                 ui.horizontal(|ui| {
                     let kind = self.runtime.as_ref().map(|r| r.world_kind());
                     if ui
-                        .selectable_label(kind == Some(WorldKind::Objects), "Объекты")
+                        .selectable_label(kind == Some(WorldKind::Objects), "Objects")
                         .clicked()
                     {
                         self.switch_world(WorldKind::Objects);
@@ -2207,7 +2204,7 @@ impl Editor {
                         self.switch_world(WorldKind::Ecs);
                     }
                     ui.label(
-                        RichText::new("один рендер")
+                        RichText::new("single renderer")
                             .size(10.5)
                             .color(Color32::from_rgb(137, 153, 175)),
                     );
@@ -2232,17 +2229,17 @@ impl Editor {
             );
         }
         if self.preview_builder.is_pending() {
-            ui.label("Сборка GPU-кандидата в фоне…");
+            ui.label("Building GPU candidate in the background…");
         }
         if let Some(error) = &self.preview_builder.error {
             ui.colored_label(
                 Color32::from_rgb(245, 134, 129),
-                "Новая конфигурация не применена",
+                "New configuration was not applied",
             );
             ui.label(RichText::new(error).size(10.5));
         }
         if let Some(error) = &self.runtime_error {
-            ui.colored_label(Color32::from_rgb(245, 134, 129), "Предпросмотр остановлен");
+            ui.colored_label(Color32::from_rgb(245, 134, 129), "Preview stopped");
             ui.label(RichText::new(error).size(10.5));
         }
         if let Some(runtime) = &self.runtime
@@ -2270,7 +2267,7 @@ impl Editor {
                         Ok(true) => {
                             self.runtime_error = None;
                             self.stats = format!(
-                                "{} объектов · t = {:.2} с",
+                                "{} objects · t = {:.2} s",
                                 runtime.object_count(),
                                 self.time
                             );
@@ -2288,8 +2285,7 @@ impl Editor {
                 Ok(None) => ui
                     .ctx()
                     .request_repaint_after(std::time::Duration::from_millis(1)),
-                Err(error) if error.starts_with("GPU готовит новую конфигурацию;") =>
-                    {}
+                Err(error) if error.starts_with("GPU is preparing a new configuration;") => {}
                 Err(error) => self.runtime_error = Some(error),
             }
         }
@@ -2323,7 +2319,7 @@ impl Editor {
                 .color(Color32::from_rgb(130, 153, 183)),
         );
         ui.label(
-            RichText::new("ЛКМ: орбита · колесо: расстояние")
+            RichText::new("LMB: orbit · wheel: distance")
                 .size(10.0)
                 .color(Color32::from_rgb(126, 140, 163)),
         );
@@ -2331,7 +2327,7 @@ impl Editor {
 
     fn graph_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if !self.graph_path.is_empty() && ui.button("< Внешний граф").clicked() {
+            if !self.graph_path.is_empty() && ui.button("< Parent graph").clicked() {
                 self.graph_path.pop();
                 self.graph_canvas.home();
                 self.graph_canvas.zoom = 0.82;
@@ -2341,12 +2337,12 @@ impl Editor {
                 RichText::new(if self.graph_path.is_empty() {
                     &self.document.name
                 } else {
-                    "Внутренний граф модуля"
+                    "Internal module graph"
                 })
                 .size(17.0)
                 .strong(),
             );
-            if ui.small_button("Центр").clicked() {
+            if ui.small_button("Center").clicked() {
                 self.graph_canvas.home();
                 self.graph_canvas.zoom = 0.82;
             }
@@ -2373,20 +2369,18 @@ impl Editor {
 
     fn file_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Текстовое описание графа");
-            if ui.button("Применить файл").clicked() {
+            ui.heading("Graph text description");
+            if ui.button("Apply file").clicked() {
                 self.apply_json();
             }
             if ui
-                .add_enabled(self.json_dirty, egui::Button::new("Отменить черновик"))
+                .add_enabled(self.json_dirty, egui::Button::new("Discard draft"))
                 .clicked()
             {
                 self.discard_json_draft();
             }
         });
-        ui.label(
-            "Изменения здесь меняют тот же проект. Сохранение сначала проверяет синтаксис JSON.",
-        );
+        ui.label("Edits here change the same project. Saving validates the JSON syntax first.");
         let response = ui.add_sized(
             ui.available_size(),
             egui::TextEdit::multiline(&mut self.json_draft)
@@ -2401,7 +2395,7 @@ impl Editor {
     }
 
     fn custom_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Custom / Rust");
             let previous = self.current_source.clone();
             egui::ComboBox::from_id_salt("source-choice")
@@ -2426,11 +2420,11 @@ impl Editor {
                 self.code_canvas.selected = None;
             }
             ui.separator();
-            ui.selectable_value(&mut self.custom_view, CustomView::Text, "Текст");
-            ui.selectable_value(&mut self.custom_view, CustomView::Graph, "Граф");
-            ui.selectable_value(&mut self.custom_view, CustomView::Both, "Рядом");
+            ui.selectable_value(&mut self.custom_view, CustomView::Text, "Text");
+            ui.selectable_value(&mut self.custom_view, CustomView::Graph, "Graph");
+            ui.selectable_value(&mut self.custom_view, CustomView::Both, "Side by side");
             if !self.is_game_source(&self.current_source)
-                && ui.button("Применить Rust").clicked()
+                && ui.button("Apply Rust").clicked()
                 && let Some(source) = self.document.custom_sources.get(&self.current_source)
             {
                 self.scripts.request(
@@ -2445,10 +2439,12 @@ impl Editor {
             }
             if !self.is_game_source(&self.current_source)
                 && self.scripts.has_rejected_candidate(&self.current_source)
-                && ui.button("Применить со сбросом состояния").clicked()
+                && ui.button("Apply with state reset").clicked()
             {
                 match self.scripts.apply_rejected_with_reset(&self.current_source) {
-                    Ok(()) => self.status = "Rust применён; состояние этого Custom сброшено".into(),
+                    Ok(()) => {
+                        self.status = "Rust applied; this Custom instance's state was reset".into()
+                    }
                     Err(e) => self.status = e,
                 }
             }
@@ -2459,7 +2455,7 @@ impl Editor {
                 self.game_workbench
                     .ensure(&self.document, &root, compile.as_deref(), kind)
             {
-                ui.colored_label(Color32::LIGHT_RED, format!("Подготовка Game: {error}"));
+                ui.colored_label(Color32::LIGHT_RED, format!("Preparing Game: {error}"));
             }
             self.game_workbench.custom_editor_ui(
                 ui,
@@ -2472,50 +2468,43 @@ impl Editor {
             );
         } else {
             if let Some(source) = self.scripts.rejected_source(&self.current_source) {
-                ui.collapsing(
-                    "Несовместимый кандидат: сохранённый исходник",
-                    |ui| {
-                        ui.label(source);
-                    },
-                );
+                ui.collapsing("Incompatible candidate: retained source", |ui| {
+                    ui.label(source);
+                });
             }
             if self.scripts.has_rejected_candidate(&self.current_source) {
-                ui.collapsing(
-                    "Явная миграция состояния (JSON)",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.state_migration)
-                                .code_editor()
-                                .desired_rows(4),
-                        );
-                        if ui.button("Применить с этим состоянием").clicked()
-                        {
-                            match serde_json::from_str(&self.state_migration) {
-                                Ok(state) => match self
-                                    .scripts
-                                    .apply_rejected_with_migration(&self.current_source, state)
-                                {
-                                    Ok(()) => {
-                                        self.status =
-                                            "Rust применён с явно заданным состоянием".into()
-                                    }
-                                    Err(e) => self.status = e,
-                                },
-                                Err(e) => self.status = e.to_string(),
-                            }
+                ui.collapsing("Explicit state migration (JSON)", |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.state_migration)
+                            .code_editor()
+                            .desired_rows(4),
+                    );
+                    if ui.button("Apply with this state").clicked() {
+                        match serde_json::from_str(&self.state_migration) {
+                            Ok(state) => match self
+                                .scripts
+                                .apply_rejected_with_migration(&self.current_source, state)
+                            {
+                                Ok(()) => {
+                                    self.status =
+                                        "Rust applied with explicitly provided state".into()
+                                }
+                                Err(e) => self.status = e,
+                            },
+                            Err(e) => self.status = e.to_string(),
                         }
-                    },
-                );
+                    }
+                });
             }
             if self.scripts.pending(&self.current_source) {
                 ui.label(if self.scripts.has_active(&self.current_source) {
-                    "Компиляция в фоне. Предыдущая версия остаётся активной."
+                    "Compiling in the background. The previous version remains active."
                 } else {
-                    "Компиляция в фоне. Код начнёт исполняться после успешной сборки."
+                    "Compiling in the background. Code will run after a successful build."
                 });
             }
             if let Some(error) = self.scripts.errors.get(&self.current_source) {
-                egui::CollapsingHeader::new("Диагностика компилятора Rust")
+                egui::CollapsingHeader::new("Rust compiler diagnostics")
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.colored_label(Color32::from_rgb(246, 134, 130), error);
@@ -2529,23 +2518,23 @@ impl Editor {
                         .get(&self.current_source)
                         .is_some_and(|s| s == active)
                     {
-                        "Исполняется скомпилированная версия исходника"
+                        "Running the compiled version of the source"
                     } else {
-                        "Исходник изменён; исполняется предыдущая скомпилированная версия"
+                        "Source changed; running the previous compiled version"
                     },
                 );
             }
         }
         ui.label(
             RichText::new(
-                "Один исходник · граф правит Rust · неподдерживаемые конструкции остаются текстом",
+                "One source · the graph edits Rust · unsupported constructs remain as text",
             )
             .size(11.0)
             .color(Color32::from_rgb(144, 161, 185)),
         );
         if let Some(error) = &self.source_error {
             ui.colored_label(Color32::from_rgb(246, 134, 130), error);
-            ui.label("Визуальный разбор недоступен; показан последний разобранный граф. Компилятор Rust проверяет исходник отдельно.");
+            ui.label("Visual parsing is unavailable; showing the last parsed graph. The Rust compiler validates the source separately.");
         }
         match self.custom_view {
             CustomView::Text => self.code_text(ui),
@@ -2586,7 +2575,7 @@ impl Editor {
             return;
         }
         let Some(source) = self.document.custom_sources.get_mut(&self.current_source) else {
-            ui.label("Добавьте Custom-узел в граф.");
+            ui.label("Add a Custom node to the graph.");
             return;
         };
         let response = ui.add_sized(
@@ -2646,7 +2635,7 @@ impl Editor {
     /// Settings follow the active viewport renderer, not unrelated graph scopes.
     fn delete_engine_node(&mut self, id: &str) {
         if !self.can_author_engine() || self.json_dirty {
-            self.status = "Удаление узлов требует доступного Engine без JSON-черновика".into();
+            self.status = "Deleting nodes requires an available Engine and no JSON draft".into();
             return;
         }
         if !self.graph().nodes.iter().any(|node| node.id == id) {
@@ -2669,14 +2658,14 @@ impl Editor {
         self.changed(true);
         self.flush_history();
         self.status = format!(
-            "Узел {id} удалён; восстановлено связей: {restored}; обновлено настроек: {}",
+            "Node {id} deleted; connections restored: {restored}; settings updated: {}",
             cleanup.total_changes(),
         );
     }
 
     fn node_inspector(&mut self, ui: &mut egui::Ui) {
         if self.json_dirty {
-            ui.label("Примените или отмените JSON-черновик для редактирования узлов.");
+            ui.label("Apply or discard the JSON draft to edit nodes.");
             return;
         }
         let selected = self.graph_canvas.selected.clone();
@@ -2686,7 +2675,7 @@ impl Editor {
             .cloned()
         else {
             ui.label(
-                RichText::new("Выберите узел для настройки. Двойной щелчок раскрывает модуль.")
+                RichText::new("Select a node to configure it. Double-click to expand the module.")
                     .size(11.0)
                     .color(Color32::from_rgb(148, 161, 182)),
             );
@@ -2701,14 +2690,13 @@ impl Editor {
             self.gpu_pass_controls(ui, &node);
         }
         ui.horizontal(|ui| {
-            if node.subgraph.is_some() && ui.button("Открыть граф").clicked() {
+            if node.subgraph.is_some() && ui.button("Open graph").clicked() {
                 self.engine_actions(vec![CanvasAction::Open(node.id.clone())]);
             }
-            if node.module.starts_with("custom.rust") && ui.button("Редактировать Rust").clicked()
-            {
+            if node.module.starts_with("custom.rust") && ui.button("Edit Rust").clicked() {
                 self.engine_actions(vec![CanvasAction::Open(node.id.clone())]);
             }
-            if ui.button("Удалить").clicked() {
+            if ui.button("Delete").clicked() {
                 self.delete_engine_node(&node.id);
             }
         });
@@ -2735,14 +2723,14 @@ impl Editor {
             self.param_draft = serde_json::to_string_pretty(&node.params).unwrap_or_default();
             self.inspector_id = Some(node.id.clone());
         }
-        egui::CollapsingHeader::new("Параметры модуля (JSON)").show(ui, |ui| {
+        egui::CollapsingHeader::new("Module parameters (JSON)").show(ui, |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut self.param_draft)
                     .font(egui::TextStyle::Monospace)
                     .desired_rows(4)
                     .desired_width(f32::INFINITY),
             );
-            if ui.button("Применить параметры").clicked() {
+            if ui.button("Apply parameters").clicked() {
                 match serde_json::from_str::<serde_json::Value>(&self.param_draft) {
                     Ok(params) => {
                         if let Some(target) =
@@ -2752,7 +2740,7 @@ impl Editor {
                             self.changed(true);
                         }
                     }
-                    Err(error) => self.status = format!("Параметры не применены: {error}"),
+                    Err(error) => self.status = format!("Parameters were not applied: {error}"),
                 }
             }
         });
@@ -2772,7 +2760,7 @@ impl Editor {
         let Some(node) = selected else {
             ui.label(
                 RichText::new(
-                    "Выберите числовой узел или оператор. Изменения появятся в Rust-тексте.",
+                    "Select a numeric node or operator. Changes will appear in the Rust source.",
                 )
                 .size(11.0),
             );
@@ -2780,7 +2768,7 @@ impl Editor {
         };
         ui.label(RichText::new(&node.label).strong());
         if self.source_error.is_some() {
-            ui.label("Графические правки временно отключены: текст содержит ошибку.");
+            ui.label("Visual edits are temporarily disabled: the source contains an error.");
             return;
         }
         let mut result = None;
@@ -2810,13 +2798,13 @@ impl Editor {
                 }
             }
             CodeNodeKind::Opaque { source } => {
-                ui.colored_label(Color32::from_rgb(241, 182, 101), "Текстовый Rust-фрагмент");
+                ui.colored_label(Color32::from_rgb(241, 182, 101), "Text Rust fragment");
                 ui.label(RichText::new(source).monospace().size(11.0));
-                ui.label("Редактируется в текстовом представлении и сохраняется в исходнике.");
+                ui.label("Edited in text view and preserved in the source.");
             }
             _ => {
                 ui.label(
-                    RichText::new("Чтобы изменить вход, соедините другой f64-выход с его пином.")
+                    RichText::new("To change an input, connect another f64 output to its pin.")
                         .size(11.0),
                 );
             }
@@ -2825,7 +2813,7 @@ impl Editor {
             match result {
                 Ok(()) => {
                     self.sync_program_source(false);
-                    self.status = "Rust обновлён графической правкой.".into();
+                    self.status = "Rust updated by a visual edit.".into();
                 }
                 Err(error) => self.status = error.to_string(),
             }
@@ -2945,33 +2933,33 @@ fn graph_connection_error(
 ) -> Option<String> {
     let check = || -> Result<(), String> {
         if from_node == to_node {
-            return Err("Нельзя соединить узел с самим собой.".into());
+            return Err("A node cannot connect to itself.".into());
         }
         let source = graph
             .nodes
             .iter()
             .find(|node| node.id == from_node)
-            .ok_or("Выходной узел удалён.")?;
+            .ok_or("Output node was deleted.")?;
         let target = graph
             .nodes
             .iter()
             .find(|node| node.id == to_node)
-            .ok_or("Входной узел удалён.")?;
+            .ok_or("Input node was deleted.")?;
         let (_, outputs) =
-            node_ports(source, registry).ok_or("Не удалось прочитать выходные пины узла.")?;
+            node_ports(source, registry).ok_or("Could not read the node's output pins.")?;
         let (inputs, _) =
-            node_ports(target, registry).ok_or("Не удалось прочитать входные пины узла.")?;
+            node_ports(target, registry).ok_or("Could not read the node's input pins.")?;
         let output = outputs
             .iter()
             .find(|port| port.name == from_port)
-            .ok_or("Выходной пин не найден.")?;
+            .ok_or("Output pin was not found.")?;
         let input = inputs
             .iter()
             .find(|port| port.name == to_port)
-            .ok_or("Входной пин не найден.")?;
+            .ok_or("Input pin was not found.")?;
         if output.data_type != input.data_type {
             return Err(format!(
-                "Несовместимые пины: {} → {}.",
+                "Incompatible pins: {} → {}.",
                 output.data_type, input.data_type
             ));
         }
@@ -2981,19 +2969,19 @@ fn graph_connection_error(
                 .outputs
                 .iter()
                 .find(|spec| spec.name == from_port)
-                .ok_or("GPU-выход не объявлен.")?;
+                .ok_or("GPU output is not declared.")?;
             let input = target
                 .inputs
                 .iter()
                 .find(|spec| spec.name == to_port)
-                .ok_or("GPU-вход не объявлен.")?;
+                .ok_or("GPU input is not declared.")?;
             if output.format != input.format
                 || output.semantic != input.semantic
                 || output.extent != input.extent
                 || output.samples != input.samples
             {
                 return Err(format!(
-                    "Несовместимые GPU-ресурсы: {} / {} / {} / {} samples → {} / {} / {} / {} samples.",
+                    "Incompatible GPU resources: {} / {} / {} / {} samples → {} / {} / {} / {} samples.",
                     output.semantic,
                     output.format,
                     output.extent,
@@ -3912,7 +3900,7 @@ mod tests {
         }
         assert!(editor.game_workbench.host.is_none());
         let output = frame(&mut editor, vec![]);
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with("Подготовка Game:"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with("Preparing Game:"))));
         output.drop_without_applying_deltas();
         editor
             .document
@@ -3946,8 +3934,8 @@ mod tests {
             "a game-only source must not compile into an unused legacy preview backend"
         );
         let output = frame(&mut editor, vec![]);
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("предыдущая скомпилированная версия"))));
-        let apply = text_center(&output, "Применить Rust");
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("previous compiled version"))));
+        let apply = text_center(&output, "Apply Rust");
         output.drop_without_applying_deltas();
         for pressed in [true, false] {
             frame(
@@ -3989,7 +3977,7 @@ mod tests {
         }
         assert!(!editor.scripts.has_active(id));
         let output = frame(&mut editor, vec![]);
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Game: текущий исходник скомпилирован"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Game: current source is compiled"))));
         output.drop_without_applying_deltas();
         editor.game_execution_error = Some("Owned previous game execution error".into());
         editor.runtime_error = editor.game_execution_error.clone();
@@ -4078,7 +4066,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == "Удалить" => {
+                egui::Shape::Text(text) if text.galley.text() == "Delete" => {
                     Some(text.pos + text.galley.size() * 0.5)
                 }
                 _ => None,
@@ -4279,7 +4267,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == "Проход включён" => {
+                egui::Shape::Text(text) if text.galley.text() == "Pass enabled" => {
                     Some(text.pos + text.galley.size() * 0.5)
                 }
                 _ => None,
@@ -4318,7 +4306,7 @@ mod tests {
                 .params["enabled"],
             false
         );
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("В работе:"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Running:"))));
         output.drop_without_applying_deltas();
         let mut responsive_frames = 0;
         loop {

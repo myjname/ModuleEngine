@@ -259,7 +259,7 @@ impl SceneViewportState {
                 frame_selected = true;
             }
             if locked {
-                ui.label("Play · редактирование доступно после Stop");
+                ui.label("Play · editing is available after Stop");
             }
         });
         let size = ui.available_size().max(Vec2::splat(1.));
@@ -691,9 +691,9 @@ impl SceneViewportState {
             );
         }
         let help = if self.gesture.is_some() {
-            "Esc: отменить · отпустить ЛКМ: применить"
+            "Esc: cancel · release LMB: apply"
         } else {
-            "ЛКМ: выбрать · G/R/S: инструмент · СКМ: орбита · Shift+СКМ: сдвиг · колесо: масштаб · F: фокус"
+            "LMB: select · G/R/S: tool · MMB: orbit · Shift+MMB: pan · wheel: zoom · F: focus"
         };
         painter.text(
             rect.left_bottom() + Vec2::new(9., -9.),
@@ -792,22 +792,22 @@ impl SceneViewportState {
             let ray = pointer
                 .and_then(|pointer| scene_tools::camera_ray(self.visible_camera(), rect, pointer));
             let (hint, allowed) = if locked {
-                ("Редактирование доступно после Stop", false)
+                ("Editing is available after Stop", false)
             } else if !image_current {
-                ("Изображение Scene обновляется", false)
+                ("Scene image is updating", false)
             } else {
                 match payload.kind {
                     AssetKind::Model => (
-                        "Отпустите: создать объект с моделью",
+                        "Drop to create an object with the model",
                         ray.and_then(|ray| scene_tools::placement(snapshot, ray))
                             .is_some(),
                     ),
                     AssetKind::Texture => (
-                        "Отпустите над объектом: назначить текстуру",
+                        "Drop onto an object to assign the texture",
                         ray.and_then(|ray| scene_tools::pick(snapshot, ray))
                             .is_some(),
                     ),
-                    _ => ("Этот ресурс не назначается через Scene", false),
+                    _ => ("This asset cannot be assigned through Scene", false),
                 }
             };
             self.drop_hint = Some((hint.into(), allowed));
@@ -831,7 +831,7 @@ impl SceneViewportState {
                         });
                     } else {
                         self.report_error(
-                            "Под курсором нет поверхности или земли для размещения модели".into(),
+                            "No surface or ground under the cursor to place the model".into(),
                             actions,
                         );
                     }
@@ -844,7 +844,7 @@ impl SceneViewportState {
                         });
                     } else {
                         self.report_error(
-                            "Перетащите текстуру на существующий объект".into(),
+                            "Drag the texture onto an existing object".into(),
                             actions,
                         );
                     }

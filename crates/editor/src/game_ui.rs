@@ -327,7 +327,8 @@ impl Drop for GameWorkbench {
         self.cancel_pending_custom();
         for slot in [&mut self.game_preparation, &mut self.preview_preparation] {
             if let Some(job) = slot.take() {
-                job.progress.succeed("Редактор закрыл запрос подготовки");
+                job.progress
+                    .succeed("Editor closed the preparation request");
                 job.retire();
             }
         }
@@ -620,7 +621,7 @@ impl GameWorkbench {
                             self.error = None;
                         }
                         if let Some(progress) = &self.custom_activity {
-                            progress.succeed("Новая версия Game Rust применена");
+                            progress.succeed("New Game Rust version applied");
                         }
                     }
                     Err(error) => {
@@ -796,9 +797,7 @@ impl GameWorkbench {
                 .as_ref()
                 .is_some_and(|worker| !worker.is_alive())
             {
-                return Err(
-                    "Игровой исполнитель завершился; нажмите Stop и запустите Play повторно".into(),
-                );
+                return Err("Game executor exited; press Stop and start Play again".into());
             }
             if self.game_preparation.is_none()
                 && (self
@@ -859,7 +858,7 @@ impl GameWorkbench {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err("Поток подготовки Game / Scene завершился без результата".into())
+                Err("Game / Scene preparation thread ended without a result".into())
             }
         };
         let job = slot.take().unwrap();
@@ -873,7 +872,7 @@ impl GameWorkbench {
             || !job.document.execution_eq(document)
         {
             job.progress
-                .succeed("Запрос заменён новой конфигурацией; предыдущий результат сохранён");
+                .succeed("Request superseded by a new configuration; previous result preserved");
             retire_in_background(result);
             return Ok(());
         }
@@ -911,11 +910,8 @@ impl GameWorkbench {
                     old.services.stop();
                     retire_in_background(old);
                 }
-                job.progress.succeed(if preview {
-                    "Scene подготовлена"
-                } else {
-                    "Game подготовлен"
-                });
+                job.progress
+                    .succeed(if preview { "Scene ready" } else { "Game ready" });
                 self.error = None;
                 Ok(())
             }
@@ -983,9 +979,9 @@ impl GameWorkbench {
         let candidate = document.clone();
         let worker_document = candidate.clone();
         let progress = BuildProgress::new(if preview {
-            "Подготовка Scene"
+            "Preparing Scene"
         } else {
-            "Подготовка Game"
+            "Preparing Game"
         });
         let worker_progress = progress.clone();
         let programs = self.programs.clone();
@@ -1005,7 +1001,7 @@ impl GameWorkbench {
                 },
             )
             .and_then(|mut host| {
-                worker_progress.stage("Подготовка GPU-представления окна");
+                worker_progress.stage("Preparing GPU window presentation");
                 host.set_presentation_target(presentation_target)?;
                 host.services.set_enabled(false);
                 Ok(host)
@@ -1235,7 +1231,7 @@ impl GameWorkbench {
             for slot in [&mut self.game_preparation, &mut self.preview_preparation] {
                 if let Some(job) = slot.take() {
                     job.progress
-                        .succeed("Контекст Engine изменился; запрос заменён");
+                        .succeed("Engine context changed; request superseded");
                     job.retire();
                 }
             }
@@ -1286,7 +1282,7 @@ impl GameWorkbench {
     pub fn stop(&mut self) {
         self.clear_worker();
         if let Some(job) = self.game_preparation.take() {
-            job.progress.succeed("Подготовка отменена после Stop");
+            job.progress.succeed("Preparation cancelled after Stop");
             job.retire();
         }
         if self.deferred_preparation {
@@ -1318,7 +1314,7 @@ impl GameWorkbench {
         self.restart_error = None;
         self.restart_recovered = false;
         if let Some(progress) = &self.custom_activity {
-            progress.succeed("Компиляция отменена после Stop; версия не применена");
+            progress.succeed("Compilation cancelled after Stop; version not applied");
         }
         self.rejected = None;
     }
@@ -1423,7 +1419,7 @@ impl GameWorkbench {
         let worker_progress = progress.clone();
         let programs = self.programs.clone();
         let (receive, job) = module_engine_script::spawn_job(move |cancelled| {
-            worker_progress.stage("Проверка и подготовка Rust; текущая версия продолжает работать");
+            worker_progress.stage("Validating and preparing Rust; current version keeps running");
             let compiler = ScriptCompiler::new(root.clone(), root.join(".work/game-scripts"))
                 .with_program_store(programs);
             compiler
@@ -1453,7 +1449,7 @@ impl GameWorkbench {
             && let Some(job) = &self.game_preparation
         {
             job.progress
-                .stage("Пересоздание исполнителя; Play ожидает готовности");
+                .stage("Recreating the executor; Play is waiting for readiness");
         }
         if playing && !waiting_for_host {
             self.play_session = true;
@@ -1485,11 +1481,10 @@ impl GameWorkbench {
                                         epoch,
                                     });
                                     if let Some(progress) = &self.custom_activity {
-                                        progress
-                                            .stage("Ожидание применения между игровыми тактами");
+                                        progress.stage("Waiting to apply between game ticks");
                                     }
                                 } else {
-                                    let error = "Game заменён после начала компиляции; примените Rust повторно".to_owned();
+                                    let error = "Game was replaced after compilation started; apply Rust again".to_owned();
                                     self.custom_errors.insert(id, error.clone());
                                     self.error = Some(error.clone());
                                     if let Some(progress) = &self.custom_activity {
@@ -1503,7 +1498,7 @@ impl GameWorkbench {
                                         self.error = None;
                                         self.rejected = None;
                                         if let Some(progress) = &self.custom_activity {
-                                            progress.succeed("Новая версия Rust применена");
+                                            progress.succeed("New Rust version applied");
                                         }
                                     }
                                     Err(e) => {
@@ -1517,8 +1512,7 @@ impl GameWorkbench {
                                 }
                             } else {
                                 let error =
-                                    "Game не открыт; откройте Game и примените Rust повторно"
-                                        .to_owned();
+                                    "Game is not open; open Game and apply Rust again".to_owned();
                                 if let Some(progress) = &self.custom_activity {
                                     progress.fail(error.clone());
                                 }
@@ -1556,9 +1550,7 @@ impl GameWorkbench {
                 .as_ref()
                 .is_some_and(|worker| !worker.is_alive())
             {
-                return Err(
-                    "Игровой исполнитель завершился; нажмите Stop и запустите Play повторно".into(),
-                );
+                return Err("Game executor exited; press Stop and start Play again".into());
             }
             let active_playing = playing && !waiting_for_host;
             if self.worker_playing != Some(active_playing) {
@@ -1584,7 +1576,7 @@ impl GameWorkbench {
                 } else {
                     self.queue_worker_command(WorkerCommand::SetPlaying(false));
                     self.worker_playing = Some(false);
-                    return Err("Переполнена очередь ввода Game; Play приостановлен. Дождитесь обработки и повторите действие".into());
+                    return Err("Game input queue is full; Play is paused. Wait for processing and try again".into());
                 }
                 self.flush_worker_commands();
             }
@@ -1651,7 +1643,7 @@ impl GameWorkbench {
         let result = self
             .host
             .as_mut()
-            .ok_or("Game ещё не подготовлен".to_owned())
+            .ok_or("Game is not ready yet".to_owned())
             .and_then(GameHost::restart);
         self.note_restart_result(result)
     }
@@ -1939,7 +1931,7 @@ impl GameWorkbench {
             }
         } else if self.game_preparation.is_some() {
             ui.spinner();
-            ui.label("Game готовится в фоне. Можно продолжать работать с редактором.");
+            ui.label("Game is preparing in the background. You can keep working in the editor.");
         }
         false
     }
@@ -1947,7 +1939,7 @@ impl GameWorkbench {
         self.worker_view_visible = true;
         let Some(snapshot) = self.worker_snapshot.clone() else {
             ui.spinner();
-            ui.label("Game готовится в фоне. Можно продолжать работать с редактором.");
+            ui.label("Game is preparing in the background. You can keep working in the editor.");
             ui.ctx().request_repaint_after(Duration::from_millis(16));
             return;
         };
@@ -2037,7 +2029,7 @@ impl GameWorkbench {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Подготовка первого кадра…",
+                "Preparing the first frame…",
                 egui::FontId::proportional(14.),
                 Color32::LIGHT_GRAY,
             );
@@ -2255,7 +2247,7 @@ impl GameWorkbench {
             ui.label("Select an object in Scene or Hierarchy.");
         }
         if self.play_session {
-            ui.label("Play · редактирование доступно после Stop");
+            ui.label("Play · editing is available after Stop");
         }
         egui::ScrollArea::vertical().show(ui,|ui|{
             if let Some(id)=self.selected && let Some(entity)=resolved.iter().find(|entity|entity.object.id==id).cloned(){
@@ -2357,14 +2349,14 @@ impl GameWorkbench {
             && compile_root.is_some()
             && source.is_some();
         if ui
-            .add_enabled(available, egui::Button::new("Применить Rust"))
+            .add_enabled(available, egui::Button::new("Apply Rust"))
             .clicked()
             && let (Some(source), Some(root)) = (source, compile_root)
         {
             self.request_custom(id, source, root);
         }
         if let Some((pending, _)) = &self.pending {
-            ui.horizontal(|ui| { ui.spinner(); ui.label(format!("Game Rust {pending}: компиляция в фоне; дождитесь завершения перед следующим Apply.")); });
+            ui.horizontal(|ui| { ui.spinner(); ui.label(format!("Game Rust {pending}: compiling in the background; wait for completion before the next Apply.")); });
         } else if self
             .worker_requests
             .values()
@@ -2372,23 +2364,23 @@ impl GameWorkbench {
         {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Game Rust: ожидание применения между игровыми тактами…");
+                ui.label("Game Rust: waiting to apply between game ticks…");
             });
         } else if self.game_preparation.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Подготовка Game для применения Rust…");
+                ui.label("Preparing Game to apply Rust…");
             });
         } else if !self.has_game_host() || instances == 0 {
-            ui.label("Game Custom ещё не подготовлен. Диагностика подготовки показана ниже и в статусе операций.");
+            ui.label("Game Custom is not ready yet. Preparation diagnostics are shown below and in operation status.");
         } else if compile_root.is_none() {
             ui.colored_label(
                 Color32::LIGHT_RED,
-                "Компилятор Rust недоступен для этого пакета.",
+                "The Rust compiler is unavailable for this package.",
             );
         }
         if let Some(error) = self.custom_errors.get(id) {
-            egui::CollapsingHeader::new("Диагностика Game Rust")
+            egui::CollapsingHeader::new("Game Rust diagnostics")
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.colored_label(Color32::LIGHT_RED, error);
@@ -2416,9 +2408,9 @@ impl GameWorkbench {
             }
             if current + previous > 0 {
                 ui.label(if previous == 0 {
-                    format!("Game: текущий исходник скомпилирован в {current} экземплярах.")
+                    format!("Game: current source is compiled in {current} instances.")
                 } else {
-                    format!("Game: предыдущая скомпилированная версия — {previous} экземпляров, текущая — {current}.")
+                    format!("Game: previous compiled version — {previous} instances, current — {current}.")
                 });
             }
         } else if let Some(host) = &self.host {
@@ -2443,9 +2435,9 @@ impl GameWorkbench {
             }
             if current + previous > 0 {
                 ui.label(if previous == 0 {
-                    format!("Game: текущий исходник скомпилирован в {current} экземплярах.")
+                    format!("Game: current source is compiled in {current} instances.")
                 } else {
-                    format!("Game: предыдущая скомпилированная версия — {previous} экземпляров, текущая — {current}.")
+                    format!("Game: previous compiled version — {previous} instances, current — {current}.")
                 });
             }
         }
@@ -2469,53 +2461,45 @@ impl GameWorkbench {
                 ui.colored_label(
                     Color32::LIGHT_RED,
                     format!(
-                        "Game Rust, запрос #{}: {}",
+                        "Game Rust, request #{}: {}",
                         candidate.request, candidate.error
                     ),
                 );
             }
             let fresh = source == Some(candidate_source.as_str());
-            ui.collapsing(
-                "Несовместимый кандидат Game: сохранённый исходник",
-                |ui| {
-                    ui.code(&candidate_source);
-                },
-            );
+            ui.collapsing("Incompatible Game candidate: saved source", |ui| {
+                ui.code(&candidate_source);
+            });
             if !fresh {
-                ui.colored_label(Color32::LIGHT_RED, "Кандидат относится к предыдущему тексту. Примените текущий Rust перед сбросом или миграцией.");
+                ui.colored_label(Color32::LIGHT_RED, "The candidate belongs to the previous source. Apply the current Rust before resetting or migrating state.");
             }
             ui.add_enabled_ui(fresh && !custom_pending, |ui| {
-                if ui.button("Применить со сбросом состояния").clicked()
-                {
+                if ui.button("Apply with state reset").clicked() {
                     let _ =
                         self.apply_rejected_custom(&rejected_id, source.unwrap_or_default(), None);
                 }
-                ui.collapsing(
-                    "Явная миграция состояния Game (JSON)",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.migration)
-                                .code_editor()
-                                .desired_rows(4),
-                        );
-                        if ui.button("Применить с этим состоянием").clicked()
-                        {
-                            match serde_json::from_str(&self.migration) {
-                                Ok(state) => {
-                                    let _ = self.apply_rejected_custom(
-                                        &rejected_id,
-                                        source.unwrap_or_default(),
-                                        Some(state),
-                                    );
-                                }
-                                Err(error) => {
-                                    self.custom_errors
-                                        .insert(rejected_id.clone(), error.to_string());
-                                }
+                ui.collapsing("Explicit Game state migration (JSON)", |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.migration)
+                            .code_editor()
+                            .desired_rows(4),
+                    );
+                    if ui.button("Apply with this state").clicked() {
+                        match serde_json::from_str(&self.migration) {
+                            Ok(state) => {
+                                let _ = self.apply_rejected_custom(
+                                    &rejected_id,
+                                    source.unwrap_or_default(),
+                                    Some(state),
+                                );
+                            }
+                            Err(error) => {
+                                self.custom_errors
+                                    .insert(rejected_id.clone(), error.to_string());
                             }
                         }
-                    },
-                );
+                    }
+                });
             });
         }
     }
@@ -2533,20 +2517,18 @@ impl GameWorkbench {
                     .values()
                     .any(|request| matches!(request, WorkerRequest::Custom(_)))
             {
-                return Err("Дождитесь завершения применения Game Rust".into());
+                return Err("Wait for Game Rust application to finish".into());
             }
             let snapshot = self
                 .worker_snapshot
                 .as_ref()
-                .ok_or("Game ещё не подготовлен")?;
+                .ok_or("Game is not ready yet")?;
             let candidate = snapshot
                 .rejected
                 .get(id)
-                .ok_or("Нет отклонённого кандидата Game Rust")?;
+                .ok_or("No rejected Game Rust candidate")?;
             if candidate.source != current_source {
-                return Err(
-                    "Кандидат Game Rust устарел; сначала примените текущий исходник".into(),
-                );
+                return Err("Game Rust candidate is stale; apply the current source first".into());
             }
             let epoch = snapshot.epoch;
             let mode = state.map_or(CustomApplyMode::Reset, CustomApplyMode::Migrate);
@@ -2558,38 +2540,36 @@ impl GameWorkbench {
                 request,
                 epoch,
             });
-            let progress = BuildProgress::new(format!("Rust Custom {id}: применение состояния"));
-            progress.stage("Ожидание применения между игровыми тактами");
+            let progress = BuildProgress::new(format!("Rust Custom {id}: applying state"));
+            progress.stage("Waiting to apply between game ticks");
             self.custom_activity = Some(progress);
             return Ok(());
         }
         let result = (|| {
             if self.pending.is_some() {
-                return Err("Дождитесь завершения компиляции Game Rust".into());
+                return Err("Wait for Game Rust compilation to finish".into());
             }
             let (candidate_id, candidate) = self
                 .rejected
                 .as_ref()
-                .ok_or("Нет отклонённого кандидата Game Rust")?;
+                .ok_or("No rejected Game Rust candidate")?;
             if candidate_id != id || candidate.source() != current_source {
-                return Err(
-                    "Кандидат Game Rust устарел; сначала примените текущий исходник".into(),
-                );
+                return Err("Game Rust candidate is stale; apply the current source first".into());
             }
-            let host = self.host.as_mut().ok_or("Game ещё не подготовлен")?;
+            let host = self.host.as_mut().ok_or("Game is not ready yet")?;
             if let Some(state) = state {
                 host.apply_candidate_migrated(id, candidate, state)
             } else {
                 host.apply_candidate(id, candidate.clone(), true)
             }
         })();
-        let progress = BuildProgress::new(format!("Rust Custom {id}: применение состояния"));
+        let progress = BuildProgress::new(format!("Rust Custom {id}: applying state"));
         match &result {
             Ok(()) => {
                 self.rejected = None;
                 self.custom_errors.remove(id);
                 self.error = None;
-                progress.succeed("Game Rust и состояние применены");
+                progress.succeed("Game Rust and state applied");
             }
             Err(error) => {
                 self.custom_errors.insert(id.into(), error.clone());
@@ -2652,7 +2632,7 @@ impl GameWorkbench {
                 {
                     ui.label(format!("Texture: {reference}"));
                 }
-                ui.label("Перетащите модель или текстуру из Assets сюда для назначения объекту.");
+                ui.label("Drag a model or texture from Assets here to assign it to the object.");
             })
             .response;
         if let Some(payload) = response.dnd_release_payload::<crate::assets_ui::AssetDrag>()
@@ -4856,7 +4836,7 @@ pub fn update(ctx: &mut ScriptContext) {
             &retained_state,
             "Already active Play also waits during a full executor rebuild"
         );
-        assert!(progress.snapshot().detail.contains("Play ожидает"));
+        assert!(progress.snapshot().detail.contains("Play is waiting"));
     }
     #[test]
     fn inactive_viewport_cannot_erase_input_and_consumption_releases_movement() {
@@ -6652,7 +6632,7 @@ pub fn update(ctx: &mut ScriptContext) {
             workbench
                 .apply_rejected_custom(id, &third, None)
                 .unwrap_err()
-                .contains("устарел")
+                .contains("stale")
         );
         let ctx = egui::Context::default();
         ctx.all_styles_mut(|style| style.animation_time = 0.);
@@ -6670,14 +6650,12 @@ pub fn update(ctx: &mut ScriptContext) {
             )
         };
         let output = frame(&mut workbench, &second, vec![]);
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("предыдущая скомпилированная версия"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("previous compiled version"))));
         let point = output
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text)
-                    if text.galley.text() == "Применить со сбросом состояния" =>
-                {
+                egui::Shape::Text(text) if text.galley.text() == "Apply with state reset" => {
                     Some(text.pos + text.galley.size() * 0.5)
                 }
                 _ => None,
@@ -6759,7 +6737,7 @@ pub fn update(ctx: &mut ScriptContext) {
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == "Применить Rust" => {
+                egui::Shape::Text(text) if text.galley.text() == "Apply Rust" => {
                     Some(text.pos + text.galley.size() * 0.5)
                 }
                 _ => None,

@@ -169,7 +169,7 @@ impl AssetsWorkbench {
     ) -> Result<Option<GraphDocument>, String> {
         let root = root
             .canonicalize()
-            .map_err(|error| format!("Папка ресурсов: {error}"))?;
+            .map_err(|error| format!("Asset directory: {error}"))?;
         let service = context.service(&root, protected.clone())?;
         self.synchronize_cache_with_service(document, &root, protected, context, service)
     }
@@ -198,13 +198,13 @@ impl AssetsWorkbench {
             let kind = ui_kind(&info.kind);
             let mut metadata = vec![];
             if info.missing {
-                metadata.push(("Состояние".into(), "Файл отсутствует".into()));
+                metadata.push(("Status".into(), "File missing".into()));
             }
             if let Some(diagnostic) = &info.diagnostic {
-                metadata.push(("Проверка".into(), diagnostic.clone()));
+                metadata.push(("Validation".into(), diagnostic.clone()));
             }
             if !info.dependencies.is_empty() {
-                metadata.push(("Зависимостей".into(), info.dependencies.len().to_string()));
+                metadata.push(("Dependencies".into(), info.dependencies.len().to_string()));
             }
             if kind == AssetKind::Audio
                 && !info.missing
@@ -212,7 +212,7 @@ impl AssetsWorkbench {
             {
                 match wav_metadata(&path) {
                     Ok(audio) => metadata.extend(audio),
-                    Err(error) => metadata.push(("Проверка звука".into(), error)),
+                    Err(error) => metadata.push(("Audio validation".into(), error)),
                 }
             }
             let usages = all_usages
@@ -230,7 +230,7 @@ impl AssetsWorkbench {
                 protected: !info.path.starts_with("assets/"),
                 preview: None,
                 preview_status: if info.missing {
-                    Some("Файл отсутствует".into())
+                    Some("File missing".into())
                 } else {
                     info.diagnostic
                 },
@@ -248,7 +248,7 @@ impl AssetsWorkbench {
                     kind: ui_kind(&module_engine_project::AssetKind::for_path(&entry.path)),
                     path: entry.path,
                     // Durable operation IDs contain a sortable UTC timestamp.
-                    deleted_at: "Можно восстановить".into(),
+                    deleted_at: "Can be restored".into(),
                 })
             })
             .collect();
@@ -344,7 +344,7 @@ impl AssetsWorkbench {
                 Err(mpsc::TryRecvError::Empty) => return Ok(None),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.scan = None;
-                    return Err("Поток индексирования ресурсов завершился без результата".into());
+                    return Err("The asset indexing thread exited without a result".into());
                 }
             };
             let job = self.scan.take().unwrap();
@@ -435,7 +435,7 @@ impl AssetsWorkbench {
         {
             return Ok(());
         }
-        let root = self.root.as_ref().ok_or("Папка ресурсов не выбрана")?;
+        let root = self.root.as_ref().ok_or("No asset directory selected")?;
         if self.worker.is_none() {
             let paths = AssetManifest::from_value(&document.asset_manifest)?.asset_paths();
             self.worker = Some(PreviewWorker::new(root.clone(), paths));
@@ -448,8 +448,8 @@ impl AssetsWorkbench {
                 reference: tile.reference.clone(),
                 kind: tile.kind,
             })
-            .map_err(|_| "Загрузка превью остановлена".to_string())?;
-        tile.preview_status = Some("Превью загружается…".into());
+            .map_err(|_| "Preview loading stopped".to_string())?;
+        tile.preview_status = Some("Preview loading…".into());
         self.pending_previews.insert(id.into());
         Ok(())
     }
@@ -485,7 +485,7 @@ impl AssetsWorkbench {
                     self.texture_order.push_back(result.id);
                 }
                 Err(error) => {
-                    tile.preview_status = Some(format!("Превью недоступно: {error}"));
+                    tile.preview_status = Some(format!("Preview unavailable: {error}"));
                 }
             }
         }
@@ -556,7 +556,7 @@ impl super::Editor {
     pub(super) fn validate_asset_restore(&self, candidate: &GraphDocument) -> Result<(), String> {
         verify_restore_resources(candidate, &self.project_asset_root()).map_err(|error| {
             format!(
-                "Версия не восстановлена: {error}. Сначала отмени файловую операцию через Undo или восстанови нужный ресурс из корзины."
+                "Version not restored: {error}. First undo the file operation with Undo or restore the required asset from trash."
             )
         })
     }
@@ -639,21 +639,21 @@ impl super::Editor {
         if self.assets.scan.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.weak("Индексирование ресурсов… Редактор остаётся доступен.");
+                ui.weak("Indexing assets… The editor remains available.");
             });
         }
         if let Some(error) = &self.assets.error {
             ui.colored_label(egui::Color32::LIGHT_RED, error);
-            if ui.button("Повторить загрузку ресурсов").clicked() {
+            if ui.button("Retry loading assets").clicked() {
                 self.assets.invalidate();
                 ui.ctx().request_repaint();
             }
             ui.separator();
         }
         if self.playing || self.game_workbench.is_play_session() {
-            ui.weak("Для изменения ресурсов останови Play.");
+            ui.weak("Stop Play to change assets.");
         } else if self.json_dirty {
-            ui.weak("Примени или отмени изменения Project File перед работой с ресурсами.");
+            ui.weak("Apply or discard Project File changes before working with assets.");
         }
         let key = (self.workspace.key().into(), pane_id);
         let actions = self.assets.browsers.entry(key).or_default().ui(
@@ -769,7 +769,7 @@ fn collect_folders(
     let path = path.canonicalize().map_err(|error| error.to_string())?;
     if !path.starts_with(root) || !visited.insert(path.clone()) {
         return Err(format!(
-            "Папка ресурсов выходит за проект или повторяется: {relative}"
+            "Asset directory is outside the project or repeated: {relative}"
         ));
     }
     result.push(relative.into());
@@ -857,14 +857,14 @@ fn make_thumbnail(
             height,
             rgba,
             metadata: vec![(
-                "Размер изображения".into(),
+                "Image size".into(),
                 format!("{} × {}", image.width, image.height),
             )],
             note: None,
         });
     }
     if kind != AssetKind::Model {
-        return Err("Для этого типа файла превью не предусмотрено".into());
+        return Err("No preview is available for this file type".into());
     }
     let model = content.load_model(reference)?;
     let mut min = [f32::INFINITY; 3];
@@ -886,7 +886,7 @@ fn make_thumbnail(
         }
     }
     if vertices == 0 || triangles == 0 || !min.into_iter().chain(max).all(f32::is_finite) {
-        return Err("В модели нет треугольной геометрии".into());
+        return Err("The model has no triangle geometry".into());
     }
     let center = std::array::from_fn::<_, 3, _>(|axis| min[axis] * 0.5 + max[axis] * 0.5);
     let extent = (0..3)
@@ -931,18 +931,18 @@ fn make_thumbnail(
         },
     );
     if frame.stats.shaded_pixels == 0 {
-        return Err("Геометрия не образует видимой поверхности".into());
+        return Err("The geometry does not form a visible surface".into());
     }
     Ok(Thumbnail {
         width: frame.width,
         height: frame.height,
         rgba: frame.rgba,
         metadata: vec![
-            ("Частей".into(), model.primitives.len().to_string()),
-            ("Вершин".into(), vertices.to_string()),
-            ("Треугольников".into(), triangles.to_string()),
+            ("Parts".into(), model.primitives.len().to_string()),
+            ("Vertices".into(), vertices.to_string()),
+            ("Triangles".into(), triangles.to_string()),
         ],
-        note: Some("Превью геометрии с базовым цветом материала".into()),
+        note: Some("Geometry preview with the material's base color".into()),
     })
 }
 fn base_color_byte(linear: f32) -> u8 {
@@ -971,7 +971,7 @@ fn resized_rgba(
             .and_then(|pixels| pixels.checked_mul(4))
             != Some(rgba.len())
     {
-        return Err("Некорректный размер изображения".into());
+        return Err("Invalid image size".into());
     }
     let scale = (max_edge as f32 / width.max(height) as f32).min(1.0);
     let target_width = ((width as f32 * scale).round() as usize).max(1);
@@ -996,7 +996,7 @@ fn wav_metadata(path: &Path) -> Result<Vec<(String, String)>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("Ожидается WAV с заголовком RIFF/WAVE".into());
+        return Err("Expected a WAV file with a RIFF/WAVE header".into());
     }
     let mut offset = 12;
     let mut format = None;
@@ -1023,18 +1023,18 @@ fn wav_metadata(path: &Path) -> Result<Vec<(String, String)>, String> {
         };
         offset = next;
     }
-    let (channels, rate, bytes_per_second, bits) = format.ok_or("Не найден блок WAV fmt")?;
+    let (channels, rate, bytes_per_second, bits) = format.ok_or("WAV fmt chunk not found")?;
     let mut result = vec![
-        ("Каналов".into(), channels.to_string()),
-        ("Частота".into(), format!("{rate} Гц")),
-        ("Разрядность".into(), format!("{bits} бит")),
+        ("Channels".into(), channels.to_string()),
+        ("Sample rate".into(), format!("{rate} Hz")),
+        ("Bit depth".into(), format!("{bits} bits")),
     ];
     if let Some(size) = data_bytes
         && bytes_per_second > 0
     {
         result.push((
-            "Длительность".into(),
-            format!("{:.2} с", size as f64 / bytes_per_second as f64),
+            "Duration".into(),
+            format!("{:.2} s", size as f64 / bytes_per_second as f64),
         ));
     }
     Ok(result)
@@ -1331,7 +1331,12 @@ mod tests {
             (thumbnail.width, thumbnail.height),
             (THUMBNAIL_EDGE, THUMBNAIL_EDGE)
         );
-        assert!(thumbnail.metadata.iter().any(|(name, count)| name == "Треугольников" && count.parse::<usize>().unwrap() > 0));
+        assert!(
+            thumbnail
+                .metadata
+                .iter()
+                .any(|(name, count)| name == "Triangles" && count.parse::<usize>().unwrap() > 0)
+        );
         let colors: BTreeSet<_> = thumbnail.rgba.as_chunks::<4>().0.iter().copied().collect();
         assert!(
             colors.len() > 2,
@@ -1363,12 +1368,12 @@ mod tests {
         assert!(
             details
                 .iter()
-                .any(|(name, value)| name == "Частота" && value.ends_with(" Гц"))
+                .any(|(name, value)| name == "Sample rate" && value.ends_with(" Hz"))
         );
         assert!(
             details
                 .iter()
-                .any(|(name, value)| name == "Длительность" && value.ends_with(" с"))
+                .any(|(name, value)| name == "Duration" && value.ends_with(" s"))
         );
     }
     #[test]

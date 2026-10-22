@@ -87,7 +87,7 @@ The explicit CPU-rendered GameHost diagnostic measurement includes simulation, R
 
 ## Changing Rust During Play
 
-In Custom / Rust, select game-controller, edit update, and click Apply Rust (`Применить Rust`); compilation runs in the background. State is declared on the first source line. When the schema changes, the application preserves previous code and offers explicit reset/migration. Switching text/graph shows supported operations and preserves other constructs as text.
+In Custom / Rust, select game-controller, edit update, and click **Apply Rust**; compilation runs in the background. State is declared on the first source line. When the schema changes, the application preserves previous code and offers explicit reset/migration. Switching text/graph shows supported operations and preserves other constructs as text.
 
 JSON-packet protection and timeouts limit process errors, but the worker has normal user permissions. Use code owned by the project. The contract and examples are described in [Custom state](custom-state.md).
 

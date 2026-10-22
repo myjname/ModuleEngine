@@ -17,11 +17,11 @@ pub enum AssetKind {
 impl AssetKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Model => "Модель",
-            Self::Texture => "Текстура",
-            Self::Audio => "Звук",
-            Self::Shader => "Шейдер",
-            Self::Other => "Другой файл",
+            Self::Model => "Model",
+            Self::Texture => "Texture",
+            Self::Audio => "Audio",
+            Self::Shader => "Shader",
+            Self::Other => "Other file",
         }
     }
     fn icon(self) -> &'static str {
@@ -206,29 +206,29 @@ impl BrowserState {
         }
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.selectable_label(!self.show_trash, "Ресурсы").clicked() {
+                if ui.selectable_label(!self.show_trash, "Assets").clicked() {
                     self.show_trash = false;
                 }
                 if ui
-                    .selectable_label(self.show_trash, format!("Корзина ({})", trash.len()))
+                    .selectable_label(self.show_trash, format!("Trash ({})", trash.len()))
                     .clicked()
                 {
                     self.show_trash = true;
                 }
                 ui.separator();
-                let import = ui.button("Импорт…");
+                let import = ui.button("Import…");
                 self.hit_targets.insert("import".into(), import.rect);
                 if import.clicked() {
                     actions.push(BrowserAction::Import {
                         folder: writable_folder(&self.folder),
                     });
                 }
-                if ui.button("Обновить").clicked() {
+                if ui.button("Refresh").clicked() {
                     self.preview_requests.clear();
                     actions.push(BrowserAction::Refresh);
                 }
                 if ui
-                    .add_enabled(!self.show_trash, egui::Button::new("Новая папка…"))
+                    .add_enabled(!self.show_trash, egui::Button::new("New folder…"))
                     .clicked()
                 {
                     self.dialog = Some(BrowserDialog::NewFolder {
@@ -276,7 +276,7 @@ impl BrowserState {
                                 );
                                 if !wide {
                                     ui.separator();
-                                    egui::CollapsingHeader::new("Выбранный ресурс")
+                                    egui::CollapsingHeader::new("Selected asset")
                                         .default_open(true)
                                         .show(ui, |ui| {
                                             egui::ScrollArea::vertical()
@@ -341,14 +341,14 @@ impl BrowserState {
             let width = (ui.available_width() - 280.0).max(80.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Поиск в папке и вложенных папках")
+                    .hint_text("Search this folder and subfolders")
                     .desired_width(width),
             );
             egui::ComboBox::from_id_salt("asset-kind")
-                .selected_text(self.kind_filter.map_or("Все типы", AssetKind::label))
+                .selected_text(self.kind_filter.map_or("All types", AssetKind::label))
                 .width(90.0)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.kind_filter, None, "Все типы");
+                    ui.selectable_value(&mut self.kind_filter, None, "All types");
                     for kind in [
                         AssetKind::Model,
                         AssetKind::Texture,
@@ -359,14 +359,14 @@ impl BrowserState {
                         ui.selectable_value(&mut self.kind_filter, Some(kind), kind.label());
                     }
                 });
-            ui.selectable_value(&mut self.grid, true, "Плитки");
-            ui.selectable_value(&mut self.grid, false, "Список");
+            ui.selectable_value(&mut self.grid, true, "Tiles");
+            ui.selectable_value(&mut self.grid, false, "List");
         });
     }
     fn breadcrumb_ui(&mut self, ui: &mut egui::Ui) {
         let current = self.folder.clone();
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("Проект").clicked() {
+            if ui.small_button("Project").clicked() {
                 self.folder.clear();
             }
             let mut path = String::new();
@@ -397,7 +397,7 @@ impl BrowserState {
             ui.horizontal(|ui| {
                 ui.add_space(((depth.saturating_sub(1) * 9) as f32).min(36.0));
                 let name = if folder.is_empty() {
-                    "Проект"
+                    "Project"
                 } else {
                     folder.rsplit('/').next().unwrap_or(folder)
                 };
@@ -418,7 +418,7 @@ impl BrowserState {
                             egui::StrokeKind::Inside,
                         );
                         response.clone().on_hover_text(format!(
-                            "Перенести {} в {}",
+                            "Move {} to {}",
                             payload.path,
                             folder_label(folder)
                         ));
@@ -447,7 +447,7 @@ impl BrowserState {
             .filter(|folder| !folder.is_empty() && parent(folder) == self.folder)
             .cloned()
             .collect();
-        ui.label(format!("Файлов: {}", visible.len()));
+        ui.label(format!("Files: {}", visible.len()));
         egui::ScrollArea::vertical()
             .id_salt("asset-files")
             .auto_shrink([false, false])
@@ -479,9 +479,9 @@ impl BrowserState {
                 }
                 if visible.is_empty() && children.is_empty() {
                     ui.weak(if self.search.is_empty() && self.kind_filter.is_none() {
-                        "В этой папке нет ресурсов. Импортируй модель, текстуру или звук."
+                        "This folder has no assets. Import a model, texture, or audio file."
                     } else {
-                        "Ресурсы не найдены. Измени поиск или фильтр."
+                        "No assets found. Change the search or filter."
                     });
                 }
             });
@@ -490,9 +490,9 @@ impl BrowserState {
         let response = ui
             .selectable_label(
                 false,
-                format!("[Папка] {}", folder.rsplit('/').next().unwrap_or(folder)),
+                format!("[Folder] {}", folder.rsplit('/').next().unwrap_or(folder)),
             )
-            .on_hover_text("Открыть папку; перенести сюда файл перетаскиванием");
+            .on_hover_text("Open folder; drag a file here to move it");
         self.hit_targets
             .insert(format!("folder-content:{folder}"), response.rect);
         if response.clicked() {
@@ -600,10 +600,10 @@ impl BrowserState {
             format_size(asset.size),
             match asset.kind {
                 AssetKind::Model =>
-                    "Перетащи в Scene, чтобы создать объект. Замена модели — в Inspector.",
+                    "Drag into Scene to create an object. Replace its model in Inspector.",
                 AssetKind::Texture =>
-                    "Перетащи на объект в Scene или в Inspector, чтобы назначить текстуру.",
-                _ => "Выбери файл, чтобы увидеть сведения и использования.",
+                    "Drag onto an object in Scene or into Inspector to assign a texture.",
+                _ => "Select a file to view details and usages.",
             }
         ));
         if response.clicked() {
@@ -615,7 +615,7 @@ impl BrowserState {
         }
         response.dnd_set_drag_payload(asset.drag());
         response.context_menu(|ui| {
-            if ui.button("Выбрать").clicked() {
+            if ui.button("Select").clicked() {
                 self.selected = Some(asset.id.clone());
                 actions.push(BrowserAction::Select {
                     id: asset.id.clone(),
@@ -642,7 +642,7 @@ impl BrowserState {
         }
     }
     fn file_commands(&mut self, ui: &mut egui::Ui, asset: &AssetTile, popup: bool) {
-        let rename = ui.add_enabled(!asset.protected, egui::Button::new("Переименовать…"));
+        let rename = ui.add_enabled(!asset.protected, egui::Button::new("Rename…"));
         self.hit_targets.insert("rename".into(), rename.rect);
         if rename.clicked() {
             self.dialog = Some(BrowserDialog::Rename {
@@ -653,7 +653,7 @@ impl BrowserState {
                 ui.close();
             }
         }
-        let moving = ui.add_enabled(!asset.protected, egui::Button::new("Перенести…"));
+        let moving = ui.add_enabled(!asset.protected, egui::Button::new("Move…"));
         self.hit_targets.insert("move".into(), moving.rect);
         if moving.clicked() {
             self.dialog = Some(BrowserDialog::Move {
@@ -664,7 +664,7 @@ impl BrowserState {
                 ui.close();
             }
         }
-        let delete = ui.add_enabled(!asset.protected, egui::Button::new("В корзину…"));
+        let delete = ui.add_enabled(!asset.protected, egui::Button::new("Move to trash…"));
         self.hit_targets.insert("delete".into(), delete.rect);
         if delete.clicked() {
             self.dialog = Some(BrowserDialog::Delete {
@@ -677,7 +677,7 @@ impl BrowserState {
             }
         }
         if ui
-            .button(format!("Использования ({})", asset.usages.len()))
+            .button(format!("Usages ({})", asset.usages.len()))
             .clicked()
         {
             self.dialog = Some(BrowserDialog::Usages {
@@ -688,7 +688,7 @@ impl BrowserState {
             }
         }
         if asset.protected {
-            ui.weak("Этот ресурс защищён от изменений.");
+            ui.weak("This asset is protected from changes.");
         }
     }
     fn details_ui(
@@ -703,7 +703,7 @@ impl BrowserState {
             .as_ref()
             .and_then(|id| assets.iter().find(|asset| &asset.id == id))
         else {
-            ui.weak("Выбери ресурс для просмотра сведений.");
+            ui.weak("Select an asset to view its details.");
             return;
         };
         ui.strong(asset.name());
@@ -717,13 +717,12 @@ impl BrowserState {
             draw_preview(ui, rect, asset);
             if let Some(status) = &asset.preview_status {
                 ui.weak(status);
-                if asset.preview.is_none() && ui.small_button("Повторить превью").clicked()
-                {
+                if asset.preview.is_none() && ui.small_button("Retry preview").clicked() {
                     self.preview_requests.remove(&asset.id);
                     self.request_preview(asset, actions);
                 }
             } else if asset.preview.is_none() {
-                ui.weak("Превью загружается…");
+                ui.weak("Preview loading…");
             }
         }
         ui.label(&asset.path);
@@ -731,9 +730,9 @@ impl BrowserState {
         for (name, value) in &asset.metadata {
             ui.label(format!("{name}: {value}"));
         }
-        egui::CollapsingHeader::new("Ссылка на ресурс").show(ui, |ui| {
+        egui::CollapsingHeader::new("Asset reference").show(ui, |ui| {
             ui.add(egui::Label::new(&asset.reference).selectable(true).wrap());
-            if ui.small_button("Копировать ссылку").clicked() {
+            if ui.small_button("Copy reference").clicked() {
                 ui.ctx().copy_text(asset.reference.clone());
             }
         });
@@ -746,19 +745,19 @@ impl BrowserState {
         trash: &[TrashTile],
         actions: &mut Vec<BrowserAction>,
     ) {
-        ui.weak("Восстановление возвращает файл и его ID. Текущие ссылки проекта сохраняются; Undo отменяет удаление вместе со ссылками.");
+        ui.weak("Restore returns the file and its ID. Current project references are preserved; Undo reverses deletion together with its references.");
         egui::ScrollArea::vertical()
             .id_salt("asset-trash")
             .show(ui, |ui| {
                 if trash.is_empty() {
-                    ui.label("Корзина пуста.");
+                    ui.label("Trash is empty.");
                 }
                 for entry in trash {
                     ui.push_id(&entry.id, |ui| {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.label(&entry.path);
                             ui.weak(format!("{} · {}", entry.kind.label(), entry.deleted_at));
-                            let restore = ui.button("Восстановить");
+                            let restore = ui.button("Restore");
                             self.hit_targets
                                 .insert(format!("restore:{}", entry.id), restore.rect);
                             if restore.clicked() {
@@ -790,15 +789,15 @@ impl BrowserState {
             ui.add_enabled_ui(!busy, |ui| {
                 match &mut dialog {
                     BrowserDialog::NewFolder { name } => {
-                        ui.heading("Новая папка");
-                        ui.label(format!("В папке: {}", writable_folder(&self.folder)));
-                        let input = ui.add(egui::TextEdit::singleline(name).hint_text("Имя папки"));
+                        ui.heading("New folder");
+                        ui.label(format!("In folder: {}", writable_folder(&self.folder)));
+                        let input = ui.add(egui::TextEdit::singleline(name).hint_text("Folder name"));
                         self.hit_targets.insert("dialog-input".into(), input.rect);
                         let error = valid_leaf(name).err();
                         if let Some(error) = &error {
                             ui.weak(*error);
                         }
-                        let create = ui.add_enabled(error.is_none(), egui::Button::new("Создать"));
+                        let create = ui.add_enabled(error.is_none(), egui::Button::new("Create"));
                         self.hit_targets.insert("dialog-confirm".into(), create.rect);
                         if create.clicked() {
                             command = Some(BrowserAction::NewFolder {
@@ -807,13 +806,13 @@ impl BrowserState {
                         }
                     }
                     BrowserDialog::Rename { id, name } => {
-                        ui.heading("Переименовать ресурс");
+                        ui.heading("Rename asset");
                         if let Some(asset) = assets.iter().find(|asset| &asset.id == id) {
                             ui.label(&asset.path);
                             let input = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                             self.hit_targets.insert("dialog-input".into(), input.rect);
-                            ui.weak("Сохрани расширение файла. Ссылки по ID сохранятся.");
-                            ui.weak("Сначала проект будет сохранён; отмена сохранения отменит переименование.");
+                            ui.weak("Keep the file extension. ID references will be preserved.");
+                            ui.weak("The project will be saved first; canceling the save cancels the rename.");
                             let error = valid_leaf(name).err();
                             if let Some(error) = &error {
                                 ui.weak(*error);
@@ -821,7 +820,7 @@ impl BrowserState {
                             let valid = error.is_none()
                                 && !asset.protected
                                 && name.trim() != asset.name();
-                            let confirm = ui.add_enabled(valid, egui::Button::new("Переименовать"));
+                            let confirm = ui.add_enabled(valid, egui::Button::new("Rename"));
                             self.hit_targets.insert("dialog-confirm".into(), confirm.rect);
                             if confirm.clicked() {
                                 command = Some(BrowserAction::Rename {
@@ -830,11 +829,11 @@ impl BrowserState {
                                 });
                             }
                         } else {
-                            ui.label("Ресурс больше не доступен.");
+                            ui.label("The asset is no longer available.");
                         }
                     }
                     BrowserDialog::Move { id, folder } => {
-                        ui.heading("Перенести ресурс");
+                        ui.heading("Move asset");
                         if let Some(asset) = assets.iter().find(|asset| &asset.id == id) {
                             ui.label(&asset.path);
                             egui::ComboBox::from_id_salt("asset-move-target")
@@ -845,13 +844,13 @@ impl BrowserState {
                                         ui.selectable_value(folder, path.clone(), path);
                                     }
                                 });
-                            ui.weak("ID остаётся прежним; старые ссылки путями обновляются.");
-                            ui.weak("Сначала проект будет сохранён; отмена сохранения отменит перенос.");
+                            ui.weak("The ID stays the same; old path references are updated.");
+                            ui.weak("The project will be saved first; canceling the save cancels the move.");
                             let confirm = ui.add_enabled(
                                 !asset.protected
                                     && folder_is_writable(folder)
                                     && *folder != parent(&asset.path),
-                                egui::Button::new("Перенести"),
+                                egui::Button::new("Move"),
                             );
                             self.hit_targets.insert("dialog-confirm".into(), confirm.rect);
                             if confirm.clicked() {
@@ -861,21 +860,21 @@ impl BrowserState {
                                 });
                             }
                         } else {
-                            ui.label("Ресурс больше не доступен.");
+                            ui.label("The asset is no longer available.");
                         }
                     }
                     BrowserDialog::Delete { id, mode, replacement } => {
-                        ui.heading("Переместить ресурс в корзину?");
+                        ui.heading("Move asset to trash?");
                         if let Some(asset) = assets.iter().find(|asset| &asset.id == id) {
                             ui.label(&asset.path);
                             if asset.usages.is_empty() {
-                                ui.label("Известных использований в проекте нет.");
+                                ui.label("No known usages in the project.");
                             } else {
-                                ui.label(format!("Использований: {}", asset.usages.len()));
+                                ui.label(format!("Usages: {}", asset.usages.len()));
                                 usage_list(ui, &asset.usages, 145.0);
-                                ui.label("Перед удалением выбери, что делать со ссылками:");
-                                ui.radio_value(mode, DeleteMode::Replace, "Заменить другим ресурсом");
-                                ui.radio_value(mode, DeleteMode::Detach, "Явно отвязать ресурс; объекты сохранить");
+                                ui.label("Before deleting, choose how to handle references:");
+                                ui.radio_value(mode, DeleteMode::Replace, "Replace with another asset");
+                                ui.radio_value(mode, DeleteMode::Detach, "Explicitly unlink the asset; keep objects");
                                 if *mode == DeleteMode::Replace {
                                     let candidates: Vec<_> = assets
                                         .iter()
@@ -884,7 +883,7 @@ impl BrowserState {
                                     let selected = replacement.as_ref().and_then(|id| {
                                         candidates.iter().find(|candidate| &candidate.id == id)
                                     });
-                                    let label = selected.map_or("Выбери замену", |candidate| candidate.path.as_str());
+                                    let label = selected.map_or("Choose a replacement", |candidate| candidate.path.as_str());
                                     egui::ComboBox::from_id_salt("asset-delete-replacement")
                                         .selected_text(label)
                                         .width(ui.available_width())
@@ -894,12 +893,12 @@ impl BrowserState {
                                             }
                                         });
                                     if candidates.is_empty() {
-                                        ui.weak("В проекте пока нет другого ресурса этого типа.");
+                                        ui.weak("The project has no other asset of this type yet.");
                                     }
                                 }
-                                ui.weak("Зависимости моделей и шейдеров проверяются перед операцией; несовместимое отвязывание будет отклонено.");
+                                ui.weak("Model and shader dependencies are checked before the operation; incompatible unlinking will be rejected.");
                             }
-                            ui.weak("Сначала проект будет сохранён. Файл останется в корзине для восстановления.");
+                            ui.weak("The project will be saved first. The file will remain in trash for restoration.");
                             let valid_replacement = replacement.as_ref().is_some_and(|id| {
                                 assets.iter().any(|candidate| candidate.id == *id && candidate.id != asset.id && candidate.kind == asset.kind)
                             });
@@ -908,7 +907,7 @@ impl BrowserState {
                                 || (*mode == DeleteMode::Replace && valid_replacement);
                             let confirm = ui.add_enabled(
                                 !asset.protected && references_resolved,
-                                egui::Button::new("В корзину"),
+                                egui::Button::new("Move to trash"),
                             );
                             self.hit_targets.insert("dialog-confirm".into(), confirm.rect);
                             if confirm.clicked() {
@@ -919,24 +918,24 @@ impl BrowserState {
                                 });
                             }
                         } else {
-                            ui.label("Ресурс больше не доступен.");
+                            ui.label("The asset is no longer available.");
                         }
                     }
                     BrowserDialog::Usages { id } => {
-                        ui.heading("Использования ресурса");
+                        ui.heading("Asset usages");
                         if let Some(asset) = assets.iter().find(|asset| &asset.id == id) {
                             ui.label(&asset.path);
                             usage_list(ui, &asset.usages, 260.0);
                         } else {
-                            ui.label("Ресурс больше не доступен.");
+                            ui.label("The asset is no longer available.");
                         }
                     }
                 }
                 ui.separator();
                 let cancel = ui.button(if matches!(dialog, BrowserDialog::Usages { .. }) {
-                    "Закрыть"
+                    "Close"
                 } else {
-                    "Отмена"
+                    "Cancel"
                 });
                 self.hit_targets.insert("dialog-cancel".into(), cancel.rect);
                 if cancel.clicked() {
@@ -962,7 +961,7 @@ fn usage_list(ui: &mut egui::Ui, usages: &[String], height: f32) {
         .max_height(height)
         .show(ui, |ui| {
             if usages.is_empty() {
-                ui.weak("Известных использований нет.");
+                ui.weak("No known usages.");
             }
             for usage in usages {
                 ui.label(format!("• {usage}"));
@@ -1019,11 +1018,7 @@ fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 fn folder_label(folder: &str) -> &str {
-    if folder.is_empty() {
-        "Проект"
-    } else {
-        folder
-    }
+    if folder.is_empty() { "Project" } else { folder }
 }
 fn folder_is_writable(folder: &str) -> bool {
     folder == "assets" || folder.starts_with("assets/")
@@ -1041,16 +1036,16 @@ fn join_folder(folder: &str, name: &str) -> String {
 fn valid_leaf(name: &str) -> Result<(), &'static str> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Введи имя.");
+        return Err("Enter a name.");
     }
     if name == "." || name == ".." || name.ends_with('.') {
-        return Err("Такое имя использовать нельзя.");
+        return Err("This name cannot be used.");
     }
     if name
         .chars()
         .any(|character| character.is_control() || "/\\:*?\"<>|".contains(character))
     {
-        return Err("Имя содержит недопустимые символы.");
+        return Err("The name contains invalid characters.");
     }
     Ok(())
 }
@@ -1068,11 +1063,11 @@ fn abbreviated(text: &str, limit: usize) -> String {
 }
 fn format_size(size: u64) -> String {
     if size >= 1024 * 1024 {
-        format!("{:.1} МБ", size as f64 / (1024.0 * 1024.0))
+        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
     } else if size >= 1024 {
-        format!("{:.1} КБ", size as f64 / 1024.0)
+        format!("{:.1} KB", size as f64 / 1024.0)
     } else {
-        format!("{size} Б")
+        format!("{size} B")
     }
 }
 

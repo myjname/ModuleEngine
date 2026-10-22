@@ -8,12 +8,18 @@ The top **File / Edit / Tools / Windows** bar brings together project, build, an
 
 Menus and shortcuts invoke the same commands. This preserves identical project and Full / Team restriction checks regardless of how an action is started.
 
+<a id="ui-language"></a>
+
+## UI Language
+
+Engine-owned labels, help, status, progress, and error messages in Editor, Player, and CLI tools are English. Authored names and content remain unchanged, including existing project, scene, object, node, and history labels. Opaque external compiler and OS diagnostics retain their original text; OS-owned native dialog controls retain the system language. This contract adds no locale selector and does not migrate authored data.
+
 <a id="первый-рабочий-маршрут"></a>
 
 ## First Working Route
 
 1. Choose **File → New Project → Empty scene** or **Two arenas example**. In the system dialog, select a new or empty project directory. It may be, for example, in `projects/` or `outputs/` of the installed engine, but not inside the resource library being copied. It will contain `project.json`, resources, and a binding to the installed Engine; after successful creation, the editor switches to the new project.
-2. Open **Windows → Scene**, **Hierarchy**, **Inspector**, and **Assets**. Import glTF/GLB or PNG/JPEG through **File → Import Asset…** or the Import button (`Импорт…`) in Assets. Drag a model into Scene to create an object; select it by clicking or through Hierarchy, and change its transform with Move/Rotate/Scale handles. Drag a texture onto an object or assign it through Inspector. WAV import adds an audio file for subsequent use by game events. Keep the Game window for Play.
+2. Open **Windows → Scene**, **Hierarchy**, **Inspector**, and **Assets**. Import glTF/GLB or PNG/JPEG through **File → Import Asset…** or **Import…** in Assets. Drag a model into Scene to create an object; select it by clicking or through Hierarchy, and change its transform with Move/Rotate/Scale handles. Drag a texture onto an object or assign it through Inspector. WAV import adds an audio file for subsequent use by game events. Keep the Game window for Play.
 3. Press **Ctrl+S**. For a separate copy, choose **File → Save As…**, another directory, and a JSON name. After completion, work continues with the copy. The original stays in place. If an existing destination file is selected, Windows asks for confirmation before replacing it.
 4. Through **File → Open Project…** or **Recent Projects**, reopen the saved JSON. Its scenes, templates, Custom sources, and settings will be read together with resources from that directory.
 5. Run **Tools → Check Project**, then **Tools → Build Windows Player…**. Choose a new or empty build directory. After successful export, launch `Player.exe` from it. Player uses prebuilt Rust workers and SPIR-V; Rust/Cargo/DXC are not needed on the player's machine. Windows GUI presentation uses WGPU/DX12 and requires DX12 support; a project using the Vulkan game renderer additionally needs a compatible Vulkan driver.
@@ -88,17 +94,17 @@ DXC, backend, and GPU cache need not be copied again on every Save As: the edito
 
 Before Open, Recent, New, Exit, Check Project, or export, the editor checks authored changes and shows a dialog with three choices:
 
-- **Save and continue** (`Сохранить и продолжить`) writes the current document and performs the selected command only after saving succeeds.
-- **Don't save** (`Не сохранять`) continues without writing current edits. Checking and export use the on-disk project version; current edits remain open in memory.
-- **Cancel** (`Отмена`) keeps the current work open and cancels the transition or build.
+- **Save and continue** writes the current document and performs the selected command only after saving succeeds.
+- **Don't save**, or **Use saved version** for checking and export, continues without writing current edits. Checking and export use the on-disk project version; current edits remain open in memory.
+- **Cancel** keeps the current work open and cancels the transition or build.
 
-On Open and New, the old document, history, and drafts remain available until the replacement is successfully opened or created. Canceling the system dialog and errors do not discard them even after choosing **Don't save** (`Не сохранять`). In that case, New uses the last saved Engine configuration. After a successful transition, the editor works with the new project; exiting without saving closes unsaved work.
+On Open and New, the old document, history, and drafts remain available until the replacement is successfully opened or created. Canceling the system dialog and errors do not discard them even after choosing **Don't save**. In that case, New uses the last saved Engine configuration. After a successful transition, the editor works with the new project; exiting without saving closes unsaved work.
 
 Invalid JSON does not replace the document or permit continuation through saving. The **File** window's JSON draft is validated and applied before Save after completing the Gameplay Systems draft. Correct it or explicitly discard the draft if the changes are unnecessary.
 
 **Save As** first validates the JSON draft as a separate candidate. Canceling selection, a system-dialog error, or a copy-write error leaves the original document, draft, history, Recent Projects, and current Play unchanged. The candidate becomes the open document only after successfully writing JSON, the Engine binding, and resources. Saving to the same path keeps history available; game state changes only when edits requiring its recreation are successfully applied.
 
-**Gameplay Systems** has its own graph draft. Before saving, finish it through **Apply graph draft** or **Discard draft**. If the protection dialog is already open, click **Cancel** (`Отмена`), return to Gameplay Systems, and finish the draft, then repeat Save or the required command. An unfinished draft is not presented as a saved graph and is not included in export. Typed resource and application details are in [editor-game.md](editor-game.md).
+**Gameplay Systems** has its own graph draft. Before saving, finish it through **Apply graph draft** or **Discard draft**. If the protection dialog is already open, click **Cancel**, return to Gameplay Systems, and finish the draft, then repeat Save or the required command. An unfinished draft is not presented as a saved graph and is not included in export. Typed resource and application details are in [editor-game.md](editor-game.md).
 
 While the Gameplay Systems draft is unfinished, document Undo/Redo, applying another JSON, checkpoint, and merge do not replace its base. Apply or discard the draft first, then perform these commands. If both JSON and Gameplay Systems have changed, explicitly discard the JSON draft to edit Gameplay Systems again; Save does not apply one draft over another or silently erase it.
 
@@ -129,13 +135,13 @@ When a Rust, HLSL, JSON, or ordinary text field has focus, Ctrl+Z/Redo remain wi
 
 Native dialogs, import, copy preparation, checks, and export run in a worker thread. The editor continues repainting and shows the operation name, waiting indicator, and elapsed time; this is neither a completion percentage nor an estimate. One operation runs at a time. Document-changing commands are locked during an operation so that the result applies to the selected project version. Closing the editor is blocked while an operation runs; after it finishes, the window can be closed.
 
-Errors appear in the **Operation result** window (`Результат операции`). While the report is open, global menu and shortcut commands are locked; close the report to continue working on the project. For CLI checks and builds, full stdout/stderr is written to `.work/editor-jobs/<id>/` beside the open JSON; the path is included in the report. Native-dialog, import, or copying errors are shown directly. System cancellation of file/folder selection returns control to the current project.
+Errors appear in the **Operation result** window. While the report is open, global menu and shortcut commands are locked; close the report to continue working on the project. For CLI checks and builds, full stdout/stderr is written to `.work/editor-jobs/<id>/` beside the open JSON; the path is included in the report. Native-dialog, import, or copying errors are shown directly. System cancellation of file/folder selection returns control to the current project.
 
 Native dialogs are available on Windows. The initial directory is an optional hint: the editor normalizes relative paths, `/`, `.`/`..`, and ordinary extended-length paths into a form understood by Windows Shell, separately from working project paths. If the directory disappeared, Shell does not support its path, or rejects the hint, the dialog opens in its default directory. Errors in the dialog itself and reading the selected result still appear to the user. Selected paths, Recent Projects, bindings, and file I/O are not rewritten for the hint.
 
 On Linux, system file-selection dialogs currently return an explicit unsupported message. Editor/Player launch and CLI path operations are independent of this limitation. Dialog verification and fix boundaries are described in the [report](dialog-path-fixes-20261016.md).
 
-The Export project command (`Экспорт проекта…`) in Module Library invokes the same asynchronous Full export command as the File menu. It uses system folder selection and checks unsaved changes and the Gameplay Systems draft. Copying runs outside library painting; results and errors appear in the shared operation report.
+The **Export project…** command in Module Library invokes the same asynchronous Full export command as the File menu. It uses system folder selection and checks unsaved changes and the Gameplay Systems draft. Copying runs outside library painting; results and errors appear in the shared operation report.
 
 Import reserves a separate new directory for one file set. If copying, dependency parsing, or adoption into the log is rejected, that directory is removed; existing assets are preserved. If cleanup itself fails, the report identifies the remaining path. Successful import preserves shared Undo for files and references.
 
@@ -165,7 +171,7 @@ After the fix, 120 input frames were checked for each graph, including 113 actua
 
 ## Building a GPU Graph and Restoring Deleted Passes
 
-In **Engine**, double-click the Vulkan renderer. Add passes through the Add Node button (`+ Узел`) above the graph itself or through **Windows → Module Library**. The library supports search by module name and ID; the Add to line (`Добавление в`) shows the graph and window number that will receive the node. The library follows the last active Module Graph in the current workspace. To choose another graph window, click inside it. Engine and Project contexts are preserved separately; architectural changes require Full with sources.
+In **Engine**, double-click the Vulkan renderer. Add passes through the **+ Node** button above the graph itself or through **Windows → Module Library**. The library supports search by module name and ID; the **Adding to:** line shows the graph and window number that will receive the node. The library follows the last active Module Graph in the current workspace. To choose another graph window, click inside it. Engine and Project contexts are preserved separately; architectural changes require Full with sources.
 
 To restore antialiasing, add **FXAA** and connect `tonemap.color → FXAA.color → encode.color`. The last connection replaces the old direct tonemapper-to-encoding connection. To restore **Screen-space AO**, connect HDR color, normals, and depth to its inputs, then its `color` output to the tonemapper. In Forward, color comes from Geometry; in Deferred, from lighting, while normals and depth come from Geometry.
 
@@ -183,7 +189,7 @@ Until all required inputs and outputs of a new pass are connected, the graph is 
 
 ## Deleting a GPU Pass and Related Settings
 
-In **Engine**, expand the Vulkan renderer, select a pass, and delete it through the node Inspector. Architectural changes are available to Full with compatible sources. The Pass enabled flag (`Проход включён`) preserves the node and its settings; the delete command removes the pass itself from the graph.
+In **Engine**, expand the Vulkan renderer, select a pass, and delete it through the node Inspector. Architectural changes are available to Full with compatible sources. The **Pass enabled** flag preserves the node and its settings; the delete command removes the pass itself from the graph.
 
 Deletion reconciles the graph with permitted Engine and Project settings in one document change:
 
@@ -210,9 +216,9 @@ Settings reconciliation processes declared Engine Exposure and ProjectConfigurat
 
 ## Preparing and Applying Changes
 
-When the GPU graph changes, for example when switching the Pass enabled flag (`Проход включён`) for AA, the bottom bar shows ongoing operations, the current stage, and elapsed time. A spinner indicates work without estimating remaining time. Click the bar or arrow to expand individual Engine, Game, Scene, and Rust tasks; a long error can be read in full and copied. Success and errors remain after the operation ends.
+When the GPU graph changes, for example when switching the **Pass enabled** flag for AA, the bottom bar shows ongoing operations, the current stage, and elapsed time. A spinner indicates work without estimating remaining time. Click the bar or arrow to expand individual Engine, Game, Scene, and Rust tasks; a long error can be read in full and copied. Success and errors remain after the operation ends.
 
-Vulkan, shader, and new Game/Scene executor preparation runs in the background. While a candidate is prepared, the previous working version or latest frame is used; the first window opening shows a preparation wait. With rapid repeated changes, the current configuration is applied and stale results skipped. For a successful build, Ready status (`Готово`) appears after the editor accepts the result, not immediately after the compiler finishes. Canceled and superseded requests also finish: their details explicitly state cancellation or replacement rather than application.
+Vulkan, shader, and new Game/Scene executor preparation runs in the background. While a candidate is prepared, the previous working version or latest frame is used; the first window opening shows a preparation wait. With rapid repeated changes, the current configuration is applied and stale results skipped. For a successful build, **Done** status appears after the editor accepts the result, not immediately after the compiler finishes. Canceled and superseded requests also finish: their details explicitly state cancellation or replacement rather than application.
 
 Replacing only rendering preserves the game session, Rust state, camera, and loaded resources. Changing the world model itself or executable-system graph requires preparing a new executor: Play steps pause temporarily, and accepting the new executor recreates game state. If preparation is rejected, the error remains visible and the previous working version is preserved. Authored edits remain in the document: they can be corrected or undone through Undo. Saving JSON and applying it in preview are separate actions; preparation status remains visible after Save.
 

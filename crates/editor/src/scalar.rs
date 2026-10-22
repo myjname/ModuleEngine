@@ -27,9 +27,7 @@ pub fn world_speed_compiled(
         None => 1.0,
     };
     if !value.is_finite() || value.abs() > 100.0 {
-        return Err(
-            "Скорость должна быть конечным числом в пределах −100…100 для предпросмотра.".into(),
-        );
+        return Err("Speed must be a finite number within −100…100 for preview.".into());
     }
     Ok(value as f32)
 }
@@ -62,31 +60,31 @@ fn evaluate(
     compiled: &CompiledScalar<'_>,
 ) -> Result<f64, String> {
     if !seen.insert(id.to_owned()) {
-        return Err(format!("Цикл скалярных зависимостей: {id}"));
+        return Err(format!("Scalar dependency cycle: {id}"));
     }
     let node = document
         .root
         .nodes
         .iter()
         .find(|n| n.id == id)
-        .ok_or_else(|| format!("Узел {id} отсутствует"))?;
+        .ok_or_else(|| format!("Node {id} is missing"))?;
     let result = match node.module.as_str() {
         "scalar.value" => node
             .params
             .get("value")
             .and_then(serde_json::Value::as_f64)
-            .ok_or_else(|| format!("Узел {id}: требуется числовой параметр value")),
+            .ok_or_else(|| format!("Node {id}: a numeric value parameter is required")),
         "clock.time" => Ok(time),
         "custom.rust" => {
             let source_id = node
                 .params
                 .get("source_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| format!("Custom {id}: отсутствует source_id"))?;
+                .ok_or_else(|| format!("Custom {id}: source_id is missing"))?;
             let source = document
                 .custom_sources
                 .get(source_id)
-                .ok_or_else(|| format!("Исходник {source_id} отсутствует"))?;
+                .ok_or_else(|| format!("Source {source_id} is missing"))?;
             let base = input(document, id, "base", time, seen, 1.0, compiled)?;
             let connected_time = input(document, id, "time", time, seen, time, compiled)?;
             if let Some(result) = compiled(source_id, connected_time, base) {
@@ -102,7 +100,7 @@ fn evaluate(
             }
         }
         other => Err(format!(
-            "Узел {id}: скалярное исполнение модуля {other} не зарегистрировано"
+            "Node {id}: scalar execution for module {other} is not registered"
         )),
     };
     seen.remove(id);
@@ -110,7 +108,7 @@ fn evaluate(
         if value.is_finite() {
             Ok(value)
         } else {
-            Err(format!("Узел {id} вернул неконечное число"))
+            Err(format!("Node {id} returned a non-finite number"))
         }
     })
 }

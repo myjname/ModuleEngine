@@ -178,10 +178,9 @@ impl FrameRenderer for VulkanFrameRenderer {
         height: usize,
         overrides: &RenderOverrides,
     ) -> Result<Frame, String> {
-        let mut backend = self
-            .backend
-            .try_lock()
-            .map_err(|_| "GPU готовит новую конфигурацию; показан последний кадр".to_string())?;
+        let mut backend = self.backend.try_lock().map_err(|_| {
+            "GPU is preparing a new configuration; showing the last frame".to_string()
+        })?;
         backend.render(
             scene,
             camera,

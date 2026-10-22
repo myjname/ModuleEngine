@@ -41,7 +41,7 @@ impl BuildProgress {
         Self {
             inner: Arc::new(Mutex::new(ActivityRecord {
                 title: title.into(),
-                detail: "Ожидание запуска".into(),
+                detail: "Waiting to start".into(),
                 started: Instant::now(),
                 finished: None,
                 state: ActivityState::Running,

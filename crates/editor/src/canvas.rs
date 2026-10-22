@@ -338,9 +338,9 @@ pub fn draw(
             actions.push(CanvasAction::Open(node.id.clone()));
         }
         response.on_hover_text(if node.expandable {
-            "Перетащите заголовок. Двойной щелчок открывает внутренний граф."
+            "Drag the header. Double-click to open the internal graph."
         } else {
-            "Перетащите заголовок. Параметры выбранного узла находятся справа."
+            "Drag the header. The selected node's parameters are on the right."
         });
         painter.text(
             header.left_top() + Vec2::new(11.0, 10.0) * state.zoom,
@@ -405,7 +405,7 @@ pub fn draw(
                 clicked_output = true;
             }
             response.on_hover_text(format!(
-                "{}: {} — выберите вход того же типа",
+                "{}: {} — select an input of the same type",
                 port.name, kind
             ));
         }
@@ -429,9 +429,8 @@ pub fn draw(
             state.pending = None;
             state.message = None;
         } else {
-            state.message = Some(
-                "Соединение отклонено: типы пинов должны совпадать, узлы — различаться.".into(),
-            );
+            state.message =
+                Some("Connection rejected: pin types must match and nodes must differ.".into());
         }
     }
     if let Some(from) = &state.pending
@@ -451,7 +450,7 @@ pub fn draw(
     painter.text(
         canvas.left_bottom() + Vec2::new(14.0, -14.0),
         egui::Align2::LEFT_BOTTOM,
-        "Соединение: выход к входу · двойной щелчок по связи удаляет её · ПКМ: панорама · Ctrl+колесо: масштаб",
+        "Connect: output to input · double-click a connection to delete it · RMB: pan · Ctrl+wheel: zoom",
         FontId::proportional(10.5),
         Color32::from_rgb(111, 126, 149),
     );

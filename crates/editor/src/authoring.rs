@@ -140,7 +140,7 @@ impl Scripts {
         let source = source.to_owned();
         let candidate = source.clone();
         let progress = BuildProgress::new(format!("Rust: {id}"));
-        progress.stage("Компиляция Rust");
+        progress.stage("Compiling Rust");
         self.activities.insert(id.into(), progress.clone());
         let (receiver, job) = spawn_job(move |cancelled| {
             let result = compiler
@@ -148,7 +148,7 @@ impl Scripts {
                 .and_then(|script| script.with_asset_root(&asset_root))
                 .map_err(|e| e.to_string());
             match &result {
-                Ok(_) => progress.stage("Код скомпилирован; ожидание применения"),
+                Ok(_) => progress.stage("Code compiled; waiting to apply"),
                 Err(error) => progress.fail(error.clone()),
             }
             result
@@ -163,7 +163,7 @@ impl Scripts {
             },
         );
         self.errors.remove(id);
-        self.status = format!("Rust {id}: компиляция в фоне");
+        self.status = format!("Rust {id}: compiling in the background");
     }
 
     pub fn poll(&mut self, document: &GraphDocument) {
@@ -186,7 +186,7 @@ impl Scripts {
                     id.clone(),
                     job.source.clone(),
                     job.kind,
-                    Err("Поток компиляции Rust завершился без результата".into()),
+                    Err("Rust compilation thread ended without a result".into()),
                 )),
                 Err(mpsc::TryRecvError::Empty) => None,
             })
@@ -213,7 +213,7 @@ impl Scripts {
                 })
                 .unwrap_or(kind);
             if document.custom_sources.get(&id) != Some(&source) || current_kind != kind {
-                self.status = format!("Rust {id}: результат устарел, исходник уже изменён");
+                self.status = format!("Rust {id}: result is stale; source has changed");
                 if let Some(current) = document.custom_sources.get(&id) {
                     self.request(&id, current, current_kind);
                 }
@@ -233,11 +233,11 @@ impl Scripts {
                         self.errors.insert(id.clone(), error.to_string());
                         if let Some(progress) = self.activities.get(&id) {
                             progress.fail(format!(
-                                "Несовместимое состояние: {error}. Нужен сброс или миграция"
+                                "Incompatible state: {error}. Reset or migration is required"
                             ));
                         }
                         self.status = format!(
-                            "Rust {id}: несовместимое состояние; предыдущая версия сохранена. Нужен явный сброс или миграция"
+                            "Rust {id}: incompatible state; previous version preserved. Explicit reset or migration is required"
                         );
                         continue;
                     }
@@ -251,9 +251,9 @@ impl Scripts {
                     self.active.insert(id.clone(), candidate);
                     self.rejected.remove(&id);
                     self.errors.remove(&id);
-                    self.status = format!("Rust {id}: скомпилированная версия применена");
+                    self.status = format!("Rust {id}: compiled version applied");
                     if let Some(progress) = self.activities.get(&id) {
-                        progress.succeed("Скомпилированная версия применена");
+                        progress.succeed("Compiled version applied");
                     }
                 }
                 Err(error) => {
@@ -262,9 +262,9 @@ impl Scripts {
                     }
                     self.errors.insert(id.clone(), error);
                     self.status = if self.has_active(&id) {
-                        format!("Rust {id}: ошибка; предыдущая версия сохранена")
+                        format!("Rust {id}: error; previous version preserved")
                     } else {
-                        format!("Rust {id}: ошибка; рабочей скомпилированной версии ещё нет")
+                        format!("Rust {id}: error; no working compiled version yet")
                     };
                 }
             }
@@ -306,15 +306,15 @@ impl Scripts {
         let candidate = self
             .rejected
             .get(id)
-            .ok_or("Нет отклонённого скомпилированного кандидата")?;
+            .ok_or("No rejected compiled candidate")?;
         candidate.reset_state().map_err(|e| e.to_string())?;
         self.reject_staged(id)?;
         let candidate = self.rejected.remove(id).unwrap();
         self.active.insert(id.to_owned(), candidate);
         self.errors.remove(id);
-        self.status = format!("Rust {id}: новая версия применена с явным сбросом состояния");
+        self.status = format!("Rust {id}: new version applied with an explicit state reset");
         let progress = BuildProgress::new(format!("Rust: {id}"));
-        progress.succeed("Применено со сбросом состояния");
+        progress.succeed("Applied with state reset");
         self.activities.insert(id.into(), progress);
         Ok(())
     }
@@ -328,15 +328,15 @@ impl Scripts {
         let candidate = self
             .rejected
             .get(id)
-            .ok_or("Нет отклонённого скомпилированного кандидата")?;
+            .ok_or("No rejected compiled candidate")?;
         candidate.migrate_state(state).map_err(|e| e.to_string())?;
         self.reject_staged(id)?;
         let candidate = self.rejected.remove(id).unwrap();
         self.active.insert(id.to_owned(), candidate);
         self.errors.remove(id);
-        self.status = format!("Rust {id}: новая версия применена с явной миграцией состояния");
+        self.status = format!("Rust {id}: new version applied with explicit state migration");
         let progress = BuildProgress::new(format!("Rust: {id}"));
-        progress.succeed("Применено с миграцией состояния");
+        progress.succeed("Applied with state migration");
         self.activities.insert(id.into(), progress);
         Ok(())
     }
@@ -431,13 +431,13 @@ impl Scripts {
         let script = self
             .active
             .get(id)
-            .ok_or_else(|| format!("Rust {id} ещё не скомпилирован"))?;
+            .ok_or_else(|| format!("Rust {id} is not compiled yet"))?;
         if script.kind() != ScriptKind::Update {
-            return Err(format!("Rust {id} должен содержать fn update"));
+            return Err(format!("Rust {id} must contain fn update"));
         }
         if self.staged.borrow().contains_key(id) {
             return Err(format!(
-                "Rust {id}: предыдущий результат не принят и не отклонён"
+                "Rust {id}: previous result has not been accepted or rejected"
             ));
         }
         let mut context = context.clone();
@@ -448,7 +448,7 @@ impl Scripts {
         if !tick.events.is_empty() {
             script.reject_tick(&tick).map_err(|e| e.to_string())?;
             return Err(format!(
-                "Rust {id}: события требуют игрового исполнителя, legacy preview их не принимает"
+                "Rust {id}: events require the game executor; legacy preview does not accept them"
             ));
         }
         let commands = tick.commands.clone();
@@ -516,7 +516,7 @@ impl PreviewBuilder {
     }
     pub fn applied(&mut self) {
         if let Some(progress) = &self.progress {
-            progress.succeed("Конфигурация рендера применена");
+            progress.succeed("Renderer configuration applied");
         }
         self.awaiting_acceptance = None;
         self.rejected = None;
@@ -552,13 +552,13 @@ impl PreviewBuilder {
         let registry = registry.clone();
         let presentation_target = self.presentation_target.clone();
         let artifacts = module_engine_script::retain_test_artifacts(backend_root);
-        let progress = BuildProgress::new("Предпросмотр Engine");
-        progress.stage("Проверка графа, подготовка Vulkan и шейдеров");
+        let progress = BuildProgress::new("Engine preview");
+        progress.stage("Validating the graph, preparing Vulkan and shaders");
         self.progress = Some(progress.clone());
         let (receiver, job) = spawn_job(move |cancelled| {
             let _artifacts = artifacts;
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                return Err("Подготовка предпросмотра отменена".into());
+                return Err("Preview preparation cancelled".into());
             }
             let result: Result<Runtime, String> =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -568,10 +568,10 @@ impl PreviewBuilder {
                     Ok(runtime)
                 }))
                 .unwrap_or_else(|_| {
-                    Err("Подготовка предпросмотра завершилась с внутренней ошибкой".into())
+                    Err("Preview preparation failed with an internal error".into())
                 });
             match &result {
-                Ok(_) => progress.stage("GPU-кандидат подготовлен; ожидание применения"),
+                Ok(_) => progress.stage("GPU candidate prepared; waiting to apply"),
                 Err(error) => progress.fail(error.clone()),
             }
             result
@@ -612,7 +612,7 @@ impl PreviewBuilder {
         let result = match job.receiver.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return None,
-            Err(_) => Err("Поток сборки рендера завершился без результата".into()),
+            Err(_) => Err("Renderer build thread ended without a result".into()),
         };
         let candidate = self.pending.take().unwrap();
         if !candidate.document.execution_eq(document) || candidate.backend_root != backend_root {

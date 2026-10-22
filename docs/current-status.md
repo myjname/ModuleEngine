@@ -4,7 +4,11 @@
 
 [English](current-status.md) | [Русский](ru/current-status.md) | [Documentation](README.md)
 
-Summary as of 18 October 2026: the [current P0 finalization](p0-finalization-20261018.md) records complete Windows and applicable Linux checks plus scoped real foreground observations. The [external final review](../outputs/reviews/p0-finalization-20261018/final-review.md) governs source-bound acceptance. [17 October P0](p0-stabilization-20261017.md), [pre-async continuation](p0-continuation-20261018.md) and [async evidence](gpu-async-20261018.md) retain their own artifacts and limits; this page does not turn its date into a new EXE acceptance.
+Summary as of 22 October 2026: EN-01 is implemented and verified within the [reported scope](en01-english-ui-20261022.md), before portfolio-game development. Engine-owned UI and diagnostics use English; authored content, opaque external OS/compiler diagnostics and OS-owned native dialog controls retain their original text or language. Documentation remains available in full English and Russian versions. See the [UI language contract](editor-workflow.md#ui-language).
+
+The current normal Windows Editor `cf14c08d…`, scoped source05 Editor/Player checks and strict Clippy pass; the five CLI routes retain their separate source04 binding. Current Linux Editor compilation and five CPU Activity tests pass without new Linux GUI, timing or P0 certification. The source05 Scene capture records preparation, not ready geometry. These check results do not themselves constitute the independent final decision; the report keeps that decision separate from verification evidence.
+
+The [P0 finalization](p0-finalization-20261018.md) records complete Windows and applicable Linux checks plus scoped real foreground observations. The [external final review](../outputs/reviews/p0-finalization-20261018/final-review.md) governs that source-bound acceptance. [17 October P0](p0-stabilization-20261017.md), [pre-async continuation](p0-continuation-20261018.md) and [async evidence](gpu-async-20261018.md) retain their own artifacts and limits; this page does not turn its date or EN-01 changes into a new P0 EXE acceptance.
 
 <a id="цели-и-границы"></a>
 

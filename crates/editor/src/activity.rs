@@ -23,27 +23,27 @@ pub fn draw_activity(ui: &mut egui::Ui, activities: &[ActivitySnapshot]) -> bool
         .or(active)
         .unwrap_or_else(|| activities.last().unwrap());
     let color = activity_color(ui, activity.state);
-    let elapsed = format!("{:.1} с", activity.elapsed.as_secs_f64());
+    let elapsed = format!("{:.1} s", activity.elapsed.as_secs_f64());
     let summary = match activity.state {
         ActivityState::Running => format!(
-            "В работе: {running_count} · {elapsed} · {} — {}",
+            "Running: {running_count} · {elapsed} · {} — {}",
             activity.title,
             first_line(&activity.detail),
         ),
         ActivityState::Succeeded => format!(
-            "Готово · {elapsed} · {} — {} · результатов: {}",
+            "Done · {elapsed} · {} — {} · results: {}",
             activity.title,
             first_line(&activity.detail),
             activities.len(),
         ),
         ActivityState::Failed => {
             let extra = if running_count > 0 {
-                format!(" · в работе: {running_count}")
+                format!(" · running: {running_count}")
             } else {
                 String::new()
             };
             format!(
-                "Ошибка{extra} · {elapsed} · {} — {}",
+                "Error{extra} · {elapsed} · {} — {}",
                 first_line(activity.error.as_deref().unwrap_or(&activity.detail)),
                 activity.title,
             )
@@ -63,7 +63,7 @@ pub fn draw_activity(ui: &mut egui::Ui, activities: &[ActivitySnapshot]) -> bool
                 .sense(Sense::click()),
         );
         toggle = response.clicked();
-        response.on_hover_text("Открыть все операции и сведения об ошибках");
+        response.on_hover_text("Show all operations and error details");
     });
     if toggle {
         header.toggle();
@@ -79,13 +79,13 @@ pub fn draw_activity(ui: &mut egui::Ui, activities: &[ActivitySnapshot]) -> bool
                             ui.separator();
                         }
                         let color = activity_color(ui, activity.state);
-                        let elapsed = format!("{:.1} с", activity.elapsed.as_secs_f64());
+                        let elapsed = format!("{:.1} s", activity.elapsed.as_secs_f64());
                         ui.add(egui::Label::new(RichText::new(&activity.title).strong()).wrap());
                         let state = match activity.state {
-                            ActivityState::Running => format!("Выполняется · прошло {elapsed}"),
-                            ActivityState::Succeeded => format!("Завершено за {elapsed}"),
+                            ActivityState::Running => format!("Running · elapsed {elapsed}"),
+                            ActivityState::Succeeded => format!("Completed in {elapsed}"),
                             ActivityState::Failed => {
-                                format!("Операция завершилась ошибкой за {elapsed}")
+                                format!("Operation failed after {elapsed}")
                             }
                         };
                         ui.add(egui::Label::new(RichText::new(state).color(color)).wrap());
@@ -96,7 +96,7 @@ pub fn draw_activity(ui: &mut egui::Ui, activities: &[ActivitySnapshot]) -> bool
                                     .selectable(true)
                                     .wrap(),
                             );
-                            if ui.small_button("Копировать ошибку").clicked() {
+                            if ui.small_button("Copy error").clicked() {
                                 ui.ctx().copy_text(error.clone());
                             }
                         }
@@ -203,16 +203,16 @@ mod tests {
             1,
             "several subsystems share one collapsed summary"
         );
-        assert!(labels.iter().any(|text| text.contains("Ошибка")
+        assert!(labels.iter().any(|text| text.contains("Error")
             && text.contains("DXC")
-            && text.contains("в работе: 1")));
+            && text.contains("running: 1")));
         assert!(labels.iter().all(|text| !text.contains('%')));
         let click = output
             .shapes
             .iter()
             .find_map(|shape| {
                 if let egui::Shape::Text(text) = &shape.shape
-                    && text.galley.text().starts_with("Ошибка")
+                    && text.galley.text().starts_with("Error")
                 {
                     Some(text.pos + text.galley.size() * 0.5)
                 } else {
@@ -324,7 +324,7 @@ mod tests {
         assert!(output.shapes.iter().any(|shape| {
             if let egui::Shape::Text(text) = &shape.shape {
                 text.galley.text().contains("Создание рендера")
-                    && text.galley.text().contains("В работе: 1")
+                    && text.galley.text().contains("Running: 1")
             } else {
                 false
             }

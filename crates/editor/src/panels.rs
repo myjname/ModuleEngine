@@ -55,12 +55,12 @@ impl Editor {
                     .get("enabled")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                if ui.checkbox(&mut enabled, "Проход включён").changed() {
+                if ui.checkbox(&mut enabled, "Pass enabled").changed() {
                     params["enabled"] = serde_json::json!(enabled);
                     changed = true;
                 }
             }
-            egui::CollapsingHeader::new("Контракты GPU-ресурсов").show(ui, |ui| {
+            egui::CollapsingHeader::new("GPU resource contracts").show(ui, |ui| {
                 for spec in manifest.inputs.iter().chain(&manifest.outputs) {
                     ui.label(
                         RichText::new(format!(
@@ -80,7 +80,7 @@ impl Editor {
             self.changed(true);
         }
         if node.module == "gpu.custom" {
-            if ui.button("Редактировать HLSL").clicked() {
+            if ui.button("Edit HLSL").clicked() {
                 self.current_shader = node
                     .params
                     .get("source_id")
@@ -90,14 +90,14 @@ impl Editor {
                 self.tab = Tab::Shader;
             }
             ui.horizontal(|ui| {
-                if ui.button("Новый Compute-шаблон").clicked() {
+                if ui.button("New Compute template").clicked() {
                     self.set_custom_shader_template(&node.id, false);
                 }
-                if ui.button("Новый Scene-шаблон").clicked() {
+                if ui.button("New Scene template").clicked() {
                     self.set_custom_shader_template(&node.id, true);
                 }
             });
-        } else if ui.button("Заменить на редактируемый Custom HLSL").clicked()
+        } else if ui.button("Replace with editable Custom HLSL").clicked()
             && let (Some(source), Some(mut manifest)) = (
                 module_engine_vulkan::builtin_hlsl_source(&node.module),
                 module_engine_vulkan::builtin_manifest(&node.module),
@@ -178,10 +178,10 @@ impl Editor {
                         ui.selectable_value(&mut self.current_shader, key.clone(), key);
                     }
                 });
-            if ui.button("Применить HLSL").clicked() {
+            if ui.button("Apply HLSL").clicked() {
                 self.rebuild();
             }
-            if ui.button("Открыть граф Vulkan").clicked() {
+            if ui.button("Open Vulkan graph").clicked() {
                 self.graph_path.clear();
                 if let Some(id) = self
                     .document
@@ -196,19 +196,19 @@ impl Editor {
                 }
             }
         });
-        ui.label("Редактируется обычный HLSL. Ресурсы, стадии и точки входа объявлены в manifest выбранного узла. Ошибка компиляции сохраняет предыдущий рабочий рендер.");
+        ui.label("Edit standard HLSL. Resources, stages, and entry points are declared in the selected node's manifest. A compilation error preserves the previous working renderer.");
         if self.preview_builder.is_pending() {
-            ui.label("Компиляция GPU-проходов в фоне…");
+            ui.label("Compiling GPU passes in the background…");
         }
         if let Some(error) = &self.preview_builder.error {
-            egui::CollapsingHeader::new("Диагностика GPU-кандидата")
+            egui::CollapsingHeader::new("GPU candidate diagnostics")
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.colored_label(Color32::from_rgb(246, 134, 130), error);
                 });
         }
         let Some(source) = self.document.shader_sources.get_mut(&self.current_shader) else {
-            ui.label("Раскройте Vulkan renderer и добавьте Custom HLSL или замените выбранный встроенный проход на Custom.");
+            ui.label("Expand Vulkan renderer and add Custom HLSL, or replace the selected built-in pass with Custom.");
             return;
         };
         if ui
@@ -222,7 +222,7 @@ impl Editor {
             .changed()
         {
             self.changed(false);
-            self.status = "HLSL изменён; нажмите «Применить HLSL» для компиляции".into();
+            self.status = "HLSL changed; click Apply HLSL to compile".into();
         }
     }
 
@@ -240,12 +240,12 @@ impl Editor {
             })
             .cloned();
         let Some(node) = node else {
-            ui.label("Выберите параметр команды: число, строку или флаг. Графическая правка изменит Rust и запустит компиляцию кандидата.");
+            ui.label("Select a command parameter: number, string, or flag. A visual edit changes Rust and starts candidate compilation.");
             return;
         };
         ui.label(RichText::new(&node.label).strong());
         if self.source_error.is_some() {
-            ui.label("Визуальные правки недоступны для текущего исходника");
+            ui.label("Visual edits are unavailable for the current source");
             return;
         }
         let result = match node.kind {
@@ -267,7 +267,7 @@ impl Editor {
                 })
             }
             CommandNodeKind::Boolean { mut value } => {
-                ui.checkbox(&mut value, "Значение").changed().then(|| {
+                ui.checkbox(&mut value, "Value").changed().then(|| {
                     self.command_program
                         .as_mut()
                         .unwrap()
@@ -276,12 +276,12 @@ impl Editor {
             }
             CommandNodeKind::Opaque { source } => {
                 ui.label(RichText::new(source).monospace());
-                ui.label("Этот Rust-фрагмент редактируется текстом и исполняется компилятором");
+                ui.label("This Rust fragment is edited as text and executed by the compiler");
                 None
             }
             _ => {
                 ui.label(
-                    "Входы команды показывают её параметры. Порядок команд задаётся Rust-кодом.",
+                    "Command inputs show its parameters. Rust code defines the command order.",
                 );
                 None
             }
@@ -290,7 +290,7 @@ impl Editor {
             match result {
                 Ok(()) => {
                     self.sync_program_source(false);
-                    self.status = "Параметр изменён в исходнике Rust".into();
+                    self.status = "Parameter changed in the Rust source".into();
                 }
                 Err(error) => self.status = error.to_string(),
             }
@@ -298,17 +298,17 @@ impl Editor {
     }
 
     pub(super) fn history_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("История проекта");
-        ui.label("История относится к графу, исходникам, параметрам и раскладке. Состояние симуляции не записывается.");
+        ui.heading("Project history");
+        ui.label("History covers the graph, sources, parameters, and layout. Simulation state is not recorded.");
         ui.horizontal(|ui| {
-            if ui.button("Отменить").clicked() {
+            if ui.button("Undo").clicked() {
                 self.undo();
             }
-            if ui.button("Повторить").clicked() {
+            if ui.button("Redo").clicked() {
                 self.redo();
             }
             ui.label(format!(
-                "Шаг {} / {}",
+                "Step {} / {}",
                 self.history.cursor(),
                 self.history.entries().len().saturating_sub(1)
             ));
@@ -321,15 +321,15 @@ impl Editor {
         let store = CheckpointStore::new(home.join(".history"));
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.checkpoint_label);
-            if ui.button("Сохранить контрольную версию").clicked() {
+            if ui.button("Save checkpoint").clicked() {
                 self.flush_history();
                 match store.save(&self.checkpoint_label, &self.document) {
-                    Ok(saved) => self.status = format!("Версия {} сохранена", saved.id),
+                    Ok(saved) => self.status = format!("Version {} saved", saved.id),
                     Err(error) => self.status = error,
                 }
             }
         });
-        egui::CollapsingHeader::new("Сохранённые версии").show(ui, |ui| match store.list() {
+        egui::CollapsingHeader::new("Saved versions").show(ui, |ui| match store.list() {
             Ok(checkpoints) => {
                 for entry in checkpoints.iter().rev().take(30) {
                     ui.horizontal(|ui| {
@@ -337,7 +337,7 @@ impl Editor {
                         if ui
                             .add_enabled(
                                 !self.json_dirty && !self.game_workbench.has_graph_draft(),
-                                egui::Button::new("Восстановить"),
+                                egui::Button::new("Restore"),
                             )
                             .clicked()
                         {
@@ -353,8 +353,7 @@ impl Editor {
                                 return;
                             }
                             self.flush_history();
-                            self.history
-                                .record("Восстановление версии", &entry.document);
+                            self.history.record("Restore version", &entry.document);
                             self.restore_document(entry.document.clone());
                         }
                     });
@@ -365,17 +364,17 @@ impl Editor {
             }
         });
         ui.separator();
-        ui.heading("Сравнение и объединение файлов");
+        ui.heading("Compare and merge files");
         ui.horizontal(|ui| {
-            ui.label("Общая исходная версия");
+            ui.label("Common base version");
             ui.text_edit_singleline(&mut self.merge_base);
         });
         ui.horizontal(|ui| {
-            ui.label("Изменённый файл другого участника");
+            ui.label("Another contributor's modified file");
             ui.text_edit_singleline(&mut self.merge_theirs);
         });
         ui.horizontal(|ui| {
-            if ui.button("Сравнить с текущим проектом").clicked() {
+            if ui.button("Compare with current project").clicked() {
                 match project::read(&PathBuf::from(&self.merge_base))
                     .and_then(|base| diff_documents(&base, &self.document))
                 {
@@ -389,7 +388,7 @@ impl Editor {
                     Err(error) => self.status = error,
                 }
             }
-            if ui.button("Подготовить объединение").clicked() {
+            if ui.button("Prepare merge").clicked() {
                 let result = project::read(&PathBuf::from(&self.merge_base)).and_then(|base| {
                     project::read(&PathBuf::from(&self.merge_theirs))
                         .and_then(|theirs| merge_documents(&base, &self.document, &theirs))
@@ -397,7 +396,7 @@ impl Editor {
                 match result {
                     Ok(result) => {
                         self.status = format!(
-                            "Конфликтов: {}. Исходные файлы не изменены.",
+                            "Conflicts: {}. Source files are unchanged.",
                             result.conflicts.len()
                         );
                         self.merge_result = Some(result);
@@ -413,41 +412,41 @@ impl Editor {
             let mut choice = None;
             if let Some(result) = &self.merge_result {
                 for (index, conflict) in result.conflicts.iter().enumerate() {
-                    egui::CollapsingHeader::new(format!("Конфликт {}", conflict.path))
+                    egui::CollapsingHeader::new(format!("Conflict {}", conflict.path))
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.label(format!(
-                                "База: {}",
+                                "Base: {}",
                                 conflict
                                     .base
                                     .as_ref()
                                     .map(ToString::to_string)
-                                    .unwrap_or_else(|| "Отсутствует".into())
+                                    .unwrap_or_else(|| "Missing".into())
                             ));
                             ui.label(format!(
-                                "Текущая: {}",
+                                "Current: {}",
                                 conflict
                                     .ours
                                     .as_ref()
                                     .map(ToString::to_string)
-                                    .unwrap_or_else(|| "Отсутствует".into())
+                                    .unwrap_or_else(|| "Missing".into())
                             ));
                             ui.label(format!(
-                                "Другая: {}",
+                                "Other: {}",
                                 conflict
                                     .theirs
                                     .as_ref()
                                     .map(ToString::to_string)
-                                    .unwrap_or_else(|| "Отсутствует".into())
+                                    .unwrap_or_else(|| "Missing".into())
                             ));
                             ui.horizontal(|ui| {
-                                if ui.button("Оставить текущую").clicked() {
+                                if ui.button("Keep current").clicked() {
                                     choice = Some((index, ConflictChoice::Ours));
                                 }
-                                if ui.button("Взять другую").clicked() {
+                                if ui.button("Take other").clicked() {
                                     choice = Some((index, ConflictChoice::Theirs));
                                 }
-                                if ui.button("Вернуть базу").clicked() {
+                                if ui.button("Use base").clicked() {
                                     choice = Some((index, ConflictChoice::Base));
                                 }
                             });
@@ -467,7 +466,7 @@ impl Editor {
             if ui
                 .add_enabled(
                     resolved && !self.json_dirty && !self.game_workbench.has_graph_draft(),
-                    egui::Button::new("Применить объединённый проект"),
+                    egui::Button::new("Apply merged project"),
                 )
                 .clicked()
                 && let Some(result) = self.merge_result.take()
@@ -480,13 +479,10 @@ impl Editor {
                     return;
                 }
                 self.flush_history();
-                self.history
-                    .record("Объединение проектов", &result.document);
+                self.history.record("Merge projects", &result.document);
                 self.restore_document(result.document);
             }
-            if ui
-                .button("Сохранить результат вместе с конфликтами")
-                .clicked()
+            if ui.button("Save result with conflicts").clicked()
                 && let Some(result) = &self.merge_result
             {
                 let path = home.join(format!(
@@ -497,7 +493,7 @@ impl Editor {
                         .as_millis()
                 ));
                 self.status = match result.save(&path) {
-                    Ok(()) => format!("Сохранено {}", path.display()),
+                    Ok(()) => format!("Saved {}", path.display()),
                     Err(error) => error,
                 };
             }
