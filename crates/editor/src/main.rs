@@ -79,7 +79,7 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "ModuleEngine 0.4\n\n  module-engine-editor [project.json] [--profile full|team]\n  module-engine-editor --new-game game-project.json\n  module-engine-editor --play game-project.json\n  module-engine-editor --export-game game-project.json folder\n  module-engine-editor --game-check game-project.json [output-folder]\n  module-engine-editor --player-benchmark game-project.json [output-folder]\n  module-engine-editor --check project.json\n  module-engine-editor --render project.json output.png\n  module-engine-editor --export project.json folder\n  module-engine-editor --export-team project.json folder\n  module-engine-editor --self-check [output-folder]\n  module-engine-editor --integration-check [output-folder]\n  module-engine-editor --settings-check [output-folder]\n  module-engine-editor --editor-ui-check game-project.json output-folder\n\nMouse: drag nodes; output pin -> compatible input pin; double click compound.\n3D: drag to orbit; wheel to zoom. See README.md for Russian documentation."
+            "ModuleEngine 0.4\n\n  module-engine-editor [project.json] [--profile full|team]\n  module-engine-editor --new-game game-project.json\n  module-engine-editor --play game-project.json\n  module-engine-editor --export-game game-project.json folder\n  module-engine-editor --game-check game-project.json [output-folder]\n  module-engine-editor --player-benchmark game-project.json [output-folder]\n  module-engine-editor --check project.json\n  module-engine-editor --render project.json output.png\n  module-engine-editor --export project.json folder\n  module-engine-editor --export-team project.json folder\n  module-engine-editor --self-check [output-folder]\n  module-engine-editor --integration-check [output-folder]\n  module-engine-editor --settings-check [output-folder]\n  module-engine-editor --editor-ui-check game-project.json output-folder\n\nMouse: drag nodes; output pin -> compatible input pin; double click compound.\n3D: drag to orbit; wheel to zoom. See README.md and README.ru.md for documentation."
         );
         println!(
             "  module-engine-editor --scene-assets-check game-project.json output-folder\n\nScene: G/R/S tools, MMB orbit, Shift+MMB pan, wheel zoom, F frame, Escape cancel."
@@ -311,7 +311,7 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         Some("--capabilities") => {
-            let path = args.get(1).ok_or("Укажите файл графа")?;
+            let path = args.get(1).ok_or("Specify a graph file")?;
             let document = project::read(Path::new(path))?;
             let package = distribution::detect(Path::new(path), &document, requested_profile)?;
             let root = package
@@ -363,7 +363,7 @@ fn run() -> Result<(), String> {
             );
         }
         Some("--check") => {
-            let path = args.get(1).ok_or("Укажите файл графа")?;
+            let path = args.get(1).ok_or("Specify a graph file")?;
             let document = project::read(Path::new(path))?;
             let distribution = distribution::detect(Path::new(path), &document, requested_profile)?;
             distribution.validate_document(&document)?;
@@ -408,8 +408,8 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         Some("--render") => {
-            let path = args.get(1).ok_or("Укажите файл графа")?;
-            let out = args.get(2).ok_or("Укажите выходной PNG")?;
+            let path = args.get(1).ok_or("Specify a graph file")?;
+            let out = args.get(2).ok_or("Specify an output PNG")?;
             reject_same_render_path(Path::new(path), Path::new(out))?;
             let document = project::read(Path::new(path))?;
             let distribution = distribution::detect(Path::new(path), &document, requested_profile)?;
@@ -452,13 +452,13 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         Some("--export") => {
-            let path = args.get(1).ok_or("Укажите файл графа")?;
-            let destination = args.get(2).ok_or("Укажите папку экспорта")?;
+            let path = args.get(1).ok_or("Specify a graph file")?;
+            let destination = args.get(2).ok_or("Specify an export folder")?;
             let document = project::read(Path::new(path))?;
             let distribution = distribution::detect(Path::new(path), &document, requested_profile)?;
             distribution.validate_document(&document)?;
             if !distribution.can_author_engine() {
-                return Err("Экспорт полного движка требует профиля Full и полного набора совместимых исходников.".into());
+                return Err("Exporting the full engine requires the Full profile and a complete set of compatible sources.".into());
             }
             let asset_root = Path::new(path)
                 .parent()
@@ -474,14 +474,14 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         Some("--export-team") => {
-            let path = args.get(1).ok_or("Укажите файл графа")?;
-            let destination = args.get(2).ok_or("Укажите папку Team-поставки")?;
+            let path = args.get(1).ok_or("Specify a graph file")?;
+            let destination = args.get(2).ok_or("Specify a Team distribution folder")?;
             let document = project::read(Path::new(path))?;
             let package = distribution::detect(Path::new(path), &document, requested_profile)?;
             package.validate_document(&document)?;
             if !package.can_author_engine() {
                 return Err(
-                    "Создание Team-поставки требует Full и полного набора совместимых исходников."
+                    "Creating a Team distribution requires Full and a complete set of compatible sources."
                         .into(),
                 );
             }
@@ -564,12 +564,12 @@ fn parse_profile(
     let mut profile = None;
     while let Some(index) = args.iter().position(|arg| arg == "--profile") {
         if profile.is_some() {
-            return Err("Профиль указан больше одного раза.".into());
+            return Err("Profile was specified more than once.".into());
         }
         profile = Some(match args.get(index + 1).map(String::as_str) {
             Some("full") => distribution::DistributionProfile::Full,
             Some("team") => distribution::DistributionProfile::Team,
-            _ => return Err("После --profile укажите full или team.".into()),
+            _ => return Err("Specify full or team after --profile.".into()),
         });
         args.drain(index..=index + 1);
     }
@@ -800,7 +800,7 @@ fn reject_same_render_path(input: &Path, output: &Path) -> Result<(), String> {
         && input.canonicalize().map_err(|e| e.to_string())?
             == output.canonicalize().map_err(|e| e.to_string())?
     {
-        return Err("Выходной PNG не должен заменять исходный файл графа.".into());
+        return Err("The output PNG must not overwrite the source graph file.".into());
     }
     Ok(())
 }

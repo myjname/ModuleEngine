@@ -8,7 +8,7 @@
 
 ## Undo/redo and checkpoints
 
-The History tab works with GraphDocument snapshots: graph, Rust/HLSL, parameters, layout, manifests and authored game scenes/templates/execution. Undo/Redo and Ctrl+Z/Ctrl+Y restore the document. The editor retains up to 200 changes; a new edit after undo discards the redo branch. Pending File JSON must first be applied or cancelled. A local ExecutionGraph draft is not saved history until Apply succeeds.
+The **History / Merge** tab works with GraphDocument snapshots: graph, Rust/HLSL, parameters, layout, manifests and authored game scenes/templates/execution. Undo/Redo and Ctrl+Z/Ctrl+Y restore the document. The editor retains up to 200 changes; a new edit after undo discards the redo branch. Pending File JSON must first be applied or cancelled. A local ExecutionGraph draft is not saved history until Apply succeeds.
 
 In-memory history belongs to the currently open document and resets when another file opens. Save checkpoint writes a complete snapshot to .history next to the project JSON. The entry name is unique; an existing version is not overwritten. Restore returns the document and itself becomes an undoable change.
 
@@ -22,11 +22,11 @@ Time, live object state, GPU resources, owned Custom runtime state and worker gl
 
 ## Diff and three-way merge
 
-In the History tab, specify a common original version (base) and another branch's modified JSON (theirs); the current document is ours. Compare with current project shows change categories and paths. Prepare merge builds a MergeResult without writing the source files.
+In the **History / Merge** tab, specify a common original version (base) and another branch's modified JSON (theirs); the current document is ours. Compare with current project shows change categories and paths. Prepare merge builds a MergeResult without writing the source files.
 
 Ordinary Graph nodes are matched by ID within their scope; edges by target node/input. Two different reconnections of the same input therefore conflict, whereas edits to different nodes may merge. Nested Graphs are handled the same way. For game.scenes[*].objects, ExecutionGraph stages/nodes and other ordinary arrays, element-wise ID-aware merge is not yet available: independent edits to the same array in both branches conflict at the whole-array level with base/ours/theirs. Different fields/maps of a scene or template can merge through ordinary object merging. Nonoverlapping Rust/HLSL lines merge; overlapping ones are retained as a source conflict. This does not prove program or scene correctness.
 
-Each conflict stores path, base, ours and theirs. The preliminary document retains the base value; for conflicting new nodes it is absent. Both new versions are preserved in full in the conflict report. Select Keep current, Take other or Restore base. Applying the result becomes available only after every conflict is resolved; ordinary graph validation and compilation then check executability.
+Each conflict stores path, base, ours and theirs. The preliminary document retains the base value; for conflicting new nodes it is absent. Both new versions are preserved in full in the conflict report. Select **Keep current**, **Take other** or **Use base**. Applying the result becomes available only after every conflict is resolved; ordinary graph validation and compilation then check executability.
 
 Save result with conflicts creates a new merge-*.json with the document and conflicts. This is a MergeResult report, not an ordinary GraphDocument: do not open it as a project. The UI cannot yet reload the report; the library has a serde representation and resolve for a merge-continuation tool. Original files remain available.
 

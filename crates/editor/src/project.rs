@@ -198,7 +198,7 @@ pub fn export_with_package_root(
     let diagnostics = validate_graph(&packaged, &registry);
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
         return Err(format!(
-            "Сначала исправьте ошибки графа: {}",
+            "Fix the graph errors first: {}",
             diagnostics
                 .iter()
                 .filter(|d| d.severity == Severity::Error)
@@ -256,7 +256,7 @@ pub fn export_with_package_root(
                 .is_some()
         {
             return Err(
-                "Папка экспорта уже содержит файлы. Укажите новую или пустую папку.".into(),
+                "The export folder already contains files. Specify a new or empty folder.".into(),
             );
         }
     } else {
@@ -363,7 +363,7 @@ fn complete_manifest(
 }
 fn validate_destination(root: &Path, target: &Path) -> Result<(), String> {
     if target == root {
-        return Err("Папка экспорта должна отличаться от исходного проекта.".into());
+        return Err("The export folder must differ from the source project folder.".into());
     }
     for copied in [
         "crates", "docs", "examples", "assets", "scripts", "tools", ".sdk", ".user", ".tools",
@@ -376,7 +376,7 @@ fn validate_destination(root: &Path, target: &Path) -> Result<(), String> {
         };
         if target.starts_with(&tree) {
             return Err(format!(
-                "Папка экспорта должна находиться вне {copied}, чтобы исключить копирование проекта в самого себя."
+                "The export folder must be outside {copied} to prevent copying the project into itself."
             ));
         }
     }

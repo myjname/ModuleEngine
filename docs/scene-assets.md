@@ -31,13 +31,15 @@ Authored edits are made after Stop. Changing Play state does not write killed mo
 
 Assets displays project folders, search, a type filter, sizes, and selected-file details. Models and textures have previews; other files remain accessible as metadata entries. Errors or unsupported content are shown as diagnostics instead of substituting another model.
 
-1. Open **Windows → Assets**. Select a folder on the left; the path bar at the top returns to its parent. In a narrow area, a dropdown replaces the folder list, and asset details appear below the file list.
-2. Switch `Плитки / Список` (Tiles / List) and the `Все типы / Модель / Текстура / Звук / Шейдер / Другой файл` filter (All types / Model / Texture / Audio / Shader / Other file). Without search, files in the current folder are displayed; search also checks its subfolders. Each Assets window retains its own folder, search, and asset selection.
-3. Click a file: its path, size, details, and the `Копировать ссылку` (Copy reference) button appear on the right. File selection does not change the selected scene object. Models show part, vertex, and triangle counts; WAV files show header information.
-4. `Импорт…` (Import…) opens the system file picker and adds an asset to the selected `assets/` folder. `Новая папка…` (New folder…) creates a child folder. `Обновить` (Refresh) rereads files and dependencies after an external change.
-5. Use the file context menu or the selected asset's `Переименовать…` (Rename…), `Перенести…` (Move…), `В корзину…` (Move to trash…), and `Использования` (Usages) buttons. A file can also be dragged onto a folder: this requests a move with the same checks and saving. Folder names provide navigation; bulk renaming or folder moves are not performed.
+1. Open **Windows → Assets**. Select a folder on the left; the path bar at the top returns to its parent, and **Project** returns to the project root. In a narrow area, a dropdown replaces the folder list, and asset details appear below the file list.
+2. Switch **Tiles / List** and the **All types / Model / Texture / Audio / Shader / Other file** filter. Without search, files in the current folder are displayed; search also checks its subfolders. Each Assets window retains its own folder, search, and asset selection.
+3. Click a file: its path, size, details, and **Asset reference → Copy reference** appear on the right. File selection does not change the selected scene object. Model metadata uses **Parts**, **Vertices**, and **Triangles**; textures use **Image size**. WAV metadata uses **Channels**, **Sample rate** (Hz), **Bit depth** (bits), and **Duration** (s) when available. File sizes use B, KB, or MB.
+4. **Import…** opens the system file picker and adds an asset to the selected `assets/` folder. **New folder…** creates a child folder. **Refresh** rereads files and dependencies after an external change.
+5. Use the file context menu or the selected asset's **Rename…**, **Move…**, **Move to trash…**, and **Usages (N)** buttons. A file can also be dragged onto a folder: this requests a move with the same checks and saving. Folder names provide navigation; bulk renaming or folder moves are not performed.
 
-Previews load through a queue on a separate thread. The browser does not create a game host or Vulkan device for each file, and retains loaded thumbnails in a bounded cache. Textures display their pixels with aspect ratio preserved. Models get an image of loaded geometry with the material's base color; textures and every game-rendering pass are not reproduced in that thumbnail. `Превью загружается…` (Preview loading…) changes to an image or an error reason; `Повторить превью` (Retry preview) retries loading. Audio currently has details without a built-in player.
+Here and in **Trash (N)**, N is the displayed count. Confirm new-folder, rename, and move dialogs with **Create**, **Rename**, and **Move**. **Close** dismisses the usages dialog.
+
+Previews load through a queue on a separate thread. The browser does not create a game host or Vulkan device for each file, and retains loaded thumbnails in a bounded cache. Textures display their pixels with aspect ratio preserved. Models get an image of loaded geometry with the material's base color; textures and every game-rendering pass are not reproduced in that thumbnail. **Preview loading…** changes to an image or an error reason; **Retry preview** retries loading. Audio currently has details without a built-in player.
 
 Opening Assets for the first time indexes project files and assigns missing IDs. A manifest change marks the project unsaved; Ctrl+S saves the new IDs. Initial ID assignment is treated as a metadata migration: existing scene Undo/Redo is retained, and undoing a move neither removes nor recreates IDs. Indexing does not repeat on every coordinate change or frame. During Play, including Pause, asset changes require Stop. An unfinished JSON draft must be applied or cancelled first.
 
@@ -53,13 +55,13 @@ Rename and move change one file and its known references. Folders support naviga
 
 ## Deletion and restoration
 
-If an asset is in use, the browser shows its usages. To delete it, first select a replacement or explicitly unlink references. Objects remain in the scene. If the file is an internal model or shader dependency, unlinking is forbidden: a suitable replacement asset or prior deletion of the consuming file is required.
+If an asset is in use, the browser shows its usages. To delete it, select **Replace with another asset** and choose a replacement, or select **Explicitly unlink the asset; keep objects**, then confirm with **Move to trash**. Objects remain in the scene. If the file is an internal model or shader dependency, unlinking is forbidden: a suitable replacement asset or prior deletion of the consuming file is required.
 
 The original is retained in the project's trash. Restore returns the file with its previous ID and does not undo later scene edits; a full deletion Undo also restores previous references. Restoration refuses to replace an existing file or an occupied ID.
 
 The file change and references must remain consistent on disk. Therefore the editor saves the current project before renaming, moving, and deleting, then saves the new document. Cancelling saving cancels the operation. A second-save error rolls back files; Undo/Redo of a file operation also saves the corresponding document.
 
-Open the `Корзина` (Trash) tab in Assets and click `Восстановить` (Restore) beside the required file. If the original name is occupied or a required dependency is missing, the editor shows the reason and preserves the current project. **Escape** or `Отмена` (Cancel) closes rename, move, and delete dialogs without a file operation.
+Open the **Trash (N)** tab in Assets and click **Restore** beside the required file. If the original name is occupied or a required dependency is missing, the editor shows the reason and preserves the current project. **Escape** or **Cancel** closes rename, move, and delete dialogs without a file operation.
 
 Checkpoints and document merging do not move historical files automatically. Before restoration, the editor checks paths, IDs, and hashes of recorded assets. A version with an old path after a move, or with a deleted asset, is rejected before changing the document or history position. First undo the file operation through Undo or restore the asset from trash. File Undo itself returns the files and corresponding references, so after that rollback the check accepts the previous version.
 

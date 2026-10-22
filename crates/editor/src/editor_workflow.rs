@@ -223,7 +223,7 @@ impl Editor {
                 })
                 .and_then(|bytes| fs::write(path, bytes).map_err(|e| e.to_string()));
             if let Err(error) = result {
-                self.status = format!("Проект открыт; список Recent не сохранён: {error}");
+                self.status = format!("Project opened; Recent list was not saved: {error}");
             }
         }
     }
@@ -234,7 +234,7 @@ impl Editor {
     }
     fn prepare_file_operation(&mut self) -> Result<(), String> {
         if self.game_workbench.has_graph_draft() {
-            return Err("Примените или отмените черновик Gameplay Systems перед сохранением. Он не входит в сохранённый проект.".into());
+            return Err("Apply or discard the Gameplay Systems draft before saving. It is not included in the saved project.".into());
         }
         if self.json_dirty && !self.apply_json() {
             return Err(self.status.clone());
@@ -245,11 +245,11 @@ impl Editor {
     /// boundary. A cancelled picker or failed publication must retain the draft.
     fn file_operation_candidate(&self) -> Result<GraphDocument, String> {
         if self.game_workbench.has_graph_draft() {
-            return Err("Примените или отмените черновик Gameplay Systems перед сохранением. Он не входит в сохранённый проект.".into());
+            return Err("Apply or discard the Gameplay Systems draft before saving. It is not included in the saved project.".into());
         }
         let candidate = if self.json_dirty {
             serde_json::from_str(&self.json_draft)
-                .map_err(|error| format!("JSON не применён: {error}"))?
+                .map_err(|error| format!("JSON not applied: {error}"))?
         } else {
             self.document.clone()
         };
@@ -309,7 +309,7 @@ impl Editor {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Action::Export(kind) => self.start_dialog(DialogPurpose::Export(kind), ctx),
-            Action::Check => self.start_cli("Проверка проекта", "--check", None, ctx),
+            Action::Check => self.start_cli("Checking project", "--check", None, ctx),
         }
     }
     fn spawn_job(
@@ -325,7 +325,7 @@ impl Editor {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                .unwrap_or_else(|_| Err("Операция завершилась с внутренней ошибкой".into()));
+                .unwrap_or_else(|_| Err("The operation failed with an internal error".into()));
             let _ = sender.send(result);
             ctx.request_repaint();
         });
@@ -346,25 +346,24 @@ impl Editor {
                 .picker_requests
                 .push((purpose, initial.clone()));
             if let Some(result) = self.workflow.picker_result.take() {
-                self.spawn_job("Выбор файла / папки…", ctx, move || {
+                self.spawn_job("Selecting file / folder…", ctx, move || {
                     result.map(|path| Outcome::Dialog(purpose, path))
                 });
                 return;
             }
         }
-        self.spawn_job("Выбор файла / папки…", ctx, move || {
+        self.spawn_job("Selecting file / folder…", ctx, move || {
             let directory = initial.parent().unwrap_or(Path::new("."));
             let path = match purpose {
                 DialogPurpose::Open => native_dialogs::open_project(directory)?,
                 DialogPurpose::SaveAs => native_dialogs::save_project(&initial)?,
                 DialogPurpose::New(_) => native_dialogs::pick_folder(
-                    "New Project — выберите новую или пустую папку",
+                    "New Project — select a new or empty folder",
                     directory,
                 )?,
-                DialogPurpose::Export(_) => native_dialogs::pick_folder(
-                    "Export — выберите новую или пустую папку",
-                    directory,
-                )?,
+                DialogPurpose::Export(_) => {
+                    native_dialogs::pick_folder("Export — select a new or empty folder", directory)?
+                }
             };
             Ok(Outcome::Dialog(purpose, path))
         });
@@ -378,7 +377,7 @@ impl Editor {
         let Some(path) = path else {
             self.workflow.new_uses_saved = false;
             self.status =
-                "Операция отменена; текущий проект и его правки остаются открытыми".into();
+                "Operation canceled; the current project and its edits remain open".into();
             return;
         };
         let save_candidate = if matches!(purpose, DialogPurpose::SaveAs) {
@@ -410,7 +409,7 @@ impl Editor {
             self.flush_history();
             self.workflow.saved = self.document.clone();
             self.dirty = false;
-            self.status = format!("Сохранено: {}", self.path);
+            self.status = format!("Saved: {}", self.path);
             self.remember_project();
             return;
         }
@@ -422,7 +421,7 @@ impl Editor {
             }
             DialogPurpose::SaveAs | DialogPurpose::New(_) => {
                 let Some(distribution) = self.distribution.clone() else {
-                    self.report_error("Контекст движка недоступен".into());
+                    self.report_error("Engine context unavailable".into());
                     return;
                 };
                 let source = PathBuf::from(&self.path);
@@ -435,46 +434,35 @@ impl Editor {
                 };
                 self.workflow.new_uses_saved = false;
                 let engine_choice = self.workflow.new_engine_choice;
-                self.spawn_job(
-                    "Подготовка проекта и копирование ресурсов…",
-                    ctx,
-                    move || {
-                        let saved = match purpose {
-                            DialogPurpose::SaveAs => {
-                                if path.exists() {
-                                    workspace_files::save_as_confirmed(
-                                        &source,
-                                        &path,
-                                        &document,
-                                        &distribution,
-                                    )?
-                                } else {
-                                    workspace_files::save_as(
-                                        &source,
-                                        &path,
-                                        &document,
-                                        &distribution,
-                                    )?
-                                }
-                            }
-                            DialogPurpose::New(template) => {
-                                workspace_files::new_project_with_choice(
+                self.spawn_job("Preparing project and copying assets…", ctx, move || {
+                    let saved = match purpose {
+                        DialogPurpose::SaveAs => {
+                            if path.exists() {
+                                workspace_files::save_as_confirmed(
                                     &source,
                                     &path,
                                     &document,
                                     &distribution,
-                                    template,
-                                    engine_choice,
                                 )?
+                            } else {
+                                workspace_files::save_as(&source, &path, &document, &distribution)?
                             }
-                            _ => unreachable!(),
-                        };
-                        Ok(Outcome::Saved(Box::new(saved)))
-                    },
-                );
+                        }
+                        DialogPurpose::New(template) => workspace_files::new_project_with_choice(
+                            &source,
+                            &path,
+                            &document,
+                            &distribution,
+                            template,
+                            engine_choice,
+                        )?,
+                        _ => unreachable!(),
+                    };
+                    Ok(Outcome::Saved(Box::new(saved)))
+                });
             }
             DialogPurpose::Export(kind) => {
-                self.start_cli("Сборка / экспорт…", kind.argument(), Some(path), ctx)
+                self.start_cli("Building / exporting…", kind.argument(), Some(path), ctx)
             }
         }
     }
@@ -490,7 +478,7 @@ impl Editor {
         self.spawn_job(title, ctx, move || {
             let source = source
                 .canonicalize()
-                .map_err(|e| format!("Сохраните проект перед проверкой/экспортом: {e}"))?;
+                .map_err(|e| format!("Save the project before checking/exporting: {e}"))?;
             let root = source.parent().ok_or("Project directory missing")?;
             let id = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -522,9 +510,9 @@ impl Editor {
             }
             let status = command
                 .status()
-                .map_err(|e| format!("Запуск инструмента: {e}"))?;
+                .map_err(|e| format!("Starting tool: {e}"))?;
             let report = format!(
-                "{}\n{}\nЛоги: {}",
+                "{}\n{}\nLogs: {}",
                 read_tail(&stdout),
                 read_tail(&stderr),
                 logs.display()
@@ -559,7 +547,7 @@ impl Editor {
     }
     fn perform_asset_action(&mut self, action: BrowserAction, ctx: &egui::Context) {
         if self.game_workbench.is_play_session() || self.playing {
-            self.report_error("Остановите Play перед изменением файлов проекта".into());
+            self.report_error("Stop Play before changing project files".into());
             return;
         }
         let root = self.project_asset_root();
@@ -595,13 +583,23 @@ impl Editor {
         self.flush_history();
         let before = self.document.clone();
         let project_path = PathBuf::from(&self.path);
-        self.spawn_job("Изменение ресурсов…", ctx, move || {
-            let workspace = crate::host::asset_workspace_at(&root, protected.clone(), &backend_root, property_object_ids)?;
+        self.spawn_job("Changing assets…", ctx, move || {
+            let workspace = crate::host::asset_workspace_at(
+                &root,
+                protected.clone(),
+                &backend_root,
+                property_object_ids,
+            )?;
             let manifest = AssetManifest::from_value(&before.asset_manifest)?;
             let operation = match action {
                 BrowserAction::NewFolder { path } => workspace.create_folder(&before, &path)?,
                 BrowserAction::Rename { id, name } => {
-                    if name.is_empty() || name.contains(['/', '\\', ':']) || matches!(name.as_str(), "." | "..") { return Err("Введите имя файла без пути".into()); }
+                    if name.is_empty()
+                        || name.contains(['/', '\\', ':'])
+                        || matches!(name.as_str(), "." | "..")
+                    {
+                        return Err("Enter a file name without a path".into());
+                    }
                     let entry = manifest.assets.get(&id).ok_or("Unknown asset ID")?;
                     let parent = entry.path.rsplit_once('/').ok_or("Asset parent missing")?.0;
                     workspace.move_asset(&before, &id, &format!("{parent}/{name}"))?
@@ -611,22 +609,55 @@ impl Editor {
                     let name = entry.path.rsplit('/').next().ok_or("Asset name missing")?;
                     workspace.move_asset(&before, &id, &format!("{folder}/{name}"))?
                 }
-                BrowserAction::Delete { id, replacement, detach } => {
-                    let policy = replacement.map(DeletePolicy::ReplaceWith).unwrap_or(if detach {DeletePolicy::Detach} else {DeletePolicy::RefuseUsed});
+                BrowserAction::Delete {
+                    id,
+                    replacement,
+                    detach,
+                } => {
+                    let policy = replacement
+                        .map(DeletePolicy::ReplaceWith)
+                        .unwrap_or(if detach {
+                            DeletePolicy::Detach
+                        } else {
+                            DeletePolicy::RefuseUsed
+                        });
                     workspace.delete_asset(&before, &id, policy)?
                 }
-                BrowserAction::Restore { trash_id } => workspace.restore_deleted(&before, &trash_id)?,
+                BrowserAction::Restore { trash_id } => {
+                    workspace.restore_deleted(&before, &trash_id)?
+                }
                 BrowserAction::Import { folder } => {
-                    if protected.iter().any(|path| folder == *path || folder.starts_with(&format!("{path}/"))) { return Err("Installed Engine resources are protected".into()); }
-                    let Some(source) = native_dialogs::import_asset(&root)? else { return Ok(Outcome::Report("Импорт отменён".into())); };
-                    import_resource_transaction(&root, &source, &folder, |path| workspace.adopt_import(&before, &[path]))?
+                    if protected
+                        .iter()
+                        .any(|path| folder == *path || folder.starts_with(&format!("{path}/")))
+                    {
+                        return Err("Installed Engine resources are protected".into());
+                    }
+                    let Some(source) = native_dialogs::import_asset(&root)? else {
+                        return Ok(Outcome::Report("Import canceled".into()));
+                    };
+                    import_resource_transaction(&root, &source, &folder, |path| {
+                        workspace.adopt_import(&before, &[path])
+                    })?
                 }
                 _ => return Err("Unsupported asset transaction".into()),
             };
-            let validation = operation.document.game.as_ref().map_or(Ok(()), |game| game.validate_scene_data());
-            if let Err(error) = validation.and_then(|_| project::save(&project_path, &operation.document)) {
+            let validation = operation
+                .document
+                .game
+                .as_ref()
+                .map_or(Ok(()), |game| game.validate_scene_data());
+            if let Err(error) =
+                validation.and_then(|_| project::save(&project_path, &operation.document))
+            {
                 let rollback = operation.record.undo(&root, &operation.document);
-                return Err(match rollback { Ok(_) => format!("Сохранение не выполнено; файлы восстановлены: {error}"), Err(rollback) => format!("Сохранение: {error}; восстановление файлов: {rollback}. Журнал: .asset-history/{}", operation.record.id) });
+                return Err(match rollback {
+                    Ok(_) => format!("Save failed; files restored: {error}"),
+                    Err(rollback) => format!(
+                        "Save: {error}; file restoration: {rollback}. Log: .asset-history/{}",
+                        operation.record.id
+                    ),
+                });
             }
             Ok(Outcome::Asset(Box::new(operation)))
         });
@@ -645,7 +676,7 @@ impl Editor {
             return false;
         };
         if self.game_workbench.is_play_session() || self.playing {
-            self.status = "Остановите Play перед Undo файлов".into();
+            self.status = "Stop Play before undoing file changes".into();
             return true;
         }
         let root = self.project_asset_root();
@@ -667,9 +698,7 @@ impl Editor {
                 };
                 return Err(format!(
                     "{error}; rollback: {}",
-                    rollback
-                        .err()
-                        .unwrap_or_else(|| "файлы восстановлены".into())
+                    rollback.err().unwrap_or_else(|| "files restored".into())
                 ));
             }
             if forward {
@@ -688,19 +717,15 @@ impl Editor {
         self.status = match result {
             Ok(()) => format!(
                 "{}: {}",
-                if forward {
-                    "Повторено"
-                } else {
-                    "Отменено"
-                },
+                if forward { "Redone" } else { "Undone" },
                 record.label
             ),
-            Err(error) => format!("Undo/Redo файлов не завершён: {error}"),
+            Err(error) => format!("File Undo/Redo did not complete: {error}"),
         };
         true
     }
     fn report_error(&mut self, error: String) {
-        self.status = "Операция не выполнена; текущий проект остаётся открытым".into();
+        self.status = "Operation failed; the current project remains open".into();
         self.workflow.report = error;
         self.workflow.show_report = true;
     }
@@ -736,7 +761,7 @@ impl Editor {
                             if !self.load_workflow(saved.path) {
                                 self.report_error(self.status.clone());
                             } else {
-                                self.status = format!("Проект готов: {name}");
+                                self.status = format!("Project ready: {name}");
                             }
                         }
                         Ok(Outcome::Asset(operation)) => {
@@ -751,10 +776,10 @@ impl Editor {
                                         |before| project::save(Path::new(&self.path), &before),
                                     );
                                 self.report_error(format!(
-                                    "{error}; восстановление: {}",
+                                    "{error}; restoration: {}",
                                     rollback
                                         .err()
-                                        .unwrap_or_else(|| "файлы и ссылки восстановлены".into())
+                                        .unwrap_or_else(|| "files and references restored".into())
                                 ));
                                 return;
                             }
@@ -777,7 +802,7 @@ impl Editor {
                                 self.status = label;
                             } else {
                                 self.status = format!(
-                                    "{label}; {} предупреждений — см. отчёт",
+                                    "{label}; {} warnings — see report",
                                     operation.diagnostics.len()
                                 );
                                 self.workflow.report =
@@ -786,7 +811,7 @@ impl Editor {
                             }
                         }
                         Ok(Outcome::Report(report)) => {
-                            self.status = "Операция завершена".into();
+                            self.status = "Operation complete".into();
                             self.workflow.report = report;
                             self.workflow.show_report = true;
                         }
@@ -795,7 +820,7 @@ impl Editor {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.workflow.job = None;
-                    self.report_error("Рабочий поток завершился без результата".into());
+                    self.report_error("The worker thread exited without a result".into());
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -1201,14 +1226,14 @@ impl Editor {
     pub(super) fn draw_workflow_modals(&mut self, ctx: &egui::Context) {
         if self.workflow.guard.is_some() {
             let response = egui::Modal::new(egui::Id::new("unsaved-project")).show(ctx,|ui| {
-                ui.set_min_width(440.); ui.heading("Несохранённые изменения");
-                ui.label("Сохранить текущий проект перед продолжением?");
-                if self.game_workbench.has_graph_draft() { ui.label("Есть черновик Gameplay Systems. Нажмите «Отмена», примените или отмените черновик в редакторе и повторите сохранение."); }
+                ui.set_min_width(440.); ui.heading("Unsaved changes");
+                ui.label("Save the current project before continuing?");
+                if self.game_workbench.has_graph_draft() { ui.label("There is a Gameplay Systems draft. Click Cancel, apply or discard the draft in the editor, then try saving again."); }
                 if !self.status.is_empty() { ui.label(&self.status); }
                 ui.horizontal(|ui| {
-                    if ui.button("Сохранить и продолжить").clicked() { Some(0) }
-                    else if !matches!(self.workflow.guard, Some(Action::Asset(_))) && ui.button(if matches!(self.workflow.guard, Some(Action::Check | Action::Export(_))) { "Использовать сохранённую версию" } else { "Не сохранять" }).clicked() { Some(1) }
-                    else if ui.button("Отмена").clicked() { Some(2) } else { None }
+                    if ui.button("Save and continue").clicked() { Some(0) }
+                    else if !matches!(self.workflow.guard, Some(Action::Asset(_))) && ui.button(if matches!(self.workflow.guard, Some(Action::Check | Action::Export(_))) { "Use saved version" } else { "Don't save" }).clicked() { Some(1) }
+                    else if ui.button("Cancel").clicked() { Some(2) } else { None }
                 }).inner
             });
             if let Some(choice) = response.inner {
@@ -1220,13 +1245,13 @@ impl Editor {
         if self.workflow.show_report {
             let response = egui::Modal::new(egui::Id::new("operation-report")).show(ctx, |ui| {
                 ui.set_min_width(560.);
-                ui.heading("Результат операции");
+                ui.heading("Operation result");
                 egui::ScrollArea::vertical()
                     .max_height(360.)
                     .show(ui, |ui| {
                         ui.label(&self.workflow.report);
                     });
-                ui.button("Закрыть").clicked()
+                ui.button("Close").clicked()
             });
             if response.inner || response.should_close() {
                 self.workflow.show_report = false;
@@ -1292,7 +1317,7 @@ fn import_resource_transaction<T>(
         extension.as_str(),
         "glb" | "gltf" | "png" | "jpg" | "jpeg" | "wav"
     ) {
-        return Err("Поддержаны glTF/GLB, PNG/JPEG и WAV".into());
+        return Err("Supported formats: glTF/GLB, PNG/JPEG, and WAV".into());
     }
     if extension == "wav"
         && (bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE")
@@ -1357,7 +1382,7 @@ fn import_resource_transaction<T>(
         return Err(match cleanup {
             Ok(()) => error,
             Err(cleanup) => format!(
-                "{error}; очистка нового импорта: {cleanup}; {}",
+                "{error}; new import cleanup: {cleanup}; {}",
                 owned.display()
             ),
         });
@@ -2076,7 +2101,9 @@ mod workflow_tests {
                     editor.undo();
                 }
                 assert!(
-                    editor.status.starts_with("Undo/Redo файлов не завершён:"),
+                    editor
+                        .status
+                        .starts_with("File Undo/Redo did not complete:"),
                     "{label}: {}",
                     editor.status
                 );
@@ -3060,7 +3087,7 @@ mod workflow_tests {
             )
         };
         let output = library_frame(&mut editor, vec![]);
-        let export = text_point(&output, "Экспорт проекта…");
+        let export = text_point(&output, "Export project…");
         output.drop_without_applying_deltas();
         for pressed in [true, false] {
             library_frame(&mut editor, pointer(export, pressed)).drop_without_applying_deltas();

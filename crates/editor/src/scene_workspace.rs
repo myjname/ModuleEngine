@@ -155,7 +155,7 @@ impl Editor {
         if self.game_workbench.preview_host.is_none() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Подготовка Scene… Состояние операции — в нижней строке.");
+                ui.label("Preparing Scene… Operation status is shown in the bottom bar.");
             });
             return;
         }
@@ -525,7 +525,7 @@ mod tests {
         );
         assert!(editor.game_workbench.preview_host.is_none());
         assert!(editor.game_workbench.has_pending_preparation());
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Подготовка Scene"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("Preparing Scene"))));
         output.drop_without_applying_deltas();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while editor.game_workbench.has_pending_preparation() {

@@ -104,6 +104,14 @@ cases, not universal suitability for every possible project. Each implementation
 increment still needs a bounded goal and checks; this decision does not reopen all
 future subsystems in unrelated tasks or mark existing performance targets passed.
 
+## Accepted EN-01 language scope — 22 October 2026
+
+Before portfolio-game implementation, all engine-owned shipped Editor, Player and CLI display text is English. This includes menus, panes, tooltips, confirmations, progress, errors, schema/module display metadata, dynamic subsystem diagnostics and the display defaults of newly created templates. Public documentation retains complete separate English and Russian versions.
+
+Existing authored names and content, paths, stable IDs, API/JSON keys and module/schema/SDK pins are preserved. Raw external compiler/OS diagnostics and OS-owned native file-dialog controls retain their original language. Unicode regression fixtures and opaque source comments are not translated. No localization framework, locale selector, dependency, format migration or runtime redesign is introduced. Existing projects are not rewritten merely to translate their authored text.
+
+Acceptance requires a classified inventory of product text, applicable tests and actual current Editor/Player/CLI workflows, rendered-label checks and independent source/artifact-bound review. Historical P0 evidence is retained under its original scope; a translation alone does not recertify timing, hardware Linux or physical input-to-display behavior. See the [UI language contract](editor-workflow.md#ui-language).
+
 ## Accepted P0 presentation change — 17 October 2026
 
 The user approved separating fixed 60 Hz simulation from more frequent, genuine
