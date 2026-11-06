@@ -14,8 +14,9 @@ serde_json.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+module-engine-game-kit = { path = "../game-kit", features = ["grid", "history", "campaign", "actions"] }
 module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }
 module-engine-two-arenas = { path = "../example-two-arenas" }
 module-engine-project-puzzle = { path = "../project-puzzle" }
 module-engine-vulkan = { path = "../render-vulkan" }
-module-engine-host-services = { path = "../host-services", features = ["audio"] }
+module-engine-host-services = { path = "../host-services", features = ["audio", "persistence"] }

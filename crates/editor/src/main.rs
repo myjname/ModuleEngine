@@ -8,6 +8,7 @@ mod canvas;
 mod distribution;
 mod engine_profile_verification;
 mod engine_profiles;
+mod g1_verification;
 mod game_host;
 mod game_package;
 mod game_templates;
@@ -87,8 +88,10 @@ fn run() -> Result<(), String> {
         println!("  module-engine-editor --editor-benchmark game-project.json output-folder");
         println!("  module-engine-editor --game-worker-check game-project.json output-folder");
         println!("  module-engine-editor --new-puzzle puzzle-project.json");
+        println!("  module-engine-editor --new-g1 crate-garden/project.json");
+        println!("  module-engine-editor --g1-check crate-garden/project.json output-folder");
         println!(
-            "  module-engine-editor --migrate-copy source.json new-project.json neutral|arpg|puzzle"
+            "  module-engine-editor --migrate-copy source.json new-project.json neutral|arpg|puzzle|g1"
         );
         println!("  module-engine-editor --puzzle-check puzzle-project.json output-folder");
         return Ok(());
@@ -114,7 +117,7 @@ fn run() -> Result<(), String> {
             let destination = Path::new(args.get(2).ok_or("Provide a different destination JSON")?);
             let kind = engine_profiles::ProfileKind::parse(
                 args.get(3)
-                    .ok_or("Explicitly select Engine: neutral, arpg or puzzle")?,
+                    .ok_or("Explicitly select Engine: neutral, arpg, puzzle or g1")?,
             )?;
             let (saved, report) = workspace_files::migrate_copy(source, destination, kind)?;
             println!(
@@ -153,6 +156,38 @@ fn run() -> Result<(), String> {
                 .unwrap_or_else(|| PathBuf::from("puzzle-project.json"));
             project::save(&path, &game_templates::puzzle_document())?;
             println!("Authored puzzle project: {}", path.display());
+            return Ok(());
+        }
+        Some("--new-g1") => {
+            let path = args
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("crate-garden/project.json"));
+            let current = game_templates::g1_document();
+            let source = project::source_root().join("g1-template.json");
+            let distribution = distribution::detect(&source, &current, requested_profile)?;
+            let saved = workspace_files::new_project_file_with_choice(
+                &source,
+                &path,
+                &current,
+                &distribution,
+                workspace_files::ProjectTemplate::G1,
+                engine_profiles::EngineChoice::Selected(engine_profiles::ProfileKind::G1),
+            )?;
+            println!("Authored Crate Garden project: {}", saved.path.display());
+            return Ok(());
+        }
+        Some("--g1-check") => {
+            let source = Path::new(args.get(1).ok_or("Provide Crate Garden project JSON")?);
+            let folder = Path::new(
+                args.get(2)
+                    .ok_or("Provide a separate verification folder")?,
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&g1_verification::run(source, folder)?)
+                    .map_err(|error| error.to_string())?
+            );
             return Ok(());
         }
         Some("--game-worker-check") => {

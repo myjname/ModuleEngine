@@ -98,6 +98,24 @@ Before Open, Recent, New, Exit, Check Project, or export, the editor checks auth
 - **Don't save**, or **Use saved version** for checking and export, continues without writing current edits. Checking and export use the on-disk project version; current edits remain open in memory.
 - **Cancel** keeps the current work open and cancels the transition or build.
 
+Stateful module tools also report pending local drafts. They require explicit
+Apply or Discard before Save/Save As, Check/export, Play or a project transition;
+Don't save and Use saved version cannot bypass them. The guard and operation
+report list each tool with `Discard module draft`, which works even when its
+pane is closed or owner inactive. Discard resolves only that tool, preserving
+other tools and JSON/Rust/Gameplay Systems drafts. Cancel returns to authoring so
+an available tool can Apply or Discard its own draft. Closing/reopening a tool's
+pane alone retains its pending work.
+
+Successful Open, New, reload and different-file Save As adopt a fresh tool
+document instance, even for identical game data. Save and same-file Save As keep
+it; cancellation and failed reading/publication keep the old instance and draft.
+An accepted tool Apply, including no-op, has an explicit acknowledgement;
+Undo before the next draw cannot bring that accepted draft back. Dirty tools
+retain stale edits after an external author change until explicitly resolved.
+These guards prevent gameplay ticks/effects; stopped-preview preparation keeps
+its existing reads. See the [stateful tool API](game-ui-tools.md#immutable-source-tools).
+
 On Open and New, the old document, history, and drafts remain available until the replacement is successfully opened or created. Canceling the system dialog and errors do not discard them even after choosing **Don't save**. In that case, New uses the last saved Engine configuration. After a successful transition, the editor works with the new project; exiting without saving closes unsaved work.
 
 Invalid JSON does not replace the document or permit continuation through saving. The **File** window's JSON draft is validated and applied before Save after completing the Gameplay Systems draft. Correct it or explicitly discard the draft if the changes are unnecessary.

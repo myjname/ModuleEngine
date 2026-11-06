@@ -1,0 +1,77 @@
+{
+  "assets/models/palette.png": {
+    "sha256": "924d14eac6713d20a21dbcd47dc9debbce2795041674053ca7eb785e6aa509cd",
+    "bytes": 181,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/floor.gltf": {
+    "sha256": "22923e4ebd96f9f49fdb9a31774028c379e253f39923a6ddec6cd726968afae8",
+    "bytes": 4596,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/wall.gltf": {
+    "sha256": "cdd602bcdaa8c361091aaec39b2283e36dc987e5c3d4d2bb5734966cc5c65154",
+    "bytes": 8064,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/crate.gltf": {
+    "sha256": "c2d2b83d497216fa45f9e06a35068b912377463f7654305d7c74f207f25e479a",
+    "bytes": 32338,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/pawn.gltf": {
+    "sha256": "8975a4d701b8348cef898b2935e28826dd040e419f3cfc34f96653a7a281f686",
+    "bytes": 28868,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/goal.gltf": {
+    "sha256": "f7fa5669d6cd85220d6d92692a1608f931a9158b93098107838f8633fe7828cb",
+    "bytes": 23848,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/models/decor.gltf": {
+    "sha256": "56d3ec08b174a6a3a01888c45372c32c4a0d968610dc0251c04a1c64d4138ef6",
+    "bytes": 18529,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/music.wav": {
+    "sha256": "bd6fcff375628d5e41e897d0f4cb7331ba789320b3e59b47e59eb4fc3b22f102",
+    "bytes": 960044,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/move.wav": {
+    "sha256": "48688d54b6c9f24ce6cd279c0a5aa62e6a3a8ec568950ec1a050d6913598f156",
+    "bytes": 3644,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/push.wav": {
+    "sha256": "ef07aa53807e2e07e54aadc2851b099f71f299f8184226c7a99645814d33686b",
+    "bytes": 7244,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/goal.wav": {
+    "sha256": "7866905e04e89c6935190969dc23f52ade72537a801f6f424b286123688a83b5",
+    "bytes": 12524,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/blocked.wav": {
+    "sha256": "82e9b1423ef8d3f718f0e215495ca89a65a26de4c5d1776a465c69e7d32f9f67",
+    "bytes": 4364,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/undo.wav": {
+    "sha256": "5409a0d5bcc70a7dd379bedbe5bc09f66a7be746d9ad136c90bd15f69767bb9b",
+    "bytes": 8204,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/win.wav": {
+    "sha256": "299be1a955d0b75d8c43300183689b34f23eabf7ddd5c4e3071e8c33e2875a03",
+    "bytes": 33644,
+    "origin": "original deterministic Crate Garden generator"
+  },
+  "assets/audio/ui.wav": {
+    "sha256": "a377a1a2a5e940e27de3e6ebbbf14c348d0c23283f7520b9d3533749de98fd62",
+    "bytes": 3884,
+    "origin": "original deterministic Crate Garden generator"
+  }
+}

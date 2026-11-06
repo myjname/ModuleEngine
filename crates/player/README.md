@@ -6,11 +6,14 @@ This package contains the shared native Player UI and a separate executable. It
 has no production dependency on the Editor or the Two Arenas project.
 
 The default build enables no optional implementation. Select native packages
-explicitly: `ui`, `arpg`, `puzzle`, `vulkan`, and `audio`. A puzzle window uses
+explicitly: `ui`, `arpg`, `puzzle`, `g1`, `vulkan`, `audio`, and `persistence`. A puzzle window uses
 `ui,puzzle,vulkan`; it does not require ARPG or audio. `ui` enables UI callbacks
 only for gameplay packages already selected. Installation includes neutral core
 contracts, the host-bound Custom contract, and the small generic source rotation
 example; installed metadata alone never activates an authored module.
+`g1` selects the independent [Crate Garden](../project-g1/README.md) source
+package; its finished-game UI is enabled when `ui` is also selected. Requested
+audio and persistence still require their own native features.
 
 Applications share `composition_at`, `composition_with`, `service_registry`,
 and the UI's `run_host`/`run_benchmark_host`. The Editor can add source contracts
@@ -25,6 +28,10 @@ an unwinding preparation panic becomes a startup error after owned resources
 are dropped. The window keeps drag-and-drop support. On Linux the factory runs
 directly. Editor play/benchmark and standalone play/benchmark use this boundary;
 headless package checks do not create a window.
+Ordinary interactive Player uses the accepted authored document's game name as its
+window title. Status-aware source UI receives current service/error diagnostics
+and can request a capability-checked application close; the same UI embedded in
+Editor receives no permission to close Editor. See the [UI contract](../../docs/game-ui-tools.md).
 
 An exported package contains `player.json` schema 2, its authored format-4
 project, the selected native executable, required assets, precompiled Custom
@@ -47,10 +54,25 @@ New async sources require separately bound checks and an independent conclusion 
 
 ```powershell
 Player.exe
+Player.exe --state-root <writable-profile-folder>
 Player.exe --verify-package <package-root> <evidence-folder>
 Player.exe --headless-check <package-root> <evidence-folder>
-Player.exe --benchmark <evidence-folder>
+Player.exe --benchmark <evidence-folder> [--state-root <writable-profile-folder>]
 ```
+
+Interactive play and native benchmark accept the optional `--state-root` once
+with an explicit writable profile location. Without it, requested persistence
+uses the application's per-user data location; there is no fallback to writing
+beside the package or into its assets. This selects external state, not another
+package root, compiler root or authored document. Package verification and
+headless checks reject `--state-root` and do not use it to alter verification.
+
+Automatic lookup tries `LOCALAPPDATA`, `XDG_DATA_HOME`, then `HOME`; empty or
+nonabsolute values are skipped. The first two use `ModuleEngine/profiles`,
+while `HOME` uses `.local/share/ModuleEngine/profiles`. If no absolute candidate
+is configured, persistence reports a configuration error instead of using the current
+directory. This does not change explicitly chosen `--state-root` paths or
+guarantee write permission; actual storage errors remain visible.
 
 Normal launch and native benchmark locate `player.json` only beside the
 executable. Verification accepts an explicit package root, advances three real
@@ -61,8 +83,49 @@ checkout locator, compiler root, or Editor distribution policy. Vulkan requires
 the package's `.spirv` directory, so a missing artifact fails instead of falling
 back to source compilation.
 
-The existing native benchmark retains its 30-frame warmup, 120 UI samples and
+The existing native benchmark retains its 30-frame warmup, by default 120 UI samples and
 120 distinct completed game frames, physical 1920×1080 requirement, 45-second
 watchdog, and unmodified twenty-enemy workload criterion. The measured data and
 any unmet target are reported directly; a different project does not satisfy
 that workload criterion merely by rendering quickly.
+
+For a longer real-input diagnostic, set `MODULE_ENGINE_BENCHMARK_FRAMES` to an
+integer from 120 to 2400. Both UI and distinct-frame counts use that value;
+warmup and the watchdog remain unchanged. Reports include per-sample game
+status/input flags and final source-owned diagnostics. A different game needs
+its own workload assessment from those records; the historical ARPG
+`target_met` field is not a G1 acceptance gate.
+
+For a game that opens into a menu, set `MODULE_ENGINE_BENCHMARK_ARM=manual`.
+The ordinary game and controls remain active with a visible F9 waiting notice;
+no benchmark warmup, samples or completion counters advance before a fresh F9
+press. F9 arms once: collected callback/frame/timestamp/provenance history is
+cleared, the measurement clock starts, and the unchanged 30-frame warmup begins.
+A later F9 cannot reset a running measurement. Frames completed before arming
+cannot enter its measured series. No game actions, state changes or workload
+filters are injected by arming. The operator must establish the intended game
+and workload with normal controls before pressing F9.
+
+Unarmed waiting has its own 120-second deadline and produces an explicit
+incomplete report. After arming, the existing 45-second measurement watchdog
+applies. Reports include `arming_mode`, `armed`, `arm_wait_ms`,
+`manual_arm_deadline_seconds` and `measurement_watchdog_seconds`. Omission of
+the variable, or `automatic`, retains automatic historical counting; any other
+value is rejected. Actual renderer/bridge counters remain cumulative owner
+counters reported at the first/last measured observations; arming resets only
+benchmark collections, not gameplay, services or GPU state.
+
+This opt-in variable is read only by `--benchmark`; ordinary interactive play
+has no benchmark F9 binding or waiting notice. `arm_wait_ms` begins at benchmark
+window initialization and is not a process startup measurement. Keep an external
+process-start timer for cold-start evidence. Raw `render_success_samples`,
+`error_samples` and `window_visible_samples` preserve each measured callback's
+flags independently of the historical twenty-enemy workload decision.
+
+Native game poses may come from an active source-owned Core pose projection,
+before Host interpolation and content expansion. They are genuine model changes,
+separate from late color/material decoration. Their presence does not certify
+frame rate: unchanged poses remain suppressed, unsupported transforms snap, and
+render/projection failures retain the last-good frame. `service_diagnostics_final`
+preserves final diagnostics from this Player instance, independently of another
+Editor or CLI instance's audio/persistence results.

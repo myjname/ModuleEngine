@@ -21,6 +21,313 @@ use std::{
 };
 
 const WAIT: Duration = Duration::from_secs(10);
+const DT: f64 = 1. / 60.;
+
+/// A source-installed consumer whose factory cannot run on authored params.
+/// Its derived data must be rebuilt from the current scene by the normal Host.
+fn runtime_preparation_fixture(custom_world: bool) -> Fixture {
+    struct PreparedStep(f64);
+    impl ExecutableSystem for PreparedStep {
+        fn step(&mut self, context: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+            context
+                .game
+                .module_data
+                .insert("fixture.derived-value".into(), json!(self.0));
+            Ok(())
+        }
+    }
+    let mut fixture = Fixture::new(custom_world);
+    fixture
+        .composition
+        .systems
+        .bind_factory("fixture.step", |params| {
+            let value = params
+                .get("derived_value")
+                .and_then(Value::as_f64)
+                .ok_or("Source factory requires prepared scene data")?;
+            Ok(Box::new(PreparedStep(value)))
+        })
+        .unwrap();
+    fixture
+        .composition
+        .systems
+        .register_project_contract(
+            "fixture.step",
+            |_, _| Ok(()),
+            |game| {
+                let scene = &game.scenes[&game.entry_scene];
+                if scene.name == "reject preparation" {
+                    return Err("Rejected source runtime preparation".into());
+                }
+                let value = scene.objects[0].object.transform.translation[0];
+                let missing_model = scene.name == "missing prepared model";
+                for node in game
+                    .execution
+                    .stages
+                    .iter_mut()
+                    .flat_map(|stage| &mut stage.nodes)
+                    .filter(|node| node.module == "fixture.step")
+                {
+                    node.params["derived_value"] = json!(value);
+                node.params["host_services"] = json!([{"id":"fixture.prepared-service","config":{"value":value},"asset_references":[]}]);
+                }
+                if missing_model { game.scenes.get_mut(&game.entry_scene).unwrap().objects[0].components.insert("mesh".into(),json!({"path":"missing-derived.glb"})); }
+                Ok(())
+            },
+        )
+        .unwrap();
+    fixture
+        .document
+        .game
+        .as_mut()
+        .unwrap()
+        .scenes
+        .get_mut("empty")
+        .unwrap()
+        .objects[0]
+        .object
+        .transform
+        .translation[0] = 1.;
+    fixture.document.game.as_mut().unwrap().execution.stages[0].nodes[0].params["host_services"] =
+        json!([{"id":"fixture.prepared-service","config":null,"asset_references":[]}]);
+    approve_fixture(&fixture.composition, &mut fixture.document);
+    fixture
+}
+
+#[test]
+fn source_service_configuration_uses_prepared_project_and_failed_preparation_allocates_nothing() {
+    struct Observed;
+    impl HostService for Observed {
+        fn consume(&mut self, _: &[GameEvent]) -> Result<(), String> {
+            Ok(())
+        }
+        fn reset(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_enabled(&mut self, _: bool) {}
+        fn stop(&mut self) {}
+        fn diagnostics(&self) -> Value {
+            json!({})
+        }
+    }
+    let fixture = runtime_preparation_fixture(false);
+    let observed = Arc::new(Mutex::new(Vec::<f64>::new()));
+    let capture = observed.clone();
+    let mut services = HostServiceRegistry::new();
+    services
+        .register("fixture.prepared-service", move |request, _| {
+            capture.lock().unwrap().push(
+                request
+                    .config
+                    .get("value")
+                    .and_then(Value::as_f64)
+                    .ok_or("Service requires prepared source config")?,
+            );
+            Ok(Box::new(Observed))
+        })
+        .unwrap();
+    let mut host = GameHost::build(
+        fixture.document.clone(),
+        fixture.composition.clone(),
+        fixture.options(RenderMode::Graph, services, true),
+        None,
+    )
+    .unwrap();
+    assert_eq!(*observed.lock().unwrap(), vec![1.]);
+    let mut candidate = fixture.document.clone();
+    candidate
+        .game
+        .as_mut()
+        .unwrap()
+        .scenes
+        .get_mut("empty")
+        .unwrap()
+        .objects[0]
+        .object
+        .transform
+        .translation[0] = 4.;
+    host.refresh_author_preview(&candidate).unwrap();
+    assert_eq!(*observed.lock().unwrap(), vec![1., 4.]);
+    let mut rejected = candidate.clone();
+    rejected
+        .game
+        .as_mut()
+        .unwrap()
+        .scenes
+        .get_mut("empty")
+        .unwrap()
+        .name = "reject preparation".into();
+    assert!(host.refresh_author_preview(&rejected).is_err());
+    assert_eq!(*observed.lock().unwrap(), vec![1., 4.]);
+    assert_eq!(host.accepted_document(), &candidate);
+}
+
+#[test]
+fn prepared_model_validation_keeps_last_good_graph_preview_and_headless_skips_model_io() {
+    let fixture = runtime_preparation_fixture(false);
+    let mut host = fixture.host();
+    let state = host.session.state().clone();
+    let accepted = host.accepted_document().clone();
+    let mut candidate = fixture.document.clone();
+    candidate
+        .game
+        .as_mut()
+        .unwrap()
+        .scenes
+        .get_mut("empty")
+        .unwrap()
+        .name = "missing prepared model".into();
+    assert!(host.refresh_author_preview(&candidate).is_err());
+    assert_eq!(host.accepted_document(), &accepted);
+    assert_eq!(host.session.state(), &state);
+    let mut headless = GameHost::build(
+        candidate.clone(),
+        fixture.composition.clone(),
+        fixture.options(
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+            HostServiceRegistry::new(),
+            false,
+        ),
+        None,
+    )
+    .unwrap();
+    headless.step(DT, &GameInput::default()).unwrap();
+    assert_eq!(
+        headless
+            .session
+            .asset_bindings()
+            .get(&1)
+            .map(String::as_str),
+        Some("missing-derived.glb")
+    );
+}
+
+#[test]
+fn host_prepares_registered_source_runtime_for_graph_headless_and_restart_without_author_mutation()
+{
+    for custom_world in [false, true] {
+        let fixture = runtime_preparation_fixture(custom_world);
+        let author = fixture.document.clone();
+        for render in [
+            RenderMode::Graph,
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+        ] {
+            let mut host = GameHost::build(
+                author.clone(),
+                fixture.composition.clone(),
+                fixture.options(render, HostServiceRegistry::new(), false),
+                None,
+            )
+            .unwrap();
+            assert_eq!(host.accepted_document(), &author);
+            assert!(
+                author.game.as_ref().unwrap().execution.stages[0].nodes[0]
+                    .params
+                    .get("derived_value")
+                    .is_none()
+            );
+            host.step(DT, &GameInput::default()).unwrap();
+            assert_eq!(
+                host.session.state().module_data["fixture.derived-value"],
+                json!(1.)
+            );
+            host.restart().unwrap();
+            host.step(DT, &GameInput::default()).unwrap();
+            assert_eq!(
+                host.session.state().module_data["fixture.derived-value"],
+                json!(1.)
+            );
+            assert_eq!(host.accepted_document(), &author);
+        }
+        assert_eq!(fixture.document, author);
+    }
+}
+
+#[test]
+fn stopped_preview_refresh_and_sync_rederive_scene_params_atomically_with_frozen_execution() {
+    for route in [0, 1, 2] {
+        let fixture = runtime_preparation_fixture(false);
+        for render in [
+            RenderMode::Graph,
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+        ] {
+            let mut host = GameHost::build(
+                fixture.document.clone(),
+                fixture.composition.clone(),
+                fixture.options(render, HostServiceRegistry::new(), false),
+                None,
+            )
+            .unwrap();
+            let mut candidate = fixture.document.clone();
+            candidate
+                .game
+                .as_mut()
+                .unwrap()
+                .scenes
+                .get_mut("empty")
+                .unwrap()
+                .objects[0]
+                .object
+                .transform
+                .translation[0] = 4.;
+            let execution = candidate.game.as_ref().unwrap().execution.clone();
+            match route {
+                0 => host.refresh_author_preview(&candidate),
+                1 => host.sync_document(&candidate),
+                _ => host.sync_document_deferred(&candidate),
+            }
+            .unwrap();
+            assert_eq!(host.accepted_document(), &candidate);
+            assert_eq!(
+                host.accepted_document().game.as_ref().unwrap().execution,
+                execution
+            );
+            assert_eq!(
+                host.session
+                    .state()
+                    .world
+                    .object(1)
+                    .unwrap()
+                    .transform
+                    .translation[0],
+                4.
+            );
+            let accepted = host.accepted_document().clone();
+            let state = host.session.state().clone();
+            let mut rejected = candidate.clone();
+            rejected
+                .game
+                .as_mut()
+                .unwrap()
+                .scenes
+                .get_mut("empty")
+                .unwrap()
+                .name = "reject preparation".into();
+            assert!(
+                match route {
+                    0 => host.refresh_author_preview(&rejected),
+                    1 => host.sync_document(&rejected),
+                    _ => host.sync_document_deferred(&rejected),
+                }
+                .unwrap_err()
+                .contains("Rejected source runtime preparation")
+            );
+            assert_eq!(host.accepted_document(), &accepted);
+            assert_eq!(host.session.state(), &state);
+            host.step(DT, &GameInput::default()).unwrap();
+            assert_eq!(
+                host.session.state().module_data["fixture.derived-value"],
+                json!(4.)
+            );
+        }
+    }
+}
 
 struct Control {
     factories: AtomicUsize,
@@ -289,6 +596,18 @@ impl ExecutableSystem for Step {
                 .events
                 .push(GameEvent::new("fixture.pulse", json!({"count":pulses})));
         }
+        if let Some(profile) = context.input.values.get("fixture.profile") {
+            context
+                .game
+                .module_data
+                .insert("fixture.real-profile/1".into(), profile.clone());
+            context
+                .events
+                .push(GameEvent::new("fixture.persist", json!({"data":profile})));
+            if context.input.pressed("fixture.reject-profile") {
+                return Err("Rejected profile candidate".into());
+            }
+        }
         Ok(())
     }
 }
@@ -406,6 +725,16 @@ impl Fixture {
                 validate_state: |_| Ok(()),
                 diagnostics: |_| json!({}),
                 service_requests: |project| {
+                    if let Some(requests) = project
+                        .execution
+                        .stages
+                        .iter()
+                        .flat_map(|stage| &stage.nodes)
+                        .find_map(|node| node.params.get("host_services"))
+                    {
+                        return serde_json::from_value(requests.clone())
+                            .map_err(|error| error.to_string());
+                    }
                     Ok(
                         if project
                             .execution
@@ -1595,6 +1924,265 @@ fn cancelled_renderer_preparation_retires_result_off_caller_and_preserves_last_g
 }
 
 struct FailingService;
+struct PartialCommitStep;
+impl ExecutableSystem for PartialCommitStep {
+    fn step(&mut self, context: &mut SystemContext<'_>, state: &mut Value) -> Result<(), String> {
+        let value = state.as_u64().unwrap_or(0) + 1;
+        *state = json!(value);
+        context
+            .game
+            .module_data
+            .insert("fixture.partial".into(), json!(value));
+        context
+            .events
+            .push(GameEvent::new("fixture.save", json!({"data":value})));
+        if value == 2 {
+            Err("Rejected second fixed tick".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+struct RecordingService(Arc<Mutex<Vec<GameEvent>>>);
+impl HostService for RecordingService {
+    fn consume(&mut self, events: &[GameEvent]) -> Result<(), String> {
+        self.0.lock().unwrap().extend_from_slice(events);
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn set_enabled(&mut self, _: bool) {}
+    fn stop(&mut self) {}
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
+}
+#[test]
+fn partial_fixed_step_failure_delivers_only_committed_events_once_to_services() {
+    let mut fixture = Fixture::new(false);
+    fixture
+        .composition
+        .systems
+        .bind_factory("fixture.step", |_| Ok(Box::new(PartialCommitStep)))
+        .unwrap();
+    let mut document = fixture.document.clone();
+    request_service(&mut document);
+    let seen = Arc::new(Mutex::new(vec![]));
+    let recorded = seen.clone();
+    let mut registry = HostServiceRegistry::new();
+    registry
+        .register("fixture.service", move |_, _| {
+            Ok(Box::new(RecordingService(recorded.clone())))
+        })
+        .unwrap();
+    let mut host = GameHost::build(
+        document,
+        fixture.composition.clone(),
+        fixture.options(RenderMode::Graph, registry, true),
+        None,
+    )
+    .unwrap();
+    let error = host.step(2. / 60., &GameInput::default()).unwrap_err();
+    assert!(error.contains("Rejected second fixed tick"));
+    assert_eq!(host.session.state().tick, 1);
+    assert_eq!(
+        host.session.state().module_data["fixture.partial"],
+        json!(1)
+    );
+    let expected = vec![GameEvent::new("fixture.save", json!({"data":1}))];
+    assert_eq!(*seen.lock().unwrap(), expected);
+    assert!(host.step(f64::NAN, &GameInput::default()).is_err());
+    assert_eq!(*seen.lock().unwrap(), expected);
+    assert!(
+        host.step(0., &GameInput::default())
+            .unwrap_err()
+            .contains("Rejected second fixed tick")
+    );
+    assert_eq!(*seen.lock().unwrap(), expected);
+}
+struct BootstrapService;
+
+#[test]
+fn real_registered_persistence_round_trips_committed_host_state_and_rejects_uncommitted_payload() {
+    use module_engine_host_services::{PERSISTENCE_SERVICE_ID, install_persistence_at};
+    let fixture = Fixture::new(false);
+    let mut document = fixture.document.clone();
+    document.game.as_mut().unwrap().execution.stages[0].nodes[0].params["host_services"] = json!([
+        {"id":PERSISTENCE_SERVICE_ID,"config":{"namespace":"fleet/profile","data_key":"fixture.real-profile/1","write_event":"fixture.persist","version":1},"asset_references":[]}
+    ]);
+    let authored = serde_json::to_vec(&document).unwrap();
+    let owned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../work/host-service-tests");
+    fs::create_dir_all(&owned).unwrap();
+    let state_root = owned.join(format!(
+        "real-host-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    assert!(!state_root.exists());
+    let mut services = HostServiceRegistry::new();
+    install_persistence_at(&mut services, state_root.clone()).unwrap();
+    let mut host = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(RenderMode::Graph, services.clone(), true),
+        None,
+    )
+    .unwrap();
+    assert!(!state_root.exists());
+    let data =
+        json!({"undo":[{"literal.key":null}],"future":{"x":[false,3]},"formation":[[0,0],[1,0]]});
+    let accepted = GameInput {
+        values: BTreeMap::from([("fixture.profile".into(), data.clone())]),
+        ..Default::default()
+    };
+    assert_eq!(host.step(1. / 60., &accepted).unwrap(), 1);
+    assert_eq!(
+        host.services.diagnostics()[PERSISTENCE_SERVICE_ID]["writes"],
+        json!(1)
+    );
+    let namespace = fs::read_dir(&state_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let save = fs::read_dir(namespace)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let bytes = fs::read(&save).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["data"],
+        data
+    );
+    let before = serde_json::to_value(host.session.state()).unwrap();
+    let rejected = GameInput {
+        values: BTreeMap::from([("fixture.profile".into(), json!({"wrong":true}))]),
+        actions: BTreeSet::from(["fixture.reject-profile".into()]),
+        ..Default::default()
+    };
+    assert!(
+        host.step(1. / 60., &rejected)
+            .unwrap_err()
+            .contains("Rejected profile candidate")
+    );
+    assert_eq!(serde_json::to_value(host.session.state()).unwrap(), before);
+    assert_eq!(fs::read(&save).unwrap(), bytes);
+    assert_eq!(
+        host.services.diagnostics()[PERSISTENCE_SERVICE_ID]["writes"],
+        json!(1)
+    );
+    drop(host);
+    let resumed = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(RenderMode::Graph, services.clone(), true),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed.session.state().module_data["fixture.real-profile/1"],
+        data
+    );
+    assert_eq!(
+        resumed.services.diagnostics()[PERSISTENCE_SERVICE_ID]["loaded"],
+        json!(true)
+    );
+    assert_eq!(resumed.accepted_document(), &document);
+    drop(resumed);
+    let headless = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+            services,
+            true,
+        ),
+        None,
+    )
+    .unwrap();
+    assert!(headless.services.is_empty());
+    assert!(headless.session.state().module_data.is_empty());
+    assert_eq!(fs::read(&save).unwrap(), bytes);
+    assert_eq!(serde_json::to_vec(&document).unwrap(), authored);
+    drop(headless);
+    let resolved = state_root.canonicalize().unwrap();
+    let boundary = owned.canonicalize().unwrap();
+    assert!(resolved.starts_with(&boundary) && resolved != boundary);
+    fs::remove_dir_all(resolved).unwrap();
+}
+
+impl HostService for BootstrapService {
+    fn initial_module_data(&self) -> BTreeMap<String, Value> {
+        BTreeMap::from([(
+            "fixture.resume/1".into(),
+            json!({"undo":[null],"literal.key":7}),
+        )])
+    }
+    fn consume(&mut self, _: &[GameEvent]) -> Result<(), String> {
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn set_enabled(&mut self, _: bool) {}
+    fn stop(&mut self) {}
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
+}
+#[test]
+fn generic_service_bootstrap_seeds_only_new_rendered_sessions_and_preserves_authored_data() {
+    let fixture = Fixture::new(false);
+    let mut document = fixture.document.clone();
+    request_service(&mut document);
+    let mut registry = HostServiceRegistry::new();
+    registry
+        .register("fixture.service", |_, _| Ok(Box::new(BootstrapService)))
+        .unwrap();
+    let mut host = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(RenderMode::Graph, registry.clone(), true),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        host.session.state().module_data["fixture.resume/1"],
+        json!({"undo":[null],"literal.key":7})
+    );
+    assert_eq!(host.accepted_document(), &document);
+    host.step(1. / 60., &GameInput::default()).unwrap();
+    assert_eq!(
+        host.session.state().module_data["fixture.resume/1"]["undo"],
+        json!([null])
+    );
+    host.restart().unwrap();
+    assert!(host.session.state().module_data.is_empty());
+    let headless = GameHost::build(
+        document.clone(),
+        fixture.composition.clone(),
+        fixture.options(
+            RenderMode::Headless {
+                world_node: "world".into(),
+            },
+            registry,
+            true,
+        ),
+        None,
+    )
+    .unwrap();
+    assert!(headless.session.state().module_data.is_empty());
+    assert_eq!(headless.accepted_document(), &document);
+}
 impl HostService for FailingService {
     fn consume(&mut self, _: &[GameEvent]) -> Result<(), String> {
         Err("Injected service consume failure".into())

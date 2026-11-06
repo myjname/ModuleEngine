@@ -1,0 +1,18 @@
+[package]
+name = "module-engine-game-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+grid = []
+history = []
+campaign = []
+actions = []
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

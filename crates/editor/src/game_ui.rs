@@ -150,6 +150,22 @@ impl GameFrameCache {
     }
 }
 
+fn stopped_game_hint(ui: &egui::Ui, rect: egui::Rect) {
+    let text = ui.painter().layout_no_wrap(
+        "Press Play to run the game".into(),
+        egui::FontId::proportional(14.),
+        Color32::LIGHT_GRAY,
+    );
+    let origin = rect.left_top() + Vec2::splat(12.);
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(origin, text.size() + Vec2::splat(16.)),
+        4.,
+        Color32::from_rgba_unmultiplied(16, 22, 32, 220),
+    );
+    ui.painter()
+        .galley(origin + Vec2::splat(8.), text, Color32::LIGHT_GRAY);
+}
+
 pub struct GameWorkbench {
     // Code outlives Stop; mutable script instances and Game actors do not.
     programs: Arc<CompiledProgramStore>,
@@ -162,6 +178,7 @@ pub struct GameWorkbench {
     pub scene: String,
     pub selected: Option<u64>,
     pub input: GameInput,
+    aim_input: GameInput,
     texture: Option<egui::TextureHandle>,
     gpu_texture: module_engine_player::gpu_presentation::GpuTexture,
     gpu_bridge: Option<Arc<module_engine_player::gpu_presentation::GpuPresentationBridge>>,
@@ -246,6 +263,7 @@ impl Default for GameWorkbench {
             scene: String::new(),
             selected: Some(1),
             input: GameInput::default(),
+            aim_input: GameInput::default(),
             texture: None,
             gpu_texture: Default::default(),
             gpu_bridge: None,
@@ -491,6 +509,7 @@ impl GameWorkbench {
     /// the owner. Resume is requested by the next normal tick(playing=true).
     pub fn suspend_game_execution(&mut self) {
         self.input = GameInput::default();
+        self.aim_input = GameInput::default();
         self.worker_inputs.clear();
         if self.worker.is_some() && self.worker_playing != Some(false) {
             self.worker_playing = Some(false);
@@ -1300,6 +1319,7 @@ impl GameWorkbench {
         self.accepted_game_context = None;
         self.game_document = None;
         self.input = GameInput::default();
+        self.aim_input = GameInput::default();
         self.texture = None;
         self.gpu_texture = Default::default();
         self.displayed_camera = None;
@@ -1630,6 +1650,7 @@ impl GameWorkbench {
         if self.worker.is_some() {
             self.worker_inputs.clear();
             self.input = GameInput::default();
+            self.aim_input = GameInput::default();
             if !self
                 .worker_requests
                 .values()
@@ -1754,7 +1775,7 @@ impl GameWorkbench {
         self.field_key = None;
         Ok(())
     }
-    /// Game is an independent Play copy, with the ARPG camera and gameplay HUD.
+    /// Stopped Game displays authored geometry; Play/Pause retain the source HUD.
     pub fn scene_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1783,7 +1804,7 @@ impl GameWorkbench {
             {
                 let _ = self.restart_game();
             }
-            ui.label("WASD · LMB attack · R restart");
+            ui.label("Click the viewport to focus game controls");
         });
         if let Err(error) = self.ensure(document, root, compile_root, kind) {
             self.error = Some(error);
@@ -1799,33 +1820,20 @@ impl GameWorkbench {
         if let Some(host) = &mut self.host {
             let size = ui.available_size().max(Vec2::splat(1.));
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-            let input = if *playing {
-                player::read_input_for(
+            let aim = if self.play_session {
+                player::preview_aim_for(
                     host.presentation_id(),
-                    ui,
-                    &response,
-                    rect,
-                    self.displayed_camera.unwrap_or(host.camera),
-                    true,
+                    host.session.state(),
+                    &self.aim_input,
+                    *playing
+                        && response.hovered()
+                        && ui.input(|i| i.focused)
+                        && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
+                    false,
                 )
             } else {
-                GameInput::default()
+                None
             };
-            let aim = player::preview_aim_for(
-                host.presentation_id(),
-                host.session.state(),
-                &input,
-                *playing
-                    && response.hovered()
-                    && ui.input(|i| i.focused)
-                    && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
-                false,
-            );
-            merge_view_input(
-                &mut self.input,
-                input,
-                response.hovered() || response.has_focus(),
-            );
             if rect.width() > 2. && rect.height() > 2. {
                 let physical = rect.size() * ui.ctx().pixels_per_point();
                 let fit = (1280. / physical.x).min(720. / physical.y).min(1.);
@@ -1918,15 +1926,40 @@ impl GameWorkbench {
                         Color32::WHITE,
                     );
                 }
-                if player::draw_hud_for(
-                    host.presentation_id(),
+                if !self.play_session {
+                    stopped_game_hint(ui, rect);
+                    return false;
+                }
+                let status = module_engine_core::GameUiStatus {
+                    can_close_application: false,
+                    services: host.services.diagnostics(),
+                    errors: self
+                        .error
+                        .iter()
+                        .chain(self.render_error.iter())
+                        .cloned()
+                        .collect(),
+                };
+                let collected = player::collect_input_with_status_for(
                     ui,
-                    rect,
-                    host.session.state(),
-                    self.displayed_camera.unwrap_or(host.camera),
-                    aim,
-                ) {
-                    let _ = self.restart_game();
+                    &response,
+                    player::InputCollection {
+                        id: host.presentation_id(),
+                        rect,
+                        state: host.session.state(),
+                        camera: self.displayed_camera.unwrap_or(host.camera),
+                        aim,
+                        respect_editor_focus: true,
+                        world_enabled: *playing,
+                    },
+                    &status,
+                );
+                let active =
+                    response.hovered() || response.has_focus() || collected.controls_active;
+                let input = collected.input;
+                if *playing || input.restart {
+                    self.aim_input = input.clone();
+                    merge_view_input(&mut self.input, input, active);
                 }
             }
         } else if self.game_preparation.is_some() {
@@ -1945,33 +1978,20 @@ impl GameWorkbench {
         };
         let size = ui.available_size().max(Vec2::splat(1.));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-        let input = if playing {
-            player::read_input_for(
+        let aim = if self.play_session {
+            player::preview_aim_for(
                 snapshot.presentation_ids.first().map(String::as_str),
-                ui,
-                &response,
-                rect,
-                self.displayed_camera.unwrap_or(snapshot.camera),
-                true,
+                &snapshot.state,
+                &self.aim_input,
+                playing
+                    && response.hovered()
+                    && ui.input(|input| input.focused)
+                    && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
+                false,
             )
         } else {
-            GameInput::default()
+            None
         };
-        let aim = player::preview_aim_for(
-            snapshot.presentation_ids.first().map(String::as_str),
-            &snapshot.state,
-            &input,
-            playing
-                && response.hovered()
-                && ui.input(|input| input.focused)
-                && (!ui.ctx().egui_wants_keyboard_input() || response.has_focus()),
-            false,
-        );
-        merge_view_input(
-            &mut self.input,
-            input,
-            response.hovered() || response.has_focus(),
-        );
         if rect.width() <= 2. || rect.height() <= 2. {
             return;
         }
@@ -2034,15 +2054,45 @@ impl GameWorkbench {
                 Color32::LIGHT_GRAY,
             );
         }
-        if player::draw_hud_for(
-            snapshot.presentation_ids.first().map(String::as_str),
+        if !self.play_session {
+            stopped_game_hint(ui, rect);
+            ui.ctx().request_repaint_after(if playing {
+                Duration::from_secs_f64(1. / 60.)
+            } else {
+                Duration::from_millis(250)
+            });
+            return;
+        }
+        let status = module_engine_core::GameUiStatus {
+            can_close_application: false,
+            services: snapshot.service_diagnostics.clone(),
+            errors: snapshot
+                .fault
+                .iter()
+                .chain(snapshot.preparation_error.iter())
+                .chain(snapshot.render_error.iter())
+                .cloned()
+                .collect(),
+        };
+        let collected = player::collect_input_with_status_for(
             ui,
-            rect,
-            &snapshot.state,
-            self.displayed_camera.unwrap_or(snapshot.camera),
-            aim,
-        ) {
-            let _ = self.restart_game();
+            &response,
+            player::InputCollection {
+                id: snapshot.presentation_ids.first().map(String::as_str),
+                rect,
+                state: &snapshot.state,
+                camera: self.displayed_camera.unwrap_or(snapshot.camera),
+                aim,
+                respect_editor_focus: true,
+                world_enabled: playing,
+            },
+            &status,
+        );
+        let active = response.hovered() || response.has_focus() || collected.controls_active;
+        let input = collected.input;
+        if playing || input.restart {
+            self.aim_input = input.clone();
+            merge_view_input(&mut self.input, input, active);
         }
         ui.ctx().request_repaint_after(if playing {
             Duration::from_secs_f64(1. / 60.)
@@ -2594,6 +2644,9 @@ impl GameWorkbench {
             .unwrap_or_default()
             .into_iter()
             .collect::<BTreeSet<_>>();
+        if ids.is_empty() {
+            return;
+        }
         if !ids.contains(&self.source_selected) {
             self.source_selected = ids.first().cloned().unwrap_or_default();
         }
@@ -3181,6 +3234,13 @@ fn reference_editor(
 }
 fn merge_view_input(current: &mut GameInput, next: GameInput, active: bool) {
     if !active {
+        return;
+    }
+    if current.restart || next.restart {
+        *current = GameInput {
+            restart: true,
+            ..Default::default()
+        };
         return;
     }
     let mut actions = current.actions.clone();
@@ -3829,6 +3889,204 @@ fn connect_pins(
 }
 #[cfg(test)]
 mod tests {
+    fn game_pane_text(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().into()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn g1_game_pane_fixture() -> (GraphDocument, GameWorkbench, PathBuf) {
+        let root = crate::project::source_root().join("examples/crate-garden");
+        let mut document = module_engine_core::demo_document(WorldKind::Ecs);
+        document.root.nodes.retain(|node| {
+            matches!(
+                node.id.as_str(),
+                "world" | "extract" | "renderer" | "viewport"
+            )
+        });
+        document
+            .root
+            .edges
+            .retain(|edge| matches!(edge.from_node.as_str(), "world" | "extract" | "renderer"));
+        document.custom_sources.clear();
+        document.game = Some(module_engine_g1::project());
+        let composition =
+            CompositionContext::new(ModuleRegistry::builtin(), module_engine_g1::registry())
+                .unwrap();
+        composition
+            .capture_lock(
+                &document,
+                ProfileIdentity::from_payload("fixture.game-pane", "1", &json!({})).unwrap(),
+                None,
+            )
+            .unwrap()
+            .apply_to(&mut document);
+        let host = module_engine_host::GameHost::build(
+            document.clone(),
+            composition,
+            module_engine_host::HostOptions {
+                asset_root: root.clone(),
+                backend_root: None,
+                compile_root: None,
+                render: module_engine_host::RenderMode::Graph,
+                services: module_engine_host_services::HostServiceRegistry::new(),
+                services_enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        let mut workbench = GameWorkbench::default();
+        workbench.host = Some(host);
+        workbench.game_document = Some(document.clone());
+        (document, workbench, root)
+    }
+
+    #[test]
+    fn stopped_game_pane_uses_author_preview_and_paused_play_retains_source_controls() {
+        for worker in [false, true] {
+            let (mut document, mut workbench, root) = g1_game_pane_fixture();
+            if worker {
+                workbench.worker = Some(GameWorker::spawn(workbench.host.take().unwrap(), None));
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while workbench.worker_snapshot.is_none() {
+                    workbench.poll_worker();
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let authored = document.clone();
+            workbench.graph_text = "unsaved graph draft".into();
+            workbench.graph_text_dirty = true;
+            workbench.source_selected = "archived-selection".into();
+            let context = egui::Context::default();
+            let render = |workbench: &mut GameWorkbench, document: &mut GraphDocument| {
+                let mut playing = false;
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(640., 480.),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        workbench.scene_ui(ui, document, &root, None, WorldKind::Ecs, &mut playing);
+                    },
+                );
+                let text = game_pane_text(&output);
+                output.drop_without_applying_deltas();
+                text
+            };
+            let stopped = render(&mut workbench, &mut document);
+            assert!(
+                stopped
+                    .iter()
+                    .any(|text| text == "Press Play to run the game")
+            );
+            assert!(!stopped.iter().any(|text| text.contains("LMB attack")
+                || text == "Apply Rust"
+                || text.contains("Game Custom is not ready")
+                || text == "The garden is not ready"));
+            assert!(!workbench.is_play_session());
+            assert_eq!(workbench.source_selected, "archived-selection");
+            if worker {
+                assert_eq!(workbench.worker_snapshot.as_ref().unwrap().state.tick, 0);
+                assert!(
+                    !workbench
+                        .worker_snapshot
+                        .as_ref()
+                        .unwrap()
+                        .state
+                        .module_data
+                        .contains_key(module_engine_g1::VIEW_KEY)
+                );
+                workbench.tick(0., true).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while workbench.worker_snapshot.as_ref().unwrap().state.tick == 0 {
+                    workbench.poll_worker();
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                workbench.tick(0., false).unwrap();
+                while workbench.worker_snapshot.as_ref().unwrap().playing {
+                    workbench.poll_worker();
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            } else {
+                let host = workbench.host.as_mut().unwrap();
+                assert_eq!(host.session.state().tick, 0);
+                assert!(
+                    !host
+                        .session
+                        .state()
+                        .module_data
+                        .contains_key(module_engine_g1::VIEW_KEY)
+                );
+                workbench.tick(1. / 60., true).unwrap();
+                workbench.tick(0., false).unwrap();
+            }
+            assert!(workbench.play_session); // Editor Pause retains a real initialized Play copy.
+            let paused = render(&mut workbench, &mut document);
+            assert!(paused.iter().any(|text| text == "A LITTLE SPACE TO THINK"));
+            assert!(
+                !paused
+                    .iter()
+                    .any(|text| text == "Press Play to run the game")
+            );
+            assert_eq!(document, authored);
+            assert_eq!(workbench.graph_text, "unsaved graph draft");
+            assert!(workbench.graph_text_dirty);
+            workbench.stop();
+        }
+    }
+
+    #[test]
+    fn game_pane_rust_tools_follow_scheduled_custom_sources_and_preserve_hidden_drafts() {
+        let mut workbench = GameWorkbench::default();
+        workbench.source_selected = "hidden-selection".into();
+        workbench.migration = "unsaved migration".into();
+        workbench.graph_text = "unsaved execution".into();
+        let mut no_custom = module_engine_core::demo_document(WorldKind::Ecs);
+        no_custom.game = Some(module_engine_g1::project());
+        no_custom
+            .custom_sources
+            .insert("orphan".into(), "fn update() {}".into());
+        let authored = no_custom.clone();
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            workbench.custom_ui(ui, &no_custom, None)
+        });
+        let text = game_pane_text(&output);
+        output.drop_without_applying_deltas();
+        assert!(
+            !text
+                .iter()
+                .any(|text| text == "Apply Rust" || text.contains("Game Custom"))
+        );
+        assert_eq!(workbench.source_selected, "hidden-selection");
+        assert_eq!(workbench.migration, "unsaved migration");
+        assert_eq!(workbench.graph_text, "unsaved execution");
+        assert_eq!(no_custom, authored);
+        let scheduled = native_test_document();
+        assert!(!game_host::script_ids(scheduled.game.as_ref().unwrap()).is_empty());
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            workbench.custom_ui(ui, &scheduled, None)
+        });
+        let text = game_pane_text(&output);
+        output.drop_without_applying_deltas();
+        assert!(text.iter().any(|text| text == "Apply Rust"));
+        assert!(
+            text.iter()
+                .any(|text| text.contains("Game Custom is not ready"))
+        );
+    }
+
     /// Native host/Play tests exercise silent fixtures on platforms without
     /// a WAV endpoint. Production templates and audio contract tests retain
     /// their authored requests and explicit unsupported-service diagnostics.

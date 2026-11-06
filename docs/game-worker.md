@@ -68,6 +68,13 @@ defines safe interpolation, discontinuities and the roughly one-tick visual dela
 A slow Custom call still delays this owner; extra presentation never runs game
 ticks or hides simulation lag.
 
+Optional active Core pose projections run on the raw owner snapshots before
+these endpoints are interpolated and before imported primitives are attached.
+Late material/color decoration remains separate. Failed projection preserves
+the completed frame and reports a render error; it does not reject a committed
+simulation tick or its service events. Pose/time changes qualify for extra
+renders only through the unchanged Host identity and real-model checks.
+
 `GameSnapshot.frame_presentation` belongs to completed pixels: actor ID, epoch,
 successful serial, source revision, actual camera and Host provenance.
 `frame_tick`/`frame_revision` retain their source meaning. `sequence` counts status

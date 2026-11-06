@@ -17,6 +17,7 @@ pub enum ProjectTemplate {
     Empty,
     TwoArenas,
     Puzzle,
+    G1,
 }
 #[derive(Clone, Debug)]
 pub struct SavedProject {
@@ -231,11 +232,13 @@ pub fn template_document_with_choice(
             content.game.unwrap()
         }
         ProjectTemplate::Puzzle => module_engine_project_puzzle::project(),
+        ProjectTemplate::G1 => module_engine_g1::project(),
     });
     document.name = match template {
         ProjectTemplate::Empty => "New project",
         ProjectTemplate::TwoArenas => "Two arenas",
         ProjectTemplate::Puzzle => "Crate puzzle",
+        ProjectTemplate::G1 => "Crate Garden",
     }
     .into();
     document.properties.active.objects.clear();
@@ -356,7 +359,7 @@ pub fn new_project_with_choice(
     template: ProjectTemplate,
     choice: crate::engine_profiles::EngineChoice,
 ) -> Result<SavedProject, String> {
-    let document = template_document_with_choice(current, template, distribution, choice)?;
+    let mut document = template_document_with_choice(current, template, distribution, choice)?;
     let source = absolute_path(source_path)?;
     let source_root = source
         .parent()
@@ -373,19 +376,8 @@ pub fn new_project_with_choice(
     {
         return Err("New Project requires a new or empty folder".into());
     }
-    let resource_root = if template == ProjectTemplate::TwoArenas {
-        distribution
-            .package_root
-            .canonicalize()
-            .map_err(|e| e.to_string())?
-    } else {
-        source_root.clone()
-    };
-    let files = if template == ProjectTemplate::TwoArenas {
-        collect_resources(&document, &resource_root, &distribution.package_root)?
-    } else {
-        BTreeMap::new()
-    };
+    let (resource_root, files) =
+        new_template_resources(&mut document, &source_root, distribution, template)?;
     check_roots(&resource_root, &folder, &files)?;
     publish(
         folder.join("project.json"),
@@ -394,6 +386,75 @@ pub fn new_project_with_choice(
         distribution,
         false,
     )
+}
+
+/// CLI creation shares the New Project transaction and resource validation,
+/// while allowing an explicit JSON filename in an existing destination folder.
+/// Existing JSON or conflicting resources are never replaced by this operation.
+pub fn new_project_file_with_choice(
+    source_path: &Path,
+    destination_path: &Path,
+    current: &GraphDocument,
+    distribution: &Distribution,
+    template: ProjectTemplate,
+    choice: crate::engine_profiles::EngineChoice,
+) -> Result<SavedProject, String> {
+    let mut document = template_document_with_choice(current, template, distribution, choice)?;
+    let source = absolute_path(source_path)?;
+    let source_root = source
+        .parent()
+        .ok_or("Source project has no folder")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let destination = absolute_path(destination_path)?;
+    let folder = destination
+        .parent()
+        .ok_or("Destination project has no folder")?;
+    let (resource_root, files) =
+        new_template_resources(&mut document, &source_root, distribution, template)?;
+    check_roots(&resource_root, folder, &files)?;
+    publish(destination, document, files, distribution, false)
+}
+
+fn new_template_resources(
+    document: &mut GraphDocument,
+    source_root: &Path,
+    distribution: &Distribution,
+    template: ProjectTemplate,
+) -> Result<(PathBuf, BTreeMap<String, PathBuf>), String> {
+    let resource_root = match template {
+        ProjectTemplate::TwoArenas => distribution.package_root.clone(),
+        ProjectTemplate::G1 if distribution.can_author_engine() => {
+            distribution.package_root.join("examples/crate-garden")
+        }
+        _ => source_root.to_path_buf(),
+    }
+    .canonicalize()
+    .map_err(|e| e.to_string())?;
+    if template == ProjectTemplate::G1 {
+        // The same read-only indexer used by Assets discovers stable IDs and
+        // glTF palette dependencies before normal transactional publication.
+        let composition = crate::host::composition_at(&distribution.package_root)?;
+        let infos = module_engine_project::AssetWorkspace::new(&resource_root, [])?
+            .with_composition(composition)
+            .synchronize(document)?;
+        if let Some(asset) = infos
+            .iter()
+            .find(|asset| asset.missing || asset.diagnostic.is_some())
+        {
+            return Err(format!(
+                "Template asset '{}': {}",
+                asset.path,
+                asset.diagnostic.as_deref().unwrap_or("file is missing")
+            ));
+        }
+    }
+    let files = if matches!(template, ProjectTemplate::TwoArenas | ProjectTemplate::G1) {
+        collect_resources(document, &resource_root, &distribution.package_root)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok((resource_root, files))
 }
 
 fn validate_document(document: &GraphDocument, distribution: &Distribution) -> Result<(), String> {
@@ -1146,6 +1207,161 @@ mod tests {
             assert!(!capability.can_author_engine());
         }
         (sources, capability)
+    }
+    #[test]
+    fn g1_template_requires_compatible_inheritance_or_explicit_source_profile_selection() {
+        use crate::engine_profiles::{EngineChoice, ProfileKind};
+        let base = crate::game_templates::demo_document();
+        let (_sources, full) = distribution(&base, DistributionProfile::Full);
+        assert!(
+            template_document_with_choice(
+                &base,
+                ProjectTemplate::G1,
+                &full,
+                EngineChoice::InheritCurrent
+            )
+            .is_err()
+        );
+        let selected = template_document_with_choice(
+            &base,
+            ProjectTemplate::G1,
+            &full,
+            EngineChoice::Selected(ProfileKind::G1),
+        )
+        .unwrap();
+        assert_eq!(
+            module_engine_project::EngineProfile::from_document(&selected)
+                .unwrap()
+                .identity
+                .id,
+            "module-engine.g1"
+        );
+        assert_eq!(selected.game.as_ref().unwrap().scenes.len(), 10);
+        assert!(
+            selected
+                .game
+                .as_ref()
+                .unwrap()
+                .execution
+                .stages
+                .iter()
+                .flat_map(|stage| &stage.nodes)
+                .any(|node| node.module == "g1.rules")
+        );
+        let (_team_sources, team) = distribution(&selected, DistributionProfile::Team);
+        let inherited = template_document_with_choice(
+            &selected,
+            ProjectTemplate::G1,
+            &team,
+            EngineChoice::InheritCurrent,
+        )
+        .unwrap();
+        assert_eq!(inherited.root, selected.root);
+        assert_eq!(
+            inherited.game.as_ref().unwrap().execution,
+            selected.game.as_ref().unwrap().execution
+        );
+    }
+    #[test]
+    fn g1_new_json_transaction_copies_registered_palette_audio_and_preserves_conflicts() {
+        use crate::engine_profiles::{EngineChoice, ProfileKind};
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let case = module_engine_script::TestArtifactGuard::new(
+            &checkout.join("work/g1-20261026/editor-tests"),
+            "g1-new-json",
+        )
+        .unwrap();
+        let source = case.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        let current = crate::game_templates::g1_document();
+        let (engine, full) = distribution(&current, DistributionProfile::Full);
+        let template_source = checkout.join("examples/crate-garden");
+        let files = collect_resources(&current, &template_source, engine.path()).unwrap();
+        for (relative, path) in files {
+            let target = engine.path().join("examples/crate-garden").join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(path, target).unwrap();
+        }
+        let source_path = source.join("author.json");
+        let original = serde_json::to_vec_pretty(&current).unwrap();
+        fs::write(&source_path, &original).unwrap();
+        let destination = case.path().join("created/chosen-name.json");
+        let saved = new_project_file_with_choice(
+            &source_path,
+            &destination,
+            &current,
+            &full,
+            ProjectTemplate::G1,
+            EngineChoice::Selected(ProfileKind::G1),
+        )
+        .unwrap();
+        assert_eq!(saved.path.file_name().unwrap(), "chosen-name.json");
+        let root = saved.path.parent().unwrap();
+        let manifest = AssetManifest::from_value(&saved.document.asset_manifest).unwrap();
+        manifest.verify(root).unwrap();
+        let palette_id = manifest
+            .assets
+            .iter()
+            .find(|(_, asset)| asset.path == "assets/models/palette.png")
+            .map(|(id, _)| id)
+            .unwrap();
+        let pawn = manifest
+            .assets
+            .values()
+            .find(|asset| asset.path == "assets/models/pawn.gltf")
+            .unwrap();
+        assert!(pawn.dependencies.contains(palette_id));
+        assert!(root.join("assets/audio/music.wav").is_file());
+        assert_eq!(crate::project::read(&saved.path).unwrap(), saved.document);
+        assert_eq!(fs::read(&source_path).unwrap(), original);
+        let features =
+            crate::game_package::selected_features(&saved.document, engine.path()).unwrap();
+        assert!(
+            features.contains("g1")
+                && features.contains("audio")
+                && features.contains("persistence")
+        );
+        assert!(!features.contains("arpg") && !features.contains("puzzle"));
+        let published = fs::read(&saved.path).unwrap();
+        assert!(
+            new_project_file_with_choice(
+                &source_path,
+                &destination,
+                &current,
+                &full,
+                ProjectTemplate::G1,
+                EngineChoice::Selected(ProfileKind::G1)
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&saved.path).unwrap(), published);
+        let conflict = case.path().join("conflict");
+        fs::create_dir_all(conflict.join("assets/models")).unwrap();
+        fs::write(
+            conflict.join("assets/models/palette.png"),
+            b"user palette bytes",
+        )
+        .unwrap();
+        assert!(
+            new_project_file_with_choice(
+                &source_path,
+                &conflict.join("new.json"),
+                &current,
+                &full,
+                ProjectTemplate::G1,
+                EngineChoice::Selected(ProfileKind::G1)
+            )
+            .is_err()
+        );
+        assert!(!conflict.join("new.json").exists());
+        assert_eq!(
+            fs::read(conflict.join("assets/models/palette.png")).unwrap(),
+            b"user palette bytes"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), original);
     }
     fn model_files(root: &Path) {
         fs::create_dir_all(root.join("resources/model")).unwrap();

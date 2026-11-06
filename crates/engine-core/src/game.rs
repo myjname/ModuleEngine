@@ -151,6 +151,7 @@ pub struct GameSession {
     active_components: BTreeSet<String>,
     validation_modules: BTreeSet<String>,
     asset_paths: Option<BTreeMap<String, String>>,
+    bootstrap_open: bool,
 }
 
 type GameWorldFactory =
@@ -297,6 +298,7 @@ impl GameSession {
             active_components,
             validation_modules,
             asset_paths,
+            bootstrap_open: true,
         })
     }
     fn load_provider(
@@ -347,6 +349,25 @@ impl GameSession {
     pub fn state(&self) -> &GameState {
         &self.state
     }
+    /// Seed opaque source-owned data before the first simulation operation.
+    /// All keys are validated together; conflicts or a rejected contribution
+    /// preserve the previous state. This is not whole-session restoration.
+    pub fn seed_module_data(&mut self, values: BTreeMap<String, Value>) -> Result<(), String> {
+        if !self.bootstrap_open {
+            return Err("Session bootstrap is closed after simulation begins".into());
+        }
+        let mut candidate = self.state.clone();
+        for (key, value) in values {
+            if key.trim().is_empty() || candidate.module_data.insert(key.clone(), value).is_some() {
+                return Err(format!(
+                    "Session bootstrap has an empty or duplicate key '{key}'"
+                ));
+            }
+        }
+        validate_game_state(&self.project, &self.registry, &candidate)?;
+        self.state = candidate;
+        Ok(())
+    }
     pub fn events(&self) -> &[GameEvent] {
         &self.events
     }
@@ -379,11 +400,56 @@ impl GameSession {
         snapshot.time = self.state.time as f32;
         snapshot
     }
+    /// Source visual poses on a fresh raw snapshot, before interpolation/content.
+    /// The compatibility `snapshot` remains the canonical provider projection.
+    /// A rejected visual projection never mutates or rolls back gameplay.
+    pub fn presentation_snapshot(&self) -> Result<SceneSnapshot, String> {
+        let mut snapshot = self.snapshot();
+        let mut written = BTreeSet::new();
+        for contribution in self
+            .registry
+            .active_game_contributions(&self.project.execution)
+        {
+            let Some(project) = self.registry.pose_projection(&contribution.id) else {
+                continue;
+            };
+            let models = project(&snapshot, &self.state)
+                .map_err(|error| format!("Pose projection '{}': {error}", contribution.id))?;
+            for (id, model) in &models {
+                if snapshot.items.iter().filter(|item| item.id == *id).count() != 1 {
+                    return Err(format!(
+                        "Pose projection '{}' targets unknown or ambiguous object {id}",
+                        contribution.id
+                    ));
+                }
+                if !written.insert(*id) {
+                    return Err(format!(
+                        "Pose projections have conflicting owners for object {id}"
+                    ));
+                }
+                if model.iter().flatten().any(|value| !value.is_finite())
+                    || model[3] != [0., 0., 0., 1.]
+                {
+                    return Err(format!(
+                        "Pose projection '{}' needs a finite affine model for object {id}",
+                        contribution.id
+                    ));
+                }
+            }
+            for item in &mut snapshot.items {
+                if let Some(model) = models.get(&item.id) {
+                    item.model = *model;
+                }
+            }
+        }
+        Ok(snapshot)
+    }
     pub fn world_kind(&self) -> WorldKind {
         self.kind
     }
     /// Useful for host Custom packets: components remain with stable object IDs.
     pub fn apply_commands(&mut self, commands: &[WorldCommand]) -> Result<(), String> {
+        self.bootstrap_open = false;
         let mut candidate = self.state.clone();
         candidate.apply_commands(commands)?;
         let context = ComponentValidationContext {
@@ -429,6 +495,7 @@ impl GameSession {
         if !dt.is_finite() || dt < 0. {
             return Err("Session dt must be finite and nonnegative".into());
         }
+        self.bootstrap_open = false;
         self.events.clear();
         if input.restart {
             self.restart()?;
@@ -523,6 +590,7 @@ impl GameSession {
     /// Explicit carry IDs retain module component data while destination
     /// parents/transforms/references remain local to the destination scene.
     pub fn transition_with(&mut self, request: SceneTransition) -> Result<(), String> {
+        self.bootstrap_open = false;
         let context = ComponentValidationContext {
             scenes: &self.project.scenes,
             modules: &self.validation_modules,
@@ -1182,6 +1250,177 @@ mod tests {
         GameSession::new_with_registry(project(), kind, registry(FixtureControl::default()))
             .unwrap()
     }
+    #[test]
+    fn source_pose_registration_activation_and_omission_preserve_world_and_raw_snapshot() {
+        let project_pose: crate::GamePoseProjection = |snapshot, state| {
+            let mut model = snapshot
+                .items
+                .iter()
+                .find(|item| item.id == 1)
+                .unwrap()
+                .model;
+            model[0][3] += state.time as f32 + 2.;
+            Ok(BTreeMap::from([(1, model)]))
+        };
+        let mut missing = registry(FixtureControl::default());
+        assert!(
+            missing
+                .register_pose_projection("missing", project_pose)
+                .is_err()
+        );
+        for kind in [WorldKind::Ecs, WorldKind::Objects] {
+            for active in [true, false] {
+                let mut registry = registry(FixtureControl::default());
+                let mut contribution = guarded_registry(FixtureControl::default())
+                    .game_contributions()
+                    .next()
+                    .unwrap()
+                    .clone();
+                if !active {
+                    contribution.activation_modules = BTreeSet::from(["fixture.owner".into()]);
+                }
+                registry.register_game_contribution(contribution).unwrap();
+                registry
+                    .register_pose_projection("fixture.layout", project_pose)
+                    .unwrap();
+                assert!(
+                    registry
+                        .register_pose_projection("fixture.layout", project_pose)
+                        .is_err()
+                );
+                let mut session =
+                    GameSession::new_with_registry(project(), kind, registry).unwrap();
+                session
+                    .state
+                    .module_data
+                    .insert("foreign".into(), json!({"keep":null,"opaque":[1,2]}));
+                let state = session.state().clone();
+                let raw = session.snapshot();
+                let mut expected = raw.clone();
+                if active {
+                    expected
+                        .items
+                        .iter_mut()
+                        .find(|item| item.id == 1)
+                        .unwrap()
+                        .model[0][3] += 2.;
+                }
+                assert_eq!(session.presentation_snapshot().unwrap(), expected);
+                assert_eq!(session.presentation_snapshot().unwrap(), expected);
+                assert_eq!(session.snapshot(), raw);
+                assert_eq!(session.state(), &state);
+            }
+            let omitted = session(kind);
+            assert_eq!(omitted.presentation_snapshot().unwrap(), omitted.snapshot());
+        }
+    }
+
+    #[test]
+    fn source_pose_rejects_unknown_nonfinite_projective_and_conflicting_models_atomically() {
+        let bad_pose: crate::GamePoseProjection = |snapshot, state| {
+            let mut model = snapshot
+                .items
+                .iter()
+                .find(|item| item.id == 1)
+                .unwrap()
+                .model;
+            let mode = state
+                .module_data
+                .get("bad")
+                .and_then(Value::as_str)
+                .unwrap();
+            let id = match mode {
+                "unknown" => 9000,
+                "nonfinite" => {
+                    model[0][0] = f32::NAN;
+                    1
+                }
+                "projective" => {
+                    model[3][0] = 1.;
+                    1
+                }
+                _ => 1,
+            };
+            Ok(BTreeMap::from([(id, model)]))
+        };
+        for mode in ["unknown", "nonfinite", "projective", "conflicting"] {
+            let mut registry = guarded_registry(FixtureControl::default());
+            registry
+                .register_pose_projection("fixture.layout", bad_pose)
+                .unwrap();
+            if mode == "conflicting" {
+                let mut other = registry.game_contributions().next().unwrap().clone();
+                other.id = "fixture.other".into();
+                registry.register_game_contribution(other).unwrap();
+                registry
+                    .register_pose_projection("fixture.other", bad_pose)
+                    .unwrap();
+            }
+            let mut session =
+                GameSession::new_with_registry(project(), WorldKind::Ecs, registry).unwrap();
+            session.state.module_data.insert("bad".into(), json!(mode));
+            let raw = session.snapshot();
+            let state = session.state().clone();
+            let error = session.presentation_snapshot().unwrap_err();
+            let expected = match mode {
+                "unknown" => "unknown or ambiguous",
+                "conflicting" => "conflicting owners",
+                _ => "finite affine",
+            };
+            assert!(error.contains(expected), "{mode}: {error}");
+            assert_eq!(session.snapshot(), raw);
+            assert_eq!(session.state(), &state);
+        }
+        struct DuplicateRaw(ObjectsWorld);
+        impl WorldProvider for DuplicateRaw {
+            fn step(&mut self, dt: f32, speed: f32) {
+                self.0.step(dt, speed)
+            }
+            fn snapshot(&self) -> SceneSnapshot {
+                let mut snapshot = self.0.snapshot();
+                let mut other = snapshot.items[0].clone();
+                other.model[0][3] += 0.3;
+                snapshot.items.push(other);
+                snapshot
+            }
+            fn objects(&self) -> Result<Vec<WorldObject>, String> {
+                self.0.objects()
+            }
+            fn validate_commands(&self, commands: &[WorldCommand]) -> Result<(), String> {
+                self.0.validate_commands(commands)
+            }
+            fn apply_commands(&mut self, commands: &[WorldCommand]) -> Result<(), String> {
+                self.0.apply_commands(commands)
+            }
+        }
+        let mut registry = guarded_registry(FixtureControl::default());
+        registry
+            .register_pose_projection("fixture.layout", bad_pose)
+            .unwrap();
+        let mut ambiguous = GameSession::new_with_world_factory(
+            project(),
+            WorldKind::Custom,
+            registry,
+            |objects| Ok(Box::new(DuplicateRaw(ObjectsWorld::from_objects(objects)?))),
+        )
+        .unwrap();
+        ambiguous
+            .state
+            .module_data
+            .insert("bad".into(), json!("ambiguous"));
+        let raw = ambiguous.snapshot();
+        assert!(
+            ambiguous
+                .presentation_snapshot()
+                .unwrap_err()
+                .contains("unknown or ambiguous")
+        );
+        assert_eq!(
+            ambiguous.snapshot(),
+            raw,
+            "Distinct primitive-local offsets cannot be clobbered"
+        );
+    }
     fn input(actions: &[&str], movement: f64) -> GameInput {
         GameInput {
             values: BTreeMap::from([("move".into(), json!(movement))]),
@@ -1191,6 +1430,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bootstrap_preserves_exact_namespace_payload_and_rejects_conflicts_or_late_writes() {
+        for kind in [WorldKind::Objects, WorldKind::Ecs] {
+            let mut session = session(kind);
+            let payload = json!({"undo":[{"literal.key":null}],"future":{"any":[1,false]}});
+            session
+                .seed_module_data(BTreeMap::from([
+                    ("source.resume/1".into(), payload.clone()),
+                    ("source.null".into(), Value::Null),
+                ]))
+                .unwrap();
+            let before = session.state().clone();
+            assert!(
+                session
+                    .seed_module_data(BTreeMap::from([("source.resume/1".into(), json!(9))]))
+                    .is_err()
+            );
+            assert!(
+                session
+                    .seed_module_data(BTreeMap::from([(" ".into(), json!(9))]))
+                    .is_err()
+            );
+            assert_eq!(session.state(), &before);
+            session.step(1. / 60., &GameInput::default()).unwrap();
+            assert_eq!(session.state().module_data["source.resume/1"], payload);
+            assert_eq!(session.state().module_data["source.null"], Value::Null);
+            let before = session.state().clone();
+            assert!(
+                session
+                    .seed_module_data(BTreeMap::from([("late".into(), json!(1))]))
+                    .is_err()
+            );
+            assert_eq!(session.state(), &before);
+            session.restart().unwrap();
+            assert!(session.state().module_data.is_empty());
+        }
+    }
+    #[test]
+    fn contribution_rejecting_bootstrap_keeps_the_previous_state() {
+        let mut registry = registry(FixtureControl::default());
+        registry
+            .register_game_contribution(crate::GameContribution {
+                id: "fixture.bootstrap".into(),
+                activation_modules: BTreeSet::from(["fixture.step".into()]),
+                begin_tick: |_| Ok(()),
+                initial_camera: |_| crate::Camera::default(),
+                follow_target: |_| None,
+                decorate_snapshot: |_, _| {},
+                script_input: |_| Value::Null,
+                validate_event: |_| Ok(()),
+                validate_state: |state| {
+                    if state.module_data.contains_key("rejected") {
+                        Err("Rejected bootstrap fixture".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                service_requests: |_| Ok(vec![]),
+                diagnostics: |_| Value::Null,
+            })
+            .unwrap();
+        let mut session =
+            GameSession::new_with_registry(project(), WorldKind::Ecs, registry).unwrap();
+        let before = session.state().clone();
+        assert!(
+            session
+                .seed_module_data(BTreeMap::from([("rejected".into(), Value::Null)]))
+                .unwrap_err()
+                .contains("Rejected bootstrap")
+        );
+        assert_eq!(session.state(), &before);
+    }
     #[test]
     fn generic_events_preserve_external_tags_and_reject_malformed_names_or_maps() {
         for event in [

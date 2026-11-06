@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-module-engine-player = { path = "../player", features = ["ui", "arpg", "puzzle", "vulkan", "audio"] }
+module-engine-player = { path = "../player", features = ["ui", "arpg", "puzzle", "g1", "vulkan", "audio", "persistence"] }
 module-engine-host = { path = "../game-host" }
-module-engine-host-services = { path = "../host-services", features = ["audio"] }
+module-engine-host-services = { path = "../host-services", features = ["audio", "persistence"] }
 module-engine-core = { path = "../engine-core" }
 module-engine-arpg = { path = "../gameplay-arpg", features = ["ui"] }
 module-engine-two-arenas = { path = "../example-two-arenas" }
 module-engine-project-puzzle = { path = "../project-puzzle", features = ["ui"] }
+module-engine-g1 = { path = "../project-g1", features = ["ui"] }
 module-engine-custom = { path = "../custom-rust" }
 module-engine-vulkan = { path = "../render-vulkan" }
 module-engine-script = { path = "../runtime-script" }

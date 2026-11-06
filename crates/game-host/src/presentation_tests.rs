@@ -55,6 +55,10 @@ impl ExecutableSystem for Move {
         if ctx.input.pressed("reset") {
             ctx.events.push(GameEvent::presentation_reset());
         }
+        if ctx.input.pressed("event") {
+            ctx.events
+                .push(GameEvent::new("fixture.committed", json!({"keep":null})));
+        }
         if ctx.input.pressed("reject") {
             return Err("injected tick rejection".into());
         }
@@ -82,6 +86,15 @@ fn host() -> (
     Arc<Mutex<Draws>>,
     module_engine_script::TestArtifactGuard,
 ) {
+    host_with_pose(None)
+}
+fn host_with_pose(
+    project: Option<GamePoseProjection>,
+) -> (
+    GameHost,
+    Arc<Mutex<Draws>>,
+    module_engine_script::TestArtifactGuard,
+) {
     let temp = module_engine_script::TestArtifactGuard::new(&std::env::temp_dir(), "presentation")
         .unwrap();
     let mut systems = SystemRegistry::builtin();
@@ -97,6 +110,16 @@ fn host() -> (
             |_| Ok(Box::new(Move)),
         )
         .unwrap();
+    if let Some(project) = project {
+        let mut contribution = follow_contribution();
+        contribution.id = "fixture.source_pose".into();
+        contribution.activation_modules = BTreeSet::from(["fixture.presentation_move".into()]);
+        contribution.follow_target = |_| None;
+        systems.register_game_contribution(contribution).unwrap();
+        systems
+            .register_pose_projection("fixture.source_pose", project)
+            .unwrap();
+    }
     let composition = CompositionContext::new(ModuleRegistry::builtin(), systems).unwrap();
     let mut document = demo_document(WorldKind::Ecs);
     document.custom_sources.clear();
@@ -155,6 +178,159 @@ fn host() -> (
     let draws = Arc::new(Mutex::new(Draws::default()));
     host.renderer = Some(Box::new(Recorder(draws.clone())));
     (host, draws, temp)
+}
+
+#[test]
+fn source_pose_enters_actual_host_interpolation_without_canonical_motion_or_extra_game_calls() {
+    let (mut host, draws, _temp) = host_with_pose(Some(|snapshot, state| {
+        let mut model = snapshot.items[0].model;
+        model[0][3] += state.time as f32 * 60.;
+        Ok(BTreeMap::from([(1, model)]))
+    }));
+    let authored = host.accepted_document().clone();
+    host.try_render_interpolated(160, 90, 1.).unwrap().unwrap();
+    host.step_budget(1. / 60., &GameInput::default(), 1)
+        .unwrap();
+    let state = host.session.state().clone();
+    let events = host.session.events().to_vec();
+    assert_eq!(
+        state.world.object(1).unwrap().transform.translation,
+        [0.; 3]
+    );
+    assert_eq!(host.session.snapshot().items[0].model[0][3], 0.);
+    for (alpha, origin) in [
+        (0.25, PresentationOrigin::CommittedState),
+        (0.75, PresentationOrigin::InterpolatedPose),
+    ] {
+        let frame = host
+            .try_render_interpolated(160, 90, alpha)
+            .unwrap()
+            .expect("A changed source pose must produce a real sub-tick presentation");
+        assert_eq!(frame.provenance.origin, origin);
+        assert!(
+            (draws.lock().unwrap().snapshots.last().unwrap().items[0].model[0][3] - alpha as f32)
+                .abs()
+                < 1e-5
+        );
+    }
+    assert!(
+        host.try_render_interpolated(160, 90, 0.75)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(host.session.state(), &state);
+    assert_eq!(host.session.events(), events);
+    assert_eq!(host.accepted_document(), &authored);
+    assert_eq!(host.author_snapshot().unwrap().items[0].model[0][3], 1.);
+    // Omission preserves the unchanged neutral eligibility rule: a static
+    // pair receives only its one real committed-state presentation.
+    let (mut static_host, _, _other_temp) = host_with_pose(None);
+    static_host
+        .try_render_interpolated(160, 90, 1.)
+        .unwrap()
+        .unwrap();
+    static_host
+        .step_budget(1. / 60., &GameInput::default(), 1)
+        .unwrap();
+    let committed = static_host
+        .try_render_interpolated(160, 90, 0.25)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        committed.provenance.origin,
+        PresentationOrigin::CommittedState
+    );
+    assert!(
+        static_host
+            .try_render_interpolated(160, 90, 0.75)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn source_pose_failure_is_visual_and_does_not_reject_committed_gameplay() {
+    let (mut host, draws, _temp) = host_with_pose(Some(|snapshot, state| {
+        if state.tick > 0 {
+            return Err("source pose failed".into());
+        }
+        Ok(BTreeMap::from([(1, snapshot.items[0].model)]))
+    }));
+    struct EventService(Arc<Mutex<Vec<GameEvent>>>);
+    impl module_engine_host_services::HostService for EventService {
+        fn consume(&mut self, events: &[GameEvent]) -> Result<(), String> {
+            self.0.lock().unwrap().extend_from_slice(events);
+            Ok(())
+        }
+        fn reset(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_enabled(&mut self, _: bool) {}
+        fn stop(&mut self) {}
+        fn diagnostics(&self) -> Value {
+            Value::Null
+        }
+    }
+    let consumed = Arc::new(Mutex::new(Vec::new()));
+    let mut services = HostServiceRegistry::new();
+    let sink = consumed.clone();
+    services
+        .register("fixture.events", move |_, _| {
+            Ok(Box::new(EventService(sink.clone())))
+        })
+        .unwrap();
+    host.services = services
+        .build(
+            &[HostServiceRequest {
+                id: "fixture.events".into(),
+                config: Value::Null,
+                asset_references: BTreeSet::new(),
+            }],
+            &module_engine_host_services::HostServiceContext {
+                asset_root: &host.root,
+                asset_paths: &BTreeMap::new(),
+                retired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            true,
+        )
+        .unwrap();
+    host.try_render_interpolated(80, 45, 1.).unwrap().unwrap();
+    let published = draws.lock().unwrap().snapshots.len();
+    assert_eq!(
+        host.step_budget(1. / 60., &input(&["move", "event"]), 1)
+            .unwrap(),
+        1
+    );
+    assert_eq!(host.session.state().tick, 1);
+    assert_eq!(
+        host.session
+            .state()
+            .world
+            .object(1)
+            .unwrap()
+            .transform
+            .translation[0],
+        1.
+    );
+    let generation = host.presentation_generation;
+    assert!(
+        host.try_render_interpolated(80, 45, 0.5)
+            .err()
+            .unwrap()
+            .contains("source pose failed")
+    );
+    assert_ne!(host.presentation_generation, generation);
+    assert!(host.presentation_previous.is_none() && host.presentation_current.is_none());
+    assert!(
+        host.author_snapshot()
+            .unwrap_err()
+            .contains("source pose failed")
+    );
+    assert_eq!(draws.lock().unwrap().snapshots.len(), published);
+    assert_eq!(
+        *consumed.lock().unwrap(),
+        vec![GameEvent::new("fixture.committed", json!({"keep":null}))]
+    );
 }
 
 #[test]
@@ -1159,7 +1335,11 @@ fn following_respawn_snaps_camera_with_geometry_and_cannot_create_extra_pose_fra
 
 #[test]
 fn imported_primitives_receive_interpolated_object_pose_before_attachment() {
-    let (mut host, draws, _temp) = host();
+    let (mut host, draws, _temp) = host_with_pose(Some(|snapshot, state| {
+        let mut model = snapshot.items[0].model;
+        model[0][3] += state.time as f32 * 60.;
+        Ok(BTreeMap::from([(1, model)]))
+    }));
     std::fs::create_dir_all(host.root.join("assets/models")).unwrap();
     std::fs::write(
         host.root.join("assets/models/crystal.glb"),
@@ -1191,7 +1371,7 @@ fn imported_primitives_receive_interpolated_object_pose_before_attachment() {
     for (item, primitive) in rendered.iter().zip(&model.primitives) {
         assert_eq!(item.id, 1);
         let mut expected = primitive.transform;
-        expected[0][3] += 0.5;
+        expected[0][3] += 1.;
         for (actual, expected) in item.model.iter().flatten().zip(expected.iter().flatten()) {
             assert!((actual - expected).abs() < 1e-5);
         }

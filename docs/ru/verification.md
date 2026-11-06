@@ -187,13 +187,29 @@ picker error, same-path publication failure, copy и invalid JSON.
 
 ## Инвентаризация тестов ignored
 
-Все девять `#[ignore]` перечислены в реестре с назначением. Семь включены в
-`native`/`package`, два намеренно исключены:
+Все пятнадцать `#[ignore]` перечислены в реестре с назначением. Семь включены в
+`native`/`package`, восемь намеренно исключены:
 
 - `runtime_delivery::tests::emit_stage4_software_inactive_vulkan_fixture` - только
   подготовка fixture; требует нового абсолютного `MODULE_ENGINE_STAGE4_FIXTURE_PATH`.
 - `compat_tests::audit_slow_custom_catchup_wall_time` - историческая диагностика;
   не gate нового поведения или производительности.
+- `app::panes::tests::g1_team_registered_palette_pointer_apply_history_save_preserves_frozen_execution`
+  требует настоящей экспортированной Team-поставки в `MODULE_ENGINE_TEST_TEAM_ROOT`.
+- Четыре нативные проверки `audio::tests` в `module-engine-host-services` требуют
+  feature `audio` и настоящего аудиоустройства Windows. Они проверяют скорость
+  подачи звука, зарегистрированное воспроизведение PCM8, повтор запуска после ошибки
+  и освобождение независимых владельцев. Запускайте их отдельно и последовательно
+  по [руководству Host Services](../../crates/host-services/README.ru.md#одновременные-wav-музыка-и-эффекты).
+- `tests::diagnostic_long_attempt_and_idle_cpu_cost` в `module-engine-g1` —
+  добровольно запускаемая release-диагностика времени CPU без конкурирующей нагрузки.
+  Её результаты не подтверждают производительность отрисованных кадров,
+  нативного звука или операций с хранилищем.
+
+Эти шесть проверок G1 сохраняют отдельные результаты выполнения и границы в
+[отчёте о поставке G1](g1-delivery-20261027.md) и
+[продолжении проверки](g1-verification-20261101.md).
+Регистрация не добавляет их в автоматический профиль и не означает нового успешного запуска.
 
 Registry не даёт произвольного `--step`, который незаметно включал бы emitter.
 Новый ignored test нужно осмысленно добавить в inventory и нужный профиль.
@@ -270,7 +286,7 @@ legacy benchmark на единственном авторском проекте
 Fixtures создаются только в `work/verification-tests`. Тесты используют synthetic
 CargoJSON/PE/ELF, mocked test processes и собственные короткие Python children
 для exit/timeout; Rust/Cargo/native engine не запускаются. Они проверяют profile
-isolation, все девять ignored entries, OS skip, selector failures, zero-test
+isolation, все пятнадцать ignored entries, OS skip, selector failures, zero-test
 rejection, normal environment, lock, отчёт отказа и сохранность author files.
 Это unit проверка launcher; реальные профили должны проходить отдельно на
 целевом Windows/Linux окружении и текущем source snapshot.

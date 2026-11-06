@@ -10,6 +10,31 @@ or Two Arenas. Gameplay packages supply their pure contributions through the
 selected schedule. The editor's `game_host` module only resolves application
 policy and forwards construction.
 
+## Authored data and runtime preparation
+
+Normal Host construction prepares a runtime clone with
+`GameProject::prepare_runtime_with_context` before constructing executable
+systems. Registered source project hooks derive their runtime parameters from
+the current authored scenes; callers do not inject those parameters into the
+saved graph to make a factory start. Camera, content and service discovery use
+the accepted prepared session project. The accepted authored document remains
+separate. Low-level callers constructing `GameSession` directly must explicitly
+prepare their project when their installed contracts require it.
+
+Stopped author-preview refresh and stopped document synchronization use the same
+preparation boundary. A rejected preparation preserves the accepted document,
+session and preview; restarting Play rebuilds from its accepted runtime copy.
+Preparation is not permission to alter a Team blueprint.
+
+Editor delivery prepares active components and source-owned data, validates the
+derived projection and required contracts, then retains the exact authored
+execution graph. Derived parameter caches are rebuilt by Host on launch.
+Delivery rejects preparation that changes execution topology, modules, ordering,
+ports/resources or bindings instead of silently discarding such changes. This
+keeps scene-only edits possible without publishing derived caches as frozen
+Engine configuration. Source hooks must preserve foreign data; see
+[optional package ownership](optional-gameplay.md).
+
 ## World and renderer selection
 
 `ModuleRegistry::render_route` follows the viewport's actual frame connection,
@@ -65,6 +90,27 @@ an immutable presentation without advancing systems, Custom, input, events or
 audio. The synchronous `render`/CLI route continues to use current state.
 This implementation is undergoing P0 verification; its presence is not a passed
 performance gate.
+
+An optional `SystemRegistry::register_pose_projection(contribution_id, hook)`
+adds source-owned visual models to the existing contribution, without another
+scheduled node or a mandatory `GameContribution` field. Registration requires
+that contribution to exist and be unique; only a contribution activated by the
+selected execution graph runs its hook. `GamePoseProjection` reads the raw
+`SceneSnapshot` and immutable `GameState` and returns fallible object-ID/model
+pairs. `GameSession::presentation_snapshot()` applies these before Host captures
+its pose endpoints and before content attaches primitive-local matrices.
+`GameSession::snapshot()` retains its raw provider projection for compatibility.
+
+Projection may replace only finite affine matrices for unambiguous existing raw
+IDs. Unknown/duplicate raw target IDs, projective/nonfinite matrices and two
+active owners targeting the same object are errors, without a last-writer rule.
+Geometry, material, time, IDs and canonical World/profile data cannot be changed
+through the returned map. Unsupported SRT interpolation still snaps normally.
+Projection failure resets visual history and fails rendering while preserving
+last-good pixels; committed gameplay and service events still complete. The
+existing late `decorate_snapshot` hook remains after content for material/color
+feedback and does not grant sub-tick eligibility to time alone. This is a pure
+procedural pose extension, not a skeletal-animation system or a timing result.
 
 Core interpolates safe affine translation/scale and shortest-path quaternion
 rotation before `ContentLibrary` expands imported primitives. Matching requires

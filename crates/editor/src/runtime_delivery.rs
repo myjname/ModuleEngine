@@ -11,9 +11,70 @@ pub fn prepare(document: &GraphDocument, backend: &Path) -> Result<GraphDocument
     crate::host::validate_document_at(document, backend)?;
     let mut prepared = project(document);
     if prepared.game.is_some() {
-        prepared.game = Some(crate::host::prepare_game_at(&prepared, backend)?);
+        let authored_execution = prepared.game.as_ref().unwrap().execution.clone();
+        let mut runtime_game = crate::host::prepare_game_at(&prepared, backend)?;
+        let composition = crate::host::composition_at(backend)?;
+        let original_contracts = composition.required_contracts(&prepared)?;
+        let mut runtime_document = prepared.clone();
+        runtime_document.game = Some(runtime_game.clone());
+        let diagnostics = composition.validate_document(&runtime_document);
+        if let Some(error) = diagnostics
+            .iter()
+            .find(|item| item.severity == module_engine_core::Severity::Error)
+        {
+            return Err(format!("Invalid runtime preparation: {}", error.message));
+        }
+        if composition.required_contracts(&runtime_document)? != original_contracts {
+            return Err("Runtime preparation changed undeclared delivery requirements".into());
+        }
+        if service_dependencies(&composition, &runtime_document)?
+            != service_dependencies(&composition, &prepared)?
+        {
+            return Err(
+                "Runtime preparation changed undeclared service or asset dependencies".into(),
+            );
+        }
+        retain_authored_execution(&mut runtime_game, &authored_execution)?;
+        prepared.game = Some(runtime_game);
     }
     Ok(prepared)
+}
+
+fn service_dependencies(
+    composition: &module_engine_core::CompositionContext,
+    document: &GraphDocument,
+) -> Result<BTreeSet<(String, BTreeSet<String>)>, String> {
+    let mut result = BTreeSet::new();
+    if let Some(game) = &document.game {
+        for contribution in composition
+            .systems
+            .active_game_contributions(&game.execution)
+        {
+            for request in (contribution.service_requests)(game)? {
+                result.insert((request.id, request.asset_references));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn retain_authored_execution(
+    game: &mut module_engine_core::GameProject,
+    authored: &module_engine_core::ExecutionGraph,
+) -> Result<(), String> {
+    let mut structure = game.execution.clone();
+    for (stage, source) in structure.stages.iter_mut().zip(&authored.stages) {
+        for (node, source) in stage.nodes.iter_mut().zip(&source.nodes) {
+            node.params = source.params.clone();
+        }
+    }
+    if &structure != authored {
+        return Err("Runtime preparation changed the authored execution structure; declare that structure in Engine before delivery".into());
+    }
+    // Keep prepared component/cue data, but freeze the author's execution. The
+    // shared Host rederives transient factory params when opening this delivery.
+    game.execution = authored.clone();
+    Ok(())
 }
 
 /// Both delivery policies own the transitive includes of their retained HLSL.
@@ -604,5 +665,97 @@ pub(crate) mod tests {
                 .is_empty()
         );
         crate::engine_profiles::validate(&fresh, &backend()).unwrap();
+    }
+
+    #[test]
+    fn g1_team_projection_keeps_frozen_execution_and_painted_scenes_open_in_normal_headless_host() {
+        let author = crate::game_templates::g1_document();
+        let original = author.clone();
+        let delivered = prepare(&prepare_team_document(&author), &backend()).unwrap();
+        assert_eq!(
+            delivered.game.as_ref().unwrap().execution,
+            author.game.as_ref().unwrap().execution
+        );
+        assert!(
+            delivered.game.as_ref().unwrap().execution.stages[0].nodes[0]
+                .params
+                .get("catalog")
+                .is_none()
+        );
+        assert_eq!(delivered.game.as_ref().unwrap().audio_cues.len(), 8);
+        let parent = backend().join("work/g1-20261027");
+        fs::create_dir_all(&parent).unwrap();
+        let guard =
+            module_engine_script::TestArtifactGuard::new(&parent, "g1-team-runtime-prepare")
+                .unwrap();
+        let team = crate::distribution::detect(
+            &guard.path().join("project.json"),
+            &delivered,
+            Some(crate::distribution::DistributionProfile::Team),
+        )
+        .unwrap();
+        assert!(!team.can_author_engine());
+        let game = delivered.game.as_ref().unwrap();
+        let mut draft = module_engine_g1::GridDraft::from_project(game, "level01").unwrap();
+        draft.width += 1;
+        let mut painted = delivered.clone();
+        painted.game = Some(draft.into_project(game).unwrap());
+        team.validate_document(&painted).unwrap();
+        assert_eq!(painted.game.as_ref().unwrap().execution, game.execution);
+        let mut forbidden = painted.clone();
+        forbidden.game.as_mut().unwrap().execution.stages[0].nodes[0].params["forbidden"] =
+            serde_json::json!(true);
+        assert!(team.validate_document(&forbidden).is_err());
+        let source = backend().join("examples/crate-garden");
+        let mut host = module_engine_host::GameHost::build(
+            painted.clone(),
+            crate::host::composition_at(&backend()).unwrap(),
+            module_engine_host::HostOptions {
+                asset_root: source,
+                backend_root: None,
+                compile_root: None,
+                render: module_engine_host::RenderMode::Headless {
+                    world_node: "world".into(),
+                },
+                services: module_engine_host_services::HostServiceRegistry::new(),
+                services_enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        host.step(1. / 60., &GameInput::default()).unwrap();
+        assert_eq!(
+            module_engine_g1::view(host.session.state())
+                .unwrap()
+                .board
+                .width,
+            draft.width
+        );
+        host.restart().unwrap();
+        host.step(1. / 60., &GameInput::default()).unwrap();
+        assert_eq!(
+            module_engine_g1::view(host.session.state())
+                .unwrap()
+                .board
+                .width,
+            draft.width
+        );
+        assert_eq!(host.accepted_document(), &painted);
+        assert_eq!(author, original);
+    }
+
+    #[test]
+    fn delivery_rejects_derived_schedule_changes_instead_of_silently_discarding_them() {
+        let mut prepared = GameProject::empty();
+        let execution = prepared.execution.clone();
+        prepared.execution.stages.push(SystemStage {
+            name: "undeclared".into(),
+            nodes: vec![],
+        });
+        assert!(
+            retain_authored_execution(&mut prepared, &execution)
+                .unwrap_err()
+                .contains("authored execution structure")
+        );
     }
 }

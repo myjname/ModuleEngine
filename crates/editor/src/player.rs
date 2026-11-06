@@ -1,6 +1,8 @@
 //! Editor entry points for the shared standalone Player presentation.
 use module_engine_core::{GraphDocument, WorldKind};
-pub use module_engine_player::presentations::{draw_hud_for, preview_aim_for, read_input_for};
+pub use module_engine_player::presentations::{
+    InputCollection, collect_input_with_status_for, preview_aim_for,
+};
 pub use module_engine_player::ui::{
     presentation_texture_id, update_presented_texture, update_render_diagnostic,
 };
