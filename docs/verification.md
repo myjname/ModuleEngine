@@ -200,13 +200,27 @@ or a successful small test change without a new reason is unnecessary.
 
 ## Ignored Test Inventory
 
-All nine `#[ignore]` entries are listed in the registry with their purpose. Seven are included in
-`native`/`package`; two are intentionally excluded:
+All fifteen `#[ignore]` entries are listed in the registry with their purpose. Seven are included in
+`native`/`package`; eight are intentionally excluded:
 
 - `runtime_delivery::tests::emit_stage4_software_inactive_vulkan_fixture` — only
   fixture preparation; requires a new absolute `MODULE_ENGINE_STAGE4_FIXTURE_PATH`.
 - `compat_tests::audit_slow_custom_catchup_wall_time` — historical diagnostics;
   not a gate for new behavior or performance.
+- `app::panes::tests::g1_team_registered_palette_pointer_apply_history_save_preserves_frozen_execution`
+  requires an actual exported Team delivery in `MODULE_ENGINE_TEST_TEAM_ROOT`.
+- Four native `audio::tests` cases in `module-engine-host-services` require the
+  `audio` feature and a real Windows audio endpoint. They cover source-clock
+  cadence, registered PCM8 playback, startup retry and independent owner retirement.
+  Run these separately and sequentially as described in the
+  [Host Services guide](../crates/host-services/README.md#concurrent-wav-music-and-effects).
+- `tests::diagnostic_long_attempt_and_idle_cpu_cost` in `module-engine-g1` is an
+  opt-in release CPU timing diagnostic requiring an uncontended run. Its results
+  do not establish rendered-frame or native audio/storage performance.
+
+These six G1 checks retain their separately recorded execution and scope in the
+[G1 delivery](g1-delivery-20261027.md) and [continuation](g1-verification-20261101.md).
+Registering them does not add them to an automatic profile or establish a new pass.
 
 The registry does not provide an arbitrary `--step` that could silently enable the emitter.
 A new ignored test must be deliberately added to the inventory and appropriate profile.
@@ -289,7 +303,7 @@ New native/package profiles also do not complete the open goals from
 Fixtures are created only in `work/verification-tests`. Tests use synthetic
 CargoJSON/PE/ELF, mocked test processes, and their own short Python children
 for exit/timeout; Rust/Cargo/native engine are not launched. They check profile
-isolation, all nine ignored entries, OS skip, selector failures, zero-test
+isolation, all fifteen ignored entries, OS skip, selector failures, zero-test
 rejection, normal environment, lock, failure reporting, and author-file preservation.
 This is unit verification of the launcher; real profiles must pass separately in the
 target Windows/Linux environment on the current source snapshot.
