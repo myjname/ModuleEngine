@@ -139,6 +139,13 @@ impl Mixer {
         self.voices
             .retain(|voice| bus.is_some_and(|bus| voice.cue.bus != bus));
     }
+    #[cfg_attr(
+        all(not(windows), not(test)),
+        expect(
+            dead_code,
+            reason = "Only the Windows endpoint calls mixing outside CPU tests"
+        )
+    )]
     pub(crate) fn mix(&mut self, output: &mut [i16]) -> bool {
         if self.voices.is_empty() {
             return false;
