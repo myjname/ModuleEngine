@@ -30,7 +30,21 @@ fn validate_audio_project(
 }
 fn prepare_audio_project(project: &mut GameProject) -> Result<(), String> {
     if !audio_active(project) {
-        project.audio_cues.clear();
+        let owned = crate::host_contribution().activation_modules;
+        let mut nodes = project
+            .execution
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.nodes)
+            .peekable();
+        // The legacy map has no per-cue ownership. A foreign consumer can use
+        // even an ARPG cue name, so only an exclusively ARPG schedule proves
+        // these four emitted cues unused. Unknown keys remain opaque.
+        if nodes.peek().is_some() && nodes.all(|node| owned.contains(&node.module)) {
+            for cue in ["attack", "hit", "death", "victory"] {
+                project.audio_cues.remove(cue);
+            }
+        }
     }
     Ok(())
 }
@@ -166,5 +180,103 @@ mod tests {
             .unwrap();
         assert!(runtime.audio_cues.is_empty());
         assert_eq!(project, source);
+    }
+
+    #[test]
+    fn installed_arpg_preparer_preserves_independent_and_shared_cues() {
+        struct Independent;
+        impl ExecutableSystem for Independent {
+            fn step(&mut self, _: &mut SystemContext<'_>, _: &mut Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut registry = crate::registry();
+        registry
+            .register(
+                SystemDescriptor {
+                    id: "independent.rules".into(),
+                    state_schema: "independent.rules/1".into(),
+                    components: vec![],
+                    ports: vec![],
+                    requires: vec![],
+                },
+                |_| Ok(Box::new(Independent)),
+            )
+            .unwrap();
+        registry.install_module("z.independent.audio", "1").unwrap();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let captured = observed.clone();
+        registry
+            .register_project_contract(
+                "z.independent.audio",
+                |_, _| Ok(()),
+                move |project| {
+                    *captured.lock().unwrap() = project.audio_cues.clone();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        for mixed in [false, true] {
+            let mut project = if mixed {
+                demo_project()
+            } else {
+                GameProject::empty()
+            };
+            for stage in &mut project.execution.stages {
+                stage.nodes.retain(|node| node.module != "game.audio");
+            }
+            project.execution.stages.push(SystemStage {
+                name: "Independent consumer".into(),
+                nodes: vec![SystemNode {
+                    id: "independent".into(),
+                    module: "independent.rules".into(),
+                    params: json!({}),
+                    bindings: BTreeMap::new(),
+                    after: vec![],
+                }],
+            });
+            project.audio_cues = BTreeMap::from([
+                ("attack".into(), "asset://shared".into()),
+                ("independent.music".into(), "assets/music.wav".into()),
+                ("opaque.future".into(), "untouched foreign data".into()),
+            ]);
+            let source = project.clone();
+            let runtime = project.prepare_runtime(&registry).unwrap();
+            assert_eq!(runtime.audio_cues, source.audio_cues, "mixed={mixed}");
+            assert_eq!(
+                *observed.lock().unwrap(),
+                source.audio_cues,
+                "The installed consumer must receive its original configuration"
+            );
+            assert!(crate::service_requests(&runtime).unwrap().is_empty());
+            assert_eq!(project, source);
+        }
+    }
+
+    #[test]
+    fn inactive_arpg_audio_prunes_only_its_known_cues_in_exclusive_schedule() {
+        let registry = crate::registry();
+        let mut project = demo_project();
+        for stage in &mut project.execution.stages {
+            stage.nodes.retain(|node| node.module != "game.audio");
+        }
+        project
+            .audio_cues
+            .insert("opaque.future".into(), "unchanged".into());
+        let source = project.clone();
+        let runtime = project.prepare_runtime(&registry).unwrap();
+        assert_eq!(
+            runtime.audio_cues,
+            BTreeMap::from([("opaque.future".into(), "unchanged".into())])
+        );
+        assert!(crate::service_requests(&runtime).unwrap().is_empty());
+        assert_eq!(project, source);
+
+        let mut empty = GameProject::empty();
+        empty.audio_cues = source.audio_cues.clone();
+        assert_eq!(
+            empty.prepare_runtime(&registry).unwrap().audio_cues,
+            empty.audio_cues
+        );
     }
 }

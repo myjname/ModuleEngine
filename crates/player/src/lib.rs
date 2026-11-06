@@ -1,5 +1,6 @@
 //! Source-composed standalone Player, independent of the Editor application.
 mod composition;
+pub mod native_features;
 pub mod package;
 pub mod source_modules;
 
@@ -11,7 +12,8 @@ pub mod presentations;
 pub mod ui;
 
 pub use composition::{
-    compiled_features, composition_at, composition_for_features, composition_with, service_registry,
+    compiled_features, composition_at, composition_for_features, composition_with,
+    service_registry, service_registry_at,
 };
 #[cfg(feature = "ui")]
 pub use ui::{configure_style, run_benchmark_host, run_host};

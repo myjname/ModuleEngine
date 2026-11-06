@@ -1,5 +1,5 @@
 //! Application creation presets. Concrete game data belongs to its project.
-use module_engine_core::{GraphDocument, WorldKind};
+use module_engine_core::{GameProject, GraphDocument, WorldKind};
 use module_engine_vulkan::RenderPath;
 
 fn starter_engine() -> GraphDocument {
@@ -20,6 +20,24 @@ pub fn demo_document() -> GraphDocument {
 }
 
 pub fn puzzle_document() -> GraphDocument {
+    source_game_document(
+        module_engine_project_puzzle::project(),
+        "ModuleEngine / Crate puzzle",
+        crate::engine_profiles::ProfileKind::Puzzle,
+    )
+}
+pub fn g1_document() -> GraphDocument {
+    source_game_document(
+        module_engine_g1::project(),
+        "Crate Garden",
+        crate::engine_profiles::ProfileKind::G1,
+    )
+}
+fn source_game_document(
+    game: GameProject,
+    name: &str,
+    profile: crate::engine_profiles::ProfileKind,
+) -> GraphDocument {
     let mut document = starter_engine();
     // The starter's scalar demonstration is not part of a selected game.
     document.root.nodes.retain(|node| {
@@ -39,13 +57,13 @@ pub fn puzzle_document() -> GraphDocument {
         .edges
         .retain(|edge| ids.contains(&edge.from_node) && ids.contains(&edge.to_node));
     document.custom_sources.clear();
-    document.name = "ModuleEngine / Crate puzzle".into();
-    document.game = Some(module_engine_project_puzzle::project());
+    document.name = name.into();
+    document.game = Some(game);
     crate::engine_profiles::finish_template(
         &mut document,
-        crate::engine_profiles::ProfileKind::Puzzle,
+        profile,
         &module_engine_vulkan::resource_root(),
     )
-    .expect("Installed Puzzle template contracts");
+    .expect("Installed source game template contracts");
     document
 }

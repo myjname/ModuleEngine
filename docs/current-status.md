@@ -4,6 +4,28 @@
 
 [English](current-status.md) | [Русский](ru/current-status.md) | [Documentation](README.md)
 
+G1 now has completed Windows Editor/Player routes and the agreed 1080p Playing
+budget: mean UI-distinct interval 8.4723 ms, p95 14.0901 ms, peak working set
+338,776,064 bytes. The [1 November continuation](g1-verification-20261101.md)
+records the actual Source16 artifacts, rendering, input, recovery and audio
+repairs; the [independent final review](../outputs/reviews/g1-game-20261101/final-review.md)
+governs Goal2 closure. Goal1's reusable [foundation](g1-foundation-20261027.md)
+retains its historical independent acceptance.
+
+The common audio module's 75% feed slowdown was reproduced and corrected with a
+40 ms bounded queue; native source-clock and owner-lifecycle checks pass, and
+the user confirmed normal sound. Actual Editor authoring, Apply/Undo/Redo,
+Save/reopen and authored/Play separation pass. Current Player warning/recovery
+and the demanding movement/Undo/onscreen UI/sound route pass. Normal presentation
+uses GPU-only transport with no measured render/service errors. This is fixed-PC
+Windows evidence, not clean-machine, hardware-Linux, phone or physical scanout
+certification. The [engine assessment](g1-engine-assessment.md) retains the
+composition and portability limits; no G2 implementation starts here.
+
+Earlier October G1 reports and broad test counts retain their original sources;
+they are not a new full workspace run. The EN-01/P0 material below retains its
+own historical source, artifact and acceptance bindings.
+
 Summary as of 22 October 2026: EN-01 is implemented and verified within the [reported scope](en01-english-ui-20261022.md), before portfolio-game development. Engine-owned UI and diagnostics use English; authored content, opaque external OS/compiler diagnostics and OS-owned native dialog controls retain their original text or language. Documentation remains available in full English and Russian versions. See the [UI language contract](editor-workflow.md#ui-language).
 
 The current normal Windows Editor `cf14c08d…`, scoped source05 Editor/Player checks and strict Clippy pass; the five CLI routes retain their separate source04 binding. Current Linux Editor compilation and five CPU Activity tests pass without new Linux GUI, timing or P0 certification. The source05 Scene capture records preparation, not ready geometry. These check results do not themselves constitute the independent final decision; the report keeps that decision separate from verification evidence.
@@ -24,7 +46,7 @@ The accepted long-term goal is a [portfolio of 5–10 distinct finished games](p
 covering 2D/2.5D/spatial 3D, pixel/polygonal/realistic/mobile-style graphics and
 different mechanics. Mobile-style currently means a PC game; mobile ports are
 future work, with specific platform targets still open. The roadmap proposes coverage, capability phases and acceptance
-gates; its game designs are not individually approved and no portfolio entry is
+gates; G1 now has an approved brief, other game designs remain proposed, and no portfolio entry is
 accepted by writing the plan. Two Arenas and Puzzle remain technical baselines
 until they meet those gates. This adds a product direction, not new runtime features.
 

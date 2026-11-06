@@ -13,6 +13,7 @@ pub enum ProfileKind {
     Neutral,
     Arpg,
     Puzzle,
+    G1,
 }
 impl ProfileKind {
     pub fn id(self) -> &'static str {
@@ -20,6 +21,7 @@ impl ProfileKind {
             Self::Neutral => "module-engine.neutral",
             Self::Arpg => "module-engine.arpg",
             Self::Puzzle => "module-engine.puzzle",
+            Self::G1 => "module-engine.g1",
         }
     }
     pub fn label(self) -> &'static str {
@@ -27,6 +29,7 @@ impl ProfileKind {
             Self::Neutral => "Neutral",
             Self::Arpg => "ARPG",
             Self::Puzzle => "Puzzle",
+            Self::G1 => "Crate Garden (G1)",
         }
     }
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -34,7 +37,16 @@ impl ProfileKind {
             "neutral" => Ok(Self::Neutral),
             "arpg" => Ok(Self::Arpg),
             "puzzle" => Ok(Self::Puzzle),
-            _ => Err("Engine profile must be neutral, arpg or puzzle".into()),
+            "g1" => Ok(Self::G1),
+            _ => Err("Engine profile must be neutral, arpg, puzzle or g1".into()),
+        }
+    }
+    pub fn source_feature(self) -> Option<&'static str> {
+        match self {
+            Self::Neutral => None,
+            Self::Arpg => Some("arpg"),
+            Self::Puzzle => Some("puzzle"),
+            Self::G1 => Some("g1"),
         }
     }
 }
@@ -67,29 +79,16 @@ pub fn engine_sources(document: &GraphDocument) -> BTreeMap<String, String> {
         .map(|(id, source)| (id.clone(), source.clone()))
         .collect()
 }
-fn package_modules(registry: SystemRegistry) -> BTreeSet<String> {
-    let builtin = SystemRegistry::builtin();
-    registry
-        .module_versions()
-        .iter()
-        .filter(|(id, _)| builtin.module_version(id).is_none())
-        .map(|(id, _)| id.clone())
-        .collect()
-}
 pub fn from_blueprint(
     document: &GraphDocument,
     composition: &CompositionContext,
     kind: ProfileKind,
 ) -> Result<EngineProfile, String> {
-    let arpg = package_modules(module_engine_arpg::registry());
-    let puzzle = package_modules(module_engine_project_puzzle::registry());
+    let native = module_engine_player::native_features::installed_native_features()?;
     let available_modules = composition
         .module_versions()
         .into_keys()
-        .filter(|id| {
-            (kind == ProfileKind::Arpg || !arpg.contains(id))
-                && (kind == ProfileKind::Puzzle || !puzzle.contains(id))
-        })
+        .filter(|id| native.module_available_in_profile(id, kind.source_feature()))
         .collect();
     let mut ids = BTreeSet::new();
     root_source_ids(&document.root, &mut ids);
@@ -293,6 +292,40 @@ mod tests {
     use super::*;
     fn backend() -> std::path::PathBuf {
         crate::project::source_root()
+    }
+    #[test]
+    fn curated_profiles_use_native_ownership_and_offer_only_the_selected_source_game() {
+        let document = crate::game_templates::puzzle_document();
+        let composition = crate::host::composition_at(&backend()).unwrap();
+        for kind in [
+            ProfileKind::Neutral,
+            ProfileKind::Arpg,
+            ProfileKind::Puzzle,
+            ProfileKind::G1,
+        ] {
+            let profile = from_blueprint(&document, &composition, kind).unwrap();
+            assert!(profile.blueprint.available_modules.contains("world.ecs"));
+            assert!(
+                profile
+                    .blueprint
+                    .available_modules
+                    .contains("gpu.color_encode")
+            );
+            assert_eq!(
+                profile.blueprint.available_modules.contains("g1.rules"),
+                kind == ProfileKind::G1
+            );
+            assert_eq!(
+                profile.blueprint.available_modules.contains("puzzle.turn"),
+                kind == ProfileKind::Puzzle
+            );
+            assert_eq!(
+                profile.blueprint.available_modules.contains("game.audio"),
+                kind == ProfileKind::Arpg
+            );
+        }
+        assert_eq!(ProfileKind::parse("g1").unwrap(), ProfileKind::G1);
+        assert_eq!(ProfileKind::Neutral.source_feature(), None);
     }
     #[test]
     fn inherited_empty_has_explicit_neutral_schedule_without_arpg_controller() {

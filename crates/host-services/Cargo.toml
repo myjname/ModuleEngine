@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 audio = ["dep:module-engine-project", "dep:serde"]
+persistence = ["dep:serde"]
 
 [dependencies]
 module-engine-core = { path = "../engine-core" }

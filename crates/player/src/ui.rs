@@ -1,7 +1,10 @@
 //! Standalone game presentation. Shares gameplay and renderer with editor Play.
 use crate::gpu_presentation::{GpuPresentationBridge, GpuTexture};
+pub use crate::presentations::{
+    InputCollection, collect_input_for, collect_input_with_status_for, draw_hud_for,
+    preview_aim_for, read_input_for,
+};
 use crate::presentations::{capture_input_for, has_input_for};
-pub use crate::presentations::{draw_hud_for, preview_aim_for, read_input_for};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use module_engine_core::GameInput;
 use module_engine_host::GameHost;
@@ -17,6 +20,40 @@ use std::{
 const BENCHMARK_WARMUP: usize = 30;
 const BENCHMARK_FRAMES: usize = 120;
 const FRAME_BUDGET_MS: f64 = 1000. / 60.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchmarkArmMode {
+    Automatic,
+    Manual,
+}
+impl BenchmarkArmMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Manual => "manual",
+        }
+    }
+}
+fn benchmark_arm_mode(value: Option<&str>) -> Result<BenchmarkArmMode, String> {
+    match value {
+        None | Some("automatic") => Ok(BenchmarkArmMode::Automatic),
+        Some("manual") => Ok(BenchmarkArmMode::Manual),
+        Some(_) => Err("MODULE_ENGINE_BENCHMARK_ARM must be automatic or manual".into()),
+    }
+}
+
+fn benchmark_frame_count(value: Option<&str>) -> Result<usize, String> {
+    match value {
+        None => Ok(BENCHMARK_FRAMES),
+        Some(text) => text
+            .parse::<usize>()
+            .ok()
+            .filter(|count| (120..=2400).contains(count))
+            .ok_or_else(|| {
+                "MODULE_ENGINE_BENCHMARK_FRAMES must be an integer from 120 to 2400".into()
+            }),
+    }
+}
 
 /// Native Vulkan modules receive an explicit endpoint from the actual window;
 /// software-only builds and the explicit Glow diagnostic keep CPU presentation.
@@ -330,6 +367,7 @@ fn prepare_on_host_thread<T: Send>(
 }
 
 pub fn run_host(mut host: GameHost) -> Result<(), String> {
+    let title = host.accepted_document().name.clone();
     let options = native_options(
         egui::ViewportBuilder::default()
             .with_inner_size([1280., 720.])
@@ -353,7 +391,7 @@ pub fn run_host(mut host: GameHost) -> Result<(), String> {
         }
     }
     eframe::run_native(
-        "ModuleEngine / Player",
+        &title,
         options,
         Box::new(move |cc| {
             report_graphics(cc);
@@ -374,6 +412,9 @@ pub fn run_host(mut host: GameHost) -> Result<(), String> {
 /// Measure the shipping Player path including framework texture upload and
 /// presentation cadence. The UI closes itself after 30 + 120 completed frames.
 pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
+    let target_frames =
+        benchmark_frame_count(env_option("MODULE_ENGINE_BENCHMARK_FRAMES")?.as_deref())?;
+    let arm_mode = benchmark_arm_mode(env_option("MODULE_ENGINE_BENCHMARK_ARM")?.as_deref())?;
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     let folder = folder.canonicalize().map_err(|e| e.to_string())?;
     let model_paths: BTreeSet<_> = host.session.asset_bindings().into_values().collect();
@@ -416,16 +457,22 @@ pub fn run_benchmark_host(host: GameHost, folder: &Path) -> Result<(), String> {
             let refresh_millihertz = monitor
                 .as_ref()
                 .and_then(|monitor| monitor.refresh_rate_millihertz());
+            let benchmark_started = Instant::now();
             Ok(Box::new(Player::new_native(
                 host,
                 cc,
                 Some(NativeBenchmark {
+                    target_frames,
                     folder,
                     outcome,
                     physical_size,
                     monitor_size,
                     refresh_millihertz,
-                    started: Instant::now(),
+                    started: benchmark_started,
+                    waiting_started: benchmark_started,
+                    arm_mode,
+                    armed: arm_mode == BenchmarkArmMode::Automatic,
+                    arm_wait_ms: (arm_mode == BenchmarkArmMode::Automatic).then_some(0.),
                     previous: None,
                     completed: 0,
                     samples: vec![],
@@ -465,6 +512,7 @@ struct Player {
     uploaded: Option<Arc<module_engine_core::Frame>>,
     pending_commands: VecDeque<WorkerCommand>,
     pending_inputs: VecDeque<GameInput>,
+    aim_input: GameInput,
     error: Option<String>,
     last_ui_frame: Option<u64>,
     benchmark: Option<NativeBenchmark>,
@@ -535,6 +583,7 @@ impl Player {
                 WorkerCommand::SetPlaying(true),
             ]),
             pending_inputs: VecDeque::new(),
+            aim_input: GameInput::default(),
             error: None,
             last_ui_frame: None,
             benchmark,
@@ -602,8 +651,14 @@ impl eframe::App for Player {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.snapshot = self.worker.latest();
         if let Some(benchmark) = &mut self.benchmark {
-            if !benchmark.finished && benchmark.started.elapsed().as_secs() >= 45 {
-                benchmark.finish(self.snapshot.as_deref(), self.error.as_deref(), Some("45-second watchdog: window may be hidden, occluded, minimized, or too slow"));
+            if !benchmark.finished
+                && let Some(reason) = benchmark.watchdog_reason(Instant::now())
+            {
+                benchmark.finish(
+                    self.snapshot.as_deref(),
+                    self.error.as_deref(),
+                    Some(reason),
+                );
             }
             if benchmark.finished {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -628,9 +683,10 @@ impl eframe::App for Player {
         if new_frame {
             self.last_ui_frame = Some(ui_frame);
             if let Some(benchmark) = &mut self.benchmark {
+                benchmark.observe_arm_key(ui, now);
                 benchmark.complete_previous(now, native_frame.info().cpu_usage);
-                if benchmark.samples.len() >= BENCHMARK_FRAMES
-                    && benchmark.game_frames.len() >= BENCHMARK_FRAMES
+                if benchmark.samples.len() >= benchmark.target_frames
+                    && benchmark.game_frames.len() >= benchmark.target_frames
                 {
                     benchmark.finish(snapshot.as_deref(), self.error.as_deref(), None);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -652,17 +708,17 @@ impl eframe::App for Player {
                     .as_ref()
                     .and_then(|snapshot| snapshot.presentation_ids.first())
                     .map(String::as_str);
-                let mut input = read_input_for(presentation, ui, &response, rect, camera, false);
-                if ui.input(|i| i.focused && i.key_pressed(egui::Key::Escape)) {
+                let mut input = GameInput::default();
+                if !crate::presentations::source_owns_window_controls(presentation)
+                    && ui.input(|i| i.focused && i.key_pressed(egui::Key::Escape))
+                {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if new_frame {
                     if ui.input(|i| !i.focused) {
                         input = GameInput::default();
                     }
-                    let dispatch_started = Instant::now();
-                    self.dispatch(input.clone());
-                    let dispatch_ms = dispatch_started.elapsed().as_secs_f64() * 1000.;
+                    let dispatch_ms = 0.;
                     let mut conversion_ms = 0.;
                     let mut fresh_frame = false;
                     let mut observed_at = None;
@@ -700,6 +756,13 @@ impl eframe::App for Player {
                             .or_else(|| snapshot.render_error.clone())
                             .or(presentation_error)
                             .or_else(|| {
+                                // A status-aware source owns current service
+                                // diagnostics and recovery. Historical Activity
+                                // failures must not survive a successful reset
+                                // as an unrecoverable overlay on that game.
+                                if crate::presentations::source_owns_window_controls(presentation) {
+                                    return None;
+                                }
                                 snapshot
                                     .activity
                                     .iter()
@@ -801,23 +864,40 @@ impl eframe::App for Player {
                     let aim = preview_aim_for(
                         presentation,
                         &snapshot.state,
-                        &input,
+                        &self.aim_input,
                         response.hovered() && ui.input(|i| i.focused),
                         std::env::var_os("EFRAME_SCREENSHOT_TO").is_some()
                             && std::env::var_os("MODULE_ENGINE_CAPTURE_ATTACK").is_some(),
                     );
-                    if draw_hud_for(
-                        presentation,
+                    let status = module_engine_core::GameUiStatus {
+                        can_close_application: true,
+                        services: snapshot.service_diagnostics.clone(),
+                        errors: snapshot
+                            .fault
+                            .iter()
+                            .chain(snapshot.preparation_error.iter())
+                            .chain(snapshot.render_error.iter())
+                            .cloned()
+                            .collect(),
+                    };
+                    let collected = collect_input_with_status_for(
                         ui,
-                        rect,
-                        &snapshot.state,
-                        self.displayed_camera.unwrap_or(snapshot.camera),
-                        aim,
-                    ) {
-                        self.pending_inputs.clear();
-                        self.pending_commands
-                            .push_back(WorkerCommand::Restart { request: ui_frame });
+                        &response,
+                        InputCollection {
+                            id: presentation,
+                            rect,
+                            state: &snapshot.state,
+                            camera: self.displayed_camera.unwrap_or(snapshot.camera),
+                            aim,
+                            respect_editor_focus: false,
+                            world_enabled: new_frame,
+                        },
+                        &status,
+                    );
+                    if collected.close_application {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                    input = collected.input;
                     // Slow game code affects simulation speed, not window event
                     // handling. Show that distinction with the measured tick cost.
                     if snapshot.last_step_ms > FRAME_BUDGET_MS || snapshot.backlog_seconds > 0.05 {
@@ -834,7 +914,22 @@ impl eframe::App for Player {
                         );
                     }
                 }
+                if snapshot.is_none() && new_frame {
+                    input = read_input_for(presentation, ui, &response, rect, camera, false);
+                }
                 hud_ms = hud_started.elapsed().as_secs_f64() * 1000.;
+                if new_frame {
+                    if ui.input(|i| !i.focused) {
+                        input = GameInput::default();
+                    }
+                    self.aim_input = input.clone();
+                    let started = Instant::now();
+                    self.dispatch(input.clone());
+                    if let Some(sample) = &mut sample {
+                        sample.dispatch_ms = started.elapsed().as_secs_f64() * 1000.;
+                        sample.user_input = has_input_for(presentation, &input);
+                    }
+                }
                 if let Some(error) = &self.error {
                     ui.painter().text(
                         rect.center(),
@@ -851,6 +946,14 @@ impl eframe::App for Player {
             });
         if let Some(benchmark) = &mut self.benchmark {
             benchmark.record_ui_pass(sample, now.elapsed().as_secs_f64() * 1000., hud_ms);
+            if !benchmark.armed {
+                egui::Area::new(egui::Id::new("benchmark-manual-arm"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::LEFT_BOTTOM,Vec2::new(12.,-12.))
+                    .show(ui.ctx(),|ui|{egui::Frame::popup(ui.style()).show(ui,|ui|{
+                        ui.label("Benchmark waiting · play normally, then press F9 to start measurement (120 s limit)");
+                    });});
+            }
         }
         ui.ctx().request_repaint();
     }
@@ -902,12 +1005,17 @@ struct NativeFrameSample {
 }
 
 struct NativeBenchmark {
+    target_frames: usize,
     folder: PathBuf,
     outcome: Arc<Mutex<Option<Result<(), String>>>>,
     physical_size: Box<dyn Fn() -> Option<[u32; 2]>>,
     monitor_size: Option<[u32; 2]>,
     refresh_millihertz: Option<u32>,
     started: Instant,
+    waiting_started: Instant,
+    arm_mode: BenchmarkArmMode,
+    armed: bool,
+    arm_wait_ms: Option<f64>,
     previous: Option<NativeFrameSample>,
     completed: usize,
     samples: Vec<NativeFrameSample>,
@@ -962,6 +1070,68 @@ fn timing_summary(mut values: Vec<f64>) -> Option<TimingSummary> {
 }
 
 impl NativeBenchmark {
+    fn arm(&mut self, now: Instant) -> bool {
+        if self.arm_mode != BenchmarkArmMode::Manual || self.armed || self.finished {
+            return false;
+        }
+        self.arm_wait_ms = Some(
+            now.saturating_duration_since(self.waiting_started)
+                .as_secs_f64()
+                * 1000.,
+        );
+        self.started = now;
+        self.armed = true;
+        self.previous = None;
+        self.completed = 0;
+        self.samples.clear();
+        self.game_frames.clear();
+        self.observed_game_frames.clear();
+        self.frame_ages_ms.clear();
+        self.presentations.clear();
+        self.seen_presentations.clear();
+        self.last_presentation = None;
+        self.missing_completion_timestamps = 0;
+        self.missing_frame_metadata = 0;
+        self.invalid_presentation_metadata = 0;
+        self.repeated_frame_identities = 0;
+        self.invalid_completion_timestamps = 0;
+        true
+    }
+    fn observe_arm_key(&mut self, ui: &egui::Ui, now: Instant) -> bool {
+        if self.arm_mode != BenchmarkArmMode::Manual || self.armed || self.finished {
+            return false;
+        }
+        let pressed = ui.input_mut(|input| {
+            if !input.focused {
+                return false;
+            }
+            let fresh = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::F9,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            });
+            fresh && input.consume_key(egui::Modifiers::NONE, egui::Key::F9)
+        });
+        pressed && self.arm(now)
+    }
+    fn watchdog_reason(&self, now: Instant) -> Option<&'static str> {
+        if !self.armed {
+            (now.saturating_duration_since(self.waiting_started)
+                .as_secs()
+                >= 120)
+                .then_some("120-second manual-arm watchdog: measurement was not armed with F9")
+        } else {
+            (now.saturating_duration_since(self.started).as_secs() >= 45).then_some(
+                "45-second watchdog: window may be hidden, occluded, minimized, or too slow",
+            )
+        }
+    }
     fn observe_game_frame(
         &mut self,
         now: Instant,
@@ -969,6 +1139,14 @@ impl NativeBenchmark {
         metadata: Option<&FramePresentation>,
         fresh: bool,
     ) {
+        if !self.armed {
+            return;
+        }
+        if self.arm_mode == BenchmarkArmMode::Manual
+            && completed_at.is_some_and(|completed| completed < self.started)
+        {
+            return;
+        }
         if fresh && self.completed >= BENCHMARK_WARMUP {
             self.observed_game_frames.push(now);
             let Some(completed) = completed_at else {
@@ -1052,6 +1230,9 @@ impl NativeBenchmark {
         player_ui_ms: f64,
         hud_ms: f64,
     ) {
+        if !self.armed {
+            return;
+        }
         if let Some(mut sample) = sample {
             sample.player_ui_ms = player_ui_ms;
             sample.hud_ms = hud_ms;
@@ -1063,6 +1244,9 @@ impl NativeBenchmark {
         }
     }
     fn complete_previous(&mut self, now: Instant, framework_cpu_seconds: Option<f32>) {
+        if !self.armed {
+            return;
+        }
         if let Some(mut previous) = self.previous.take() {
             previous.callback_period_ms =
                 now.duration_since(previous.started).as_secs_f64() * 1000.;
@@ -1091,8 +1275,9 @@ impl NativeBenchmark {
                 .filter_map(|s| s.framework_cpu_ms)
                 .collect(),
         );
-        let complete = self.samples.len() >= BENCHMARK_FRAMES
-            && self.game_frames.len() >= BENCHMARK_FRAMES
+        let complete = self.armed
+            && self.samples.len() >= self.target_frames
+            && self.game_frames.len() >= self.target_frames
             && interrupted.is_none();
         let ui_fps = callback.as_ref().map(|s| 1000. / s.mean_ms);
         let game_frame_interval = timing_summary(
@@ -1147,8 +1332,8 @@ impl NativeBenchmark {
             "shipping_game_unmodified":true,
             "input_mode":"normal Player input, no scripted actions and no health/stat overrides",
             "warmup_requested":BENCHMARK_WARMUP,"warmup_completed":self.completed.min(BENCHMARK_WARMUP),
-            "measured_requested":BENCHMARK_FRAMES,"measured_completed":self.samples.len(),"complete":complete,
-            "completion_criterion":"At least 120 UI callback samples and 120 distinct completed Game frames after warmup; watchdog otherwise reports incomplete",
+            "measured_requested":self.target_frames,"measured_completed":self.samples.len(),"complete":complete,
+            "completion_criterion":format!("At least {} UI callback samples and distinct completed Game frames after warmup; 45-second watchdog otherwise reports incomplete",self.target_frames),
             "target_fps":60,"budget_ms":FRAME_BUDGET_MS,"mean_fps":fps,"target_met":target_met,
             "ui_mean_fps":ui_fps,"unique_game_frame_interval":game_frame_interval,"unique_game_frames":self.game_frames.len(),"ui_timing_met":ui_timing_met,
             "legacy_mean_fps_scope":"Completion cadence of distinct worker frames observed by UI; retained for historical comparison, not display presentation cadence",
@@ -1171,6 +1356,11 @@ impl NativeBenchmark {
             "timing_met":timing_met,"physical_resolution_met":physical_resolution_met,"shipping_twenty_enemy_load_met":workload_met,
             "callback_period":callback,"framework_cpu_including_gl_upload_draw_excluding_vsync":framework
         });
+        report.as_object_mut().unwrap().extend(serde_json::json!({
+            "arming_mode":self.arm_mode.name(),"armed":self.armed,
+            "arm_wait_ms":self.arm_wait_ms.unwrap_or_else(||self.waiting_started.elapsed().as_secs_f64()*1000.),
+            "manual_arm_deadline_seconds":120,"measurement_watchdog_seconds":45,
+        }).as_object().unwrap().clone());
         report.as_object_mut().unwrap().extend(serde_json::json!({
             "player_ui":timing_summary(self.samples.iter().map(|s|s.player_ui_ms).collect()),
             "player_ui_calls":self.samples.iter().map(|sample|sample.ui_calls).collect::<Vec<_>>(),
@@ -1227,6 +1417,13 @@ impl NativeBenchmark {
             "native_vsync_requested":true,"model_paths":self.model_paths,"world_kind":snapshot.map(|s|format!("{:?}",s.world_kind)),
             "enemy_count_min":self.samples.iter().map(|s|s.enemies).min(),"enemy_count_max":self.samples.iter().map(|s|s.enemies).max(),
             "game_status_final":diagnostics.and_then(|value|value.get("status")),"player_health_final":player_health,
+            "game_diagnostics_final":diagnostics,
+            "service_diagnostics_final":snapshot.map(|snapshot|&snapshot.service_diagnostics),
+            "game_status_samples":self.samples.iter().map(|s|s.game_status.as_str()).collect::<Vec<_>>(),
+            "render_success_samples":self.samples.iter().map(|s|s.render_success).collect::<Vec<_>>(),
+            "error_samples":self.samples.iter().map(|s|s.had_error).collect::<Vec<_>>(),
+            "window_visible_samples":self.samples.iter().map(|s|s.window_visible).collect::<Vec<_>>(),
+            "user_input_samples":self.samples.iter().map(|s|s.user_input).collect::<Vec<_>>(),
             "focused_frames":self.samples.iter().filter(|s|s.focused).count(),"user_input_frames":self.samples.iter().filter(|s|s.user_input).count(),
             "error_frames":self.samples.iter().filter(|s|s.had_error).count(),"last_error":error,"interrupted":interrupted,
             "measurement_scope":"Callback cadence is UI callback start-to-start, including intervening texture upload, draw, swap/vsync and OS scheduling. Player UI/HUD costs aggregate all egui passes. Legacy mean_fps/unique_game_frame_interval use worker completion timestamps of distinct frames observed by UI; worker frames skipped between UI callbacks are not independently counted. UI-observed unique-frame intervals use callback observation times, and age is observation minus worker completion. These separate series do not measure physical presentation, scanout or GPU timestamps. Simulation and selected-renderer costs are last-completed UI-weighted observations; legacy vulkan-named fields alias those renderer measurements."
@@ -1497,14 +1694,28 @@ mod timing_tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn longer_interactive_benchmark_is_explicit_and_bounded() {
+        assert_eq!(benchmark_frame_count(None).unwrap(), 120);
+        assert_eq!(benchmark_frame_count(Some("1800")).unwrap(), 1800);
+        for value in ["0", "119", "2401", "-1", "NaN", "", "12.0"] {
+            assert!(benchmark_frame_count(Some(value)).is_err());
+        }
+    }
+
     fn benchmark() -> NativeBenchmark {
         NativeBenchmark {
+            target_frames: BENCHMARK_FRAMES,
             folder: PathBuf::new(),
             outcome: Arc::new(Mutex::new(None)),
             physical_size: Box::new(|| Some([1920, 1080])),
             monitor_size: None,
             refresh_millihertz: None,
             started: Instant::now(),
+            waiting_started: Instant::now(),
+            arm_mode: BenchmarkArmMode::Automatic,
+            armed: true,
+            arm_wait_ms: Some(0.),
             previous: None,
             completed: BENCHMARK_WARMUP,
             samples: vec![],
@@ -1558,6 +1769,270 @@ mod timing_tests {
             user_input: false,
             had_error: false,
         }
+    }
+
+    #[test]
+    fn benchmark_arm_configuration_is_explicit_and_default_stays_automatic() {
+        assert_eq!(
+            benchmark_arm_mode(None).unwrap(),
+            BenchmarkArmMode::Automatic
+        );
+        assert_eq!(
+            benchmark_arm_mode(Some("automatic")).unwrap(),
+            BenchmarkArmMode::Automatic
+        );
+        assert_eq!(
+            benchmark_arm_mode(Some("manual")).unwrap(),
+            BenchmarkArmMode::Manual
+        );
+        for value in ["", "auto", "Manual", " manual ", "true"] {
+            assert!(benchmark_arm_mode(Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn manual_benchmark_consumes_one_fresh_f9_ui_edge_and_ignores_repeat() {
+        let mut benchmark = benchmark();
+        benchmark.arm_mode = BenchmarkArmMode::Manual;
+        benchmark.armed = false;
+        let context = egui::Context::default();
+        let now = Instant::now();
+        benchmark.waiting_started = now;
+        // egui derives repeat from held keys. Establish the physical held
+        // state without observing the initial edge, then repeat, release,
+        // and press afresh through the real input normalizer.
+        let mut output = context.run_ui(
+            egui::RawInput {
+                focused: true,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F9,
+                    physical_key: Some(egui::Key::F9),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |_| {},
+        );
+        output.textures_delta.clear();
+        for (pressed, repeat) in [(true, true), (false, false), (true, false), (true, true)] {
+            let was_armed = benchmark.armed;
+            let mut armed = false;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    focused: true,
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::F9,
+                        physical_key: Some(egui::Key::F9),
+                        pressed,
+                        repeat,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| {
+                    armed |= benchmark.observe_arm_key(ui, now + Duration::from_secs(2));
+                },
+            );
+            output.textures_delta.clear();
+            assert_eq!(armed, pressed && !repeat && !was_armed);
+        }
+        assert!(benchmark.armed);
+        assert_eq!(benchmark.arm_wait_ms, Some(2000.));
+        assert_eq!(benchmark.completed, 0);
+    }
+
+    #[test]
+    fn unarmed_collectors_do_not_advance_and_arming_resets_all_measured_identity_and_time_state() {
+        let mut benchmark = benchmark();
+        benchmark.arm_mode = BenchmarkArmMode::Manual;
+        benchmark.armed = false;
+        let old = Instant::now();
+        benchmark.waiting_started = old;
+        benchmark.previous = Some(sample(old));
+        benchmark.record_ui_pass(Some(sample(old + Duration::from_millis(1))), 9., 4.);
+        benchmark.complete_previous(old + Duration::from_millis(20), Some(0.001));
+        benchmark.observe_game_frame(
+            old + Duration::from_millis(20),
+            Some(old),
+            Some(&presentation(1)),
+            true,
+        );
+        assert_eq!(benchmark.completed, BENCHMARK_WARMUP);
+        assert_eq!(benchmark.previous.as_ref().unwrap().started, old);
+        assert!(
+            benchmark.samples.is_empty()
+                && benchmark.game_frames.is_empty()
+                && benchmark.observed_game_frames.is_empty()
+        );
+        benchmark.samples.push(sample(old));
+        benchmark.game_frames.push(old);
+        benchmark.observed_game_frames.push(old);
+        benchmark.frame_ages_ms.push(3.);
+        benchmark.presentations.push(NativePresentationObservation {
+            metadata: presentation(1),
+            completed_since_start_ms: 1.,
+            observed_since_start_ms: 2.,
+        });
+        benchmark.seen_presentations.insert((1, 1, 1));
+        benchmark.last_presentation = Some(presentation(1));
+        benchmark.missing_completion_timestamps = 1;
+        benchmark.missing_frame_metadata = 2;
+        benchmark.invalid_presentation_metadata = 3;
+        benchmark.repeated_frame_identities = 4;
+        benchmark.invalid_completion_timestamps = 5;
+        let armed_at = old + Duration::from_secs(3);
+        assert!(benchmark.arm(armed_at));
+        assert_eq!(benchmark.started, armed_at);
+        assert_eq!(benchmark.completed, 0);
+        assert!(benchmark.previous.is_none());
+        assert!(
+            benchmark.samples.is_empty()
+                && benchmark.game_frames.is_empty()
+                && benchmark.observed_game_frames.is_empty()
+                && benchmark.frame_ages_ms.is_empty()
+                && benchmark.presentations.is_empty()
+                && benchmark.seen_presentations.is_empty()
+                && benchmark.last_presentation.is_none()
+        );
+        assert_eq!(
+            [
+                benchmark.missing_completion_timestamps,
+                benchmark.missing_frame_metadata,
+                benchmark.invalid_presentation_metadata,
+                benchmark.repeated_frame_identities,
+                benchmark.invalid_completion_timestamps
+            ],
+            [0; 5]
+        );
+        benchmark.completed = BENCHMARK_WARMUP;
+        benchmark.observe_game_frame(
+            armed_at + Duration::from_millis(5),
+            Some(old),
+            Some(&presentation(1)),
+            true,
+        );
+        assert!(
+            benchmark.game_frames.is_empty() && benchmark.observed_game_frames.is_empty(),
+            "A pre-arm completion cannot enter the measured series"
+        );
+        benchmark.observe_game_frame(
+            armed_at + Duration::from_millis(6),
+            Some(armed_at + Duration::from_millis(1)),
+            Some(&presentation(1)),
+            true,
+        );
+        assert_eq!(benchmark.game_frames.len(), 1);
+        assert!(!benchmark.arm(armed_at + Duration::from_secs(1)));
+        assert_eq!(benchmark.game_frames.len(), 1);
+    }
+
+    #[test]
+    fn manual_wait_deadline_and_measured_watchdog_have_separate_origins_and_timeout_is_incomplete()
+    {
+        let mut benchmark = benchmark();
+        benchmark.arm_mode = BenchmarkArmMode::Manual;
+        benchmark.armed = false;
+        benchmark.completed = 0;
+        let now = Instant::now();
+        benchmark.started = now;
+        benchmark.waiting_started = now;
+        assert!(
+            benchmark
+                .watchdog_reason(now + Duration::from_secs(119))
+                .is_none()
+        );
+        let reason = benchmark
+            .watchdog_reason(now + Duration::from_secs(120))
+            .unwrap();
+        assert!(reason.starts_with("120-second"));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../work/verification/g1-20261027/player-arm-tests")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&root).unwrap();
+        benchmark.folder = root.clone();
+        benchmark.finish(None, None, Some(reason));
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("native-frame-report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["arming_mode"], "manual");
+        assert_eq!(report["armed"], false);
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["measured_completed"], 0);
+        assert_eq!(report["warmup_completed"], 0);
+        assert_eq!(report["target_met"], false);
+        assert!(benchmark.outcome.lock().unwrap().as_ref().unwrap().is_err());
+        assert!(!benchmark.arm(now));
+        let mut active = super::timing_tests::benchmark();
+        active.arm_mode = BenchmarkArmMode::Manual;
+        active.armed = false;
+        active.waiting_started = now;
+        let armed_at = now + Duration::from_secs(110);
+        assert!(active.arm(armed_at));
+        assert!(
+            active
+                .watchdog_reason(armed_at + Duration::from_secs(44))
+                .is_none()
+        );
+        assert!(
+            active
+                .watchdog_reason(armed_at + Duration::from_secs(45))
+                .unwrap()
+                .starts_with("45-second")
+        );
+        active.folder = root.join("armed");
+        std::fs::create_dir_all(&active.folder).unwrap();
+        let mut failed = sample(armed_at + Duration::from_millis(20));
+        failed.render_success = false;
+        failed.had_error = true;
+        failed.window_visible = None;
+        active.samples = vec![sample(armed_at), failed];
+        let mut worker = GameWorker::spawn(super::tests::neutral_host(), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut snapshot = loop {
+            if let Some(snapshot) = worker.latest() {
+                break (*snapshot).clone();
+            }
+            assert!(Instant::now() < deadline, "neutral worker did not publish");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        worker.shutdown();
+        snapshot.service_diagnostics = serde_json::json!({
+            "fixture.service": {"writes": 7, "last_error": null, "opaque": [false, 3]}
+        });
+        active.finish(Some(&snapshot), None, Some("test interruption"));
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(active.folder.join("native-frame-report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            report["render_success_samples"],
+            serde_json::json!([true, false])
+        );
+        assert_eq!(report["error_samples"], serde_json::json!([false, true]));
+        assert_eq!(
+            report["window_visible_samples"],
+            serde_json::json!([true, null])
+        );
+        assert_eq!(report["game_status_samples"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            report["service_diagnostics_final"],
+            snapshot.service_diagnostics
+        );
+        let auto = super::timing_tests::benchmark();
+        assert!(
+            auto.watchdog_reason(auto.started + Duration::from_secs(45))
+                .unwrap()
+                .starts_with("45-second")
+        );
     }
 
     fn presentation(serial: u64) -> FramePresentation {
@@ -1738,7 +2213,7 @@ mod tests {
     use module_engine_arpg::{ArpgInput, GameInputExt};
     use module_engine_core::{Camera, GameState};
 
-    fn neutral_host() -> GameHost {
+    pub(super) fn neutral_host() -> GameHost {
         use module_engine_core::*;
         let root = std::env::temp_dir().canonicalize().unwrap();
         let composition =

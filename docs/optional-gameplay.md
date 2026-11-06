@@ -109,9 +109,21 @@ the composition's exact active component set.
 
 Project hooks are registered against an installed owner. The core calls the
 installed hooks; each package checks whether its behavior is active. ARPG's
-audio hook validates WAV references when `game.audio` is scheduled and removes
-inactive cue data from the prepared runtime copy, leaving the authored project
-unchanged.
+audio hook validates WAV references when `game.audio` is scheduled. Without
+that node, it removes only its emitted `attack`, `hit`, `death` and `victory`
+cue keys, and only from a nonempty schedule consisting exclusively of known
+ARPG systems. The authored project remains unchanged.
+
+The legacy `audio_cues` map has no per-cue owner or consumer declaration. A
+foreign or mixed schedule, including a scheduled Custom system, may use even
+the same cue names; preparation therefore preserves the complete map in those
+cases and in an empty schedule. Unknown cue keys are preserved in all cases.
+This conservative rule does not establish that retained cues or their resources
+are unused. Finer pruning needs an explicit shared ownership/reference contract;
+installation alone cannot grant a module ownership over another consumer's data.
+Selected Player export separately uses active service requests: it removes cue
+data when no contribution requests `audio.wav`, while arbitrary Rust retains
+its declared asset manifest because it may construct references dynamically.
 
 `GameContribution` supplies `begin_tick`/`validate_state` hooks and pure callbacks for
 initial/follow camera targets, snapshot decoration, script-input adaptation,

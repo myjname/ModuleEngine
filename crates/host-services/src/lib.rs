@@ -10,9 +10,18 @@ use std::{
 #[cfg(feature = "audio")]
 mod audio;
 #[cfg(feature = "audio")]
+mod audio_output;
+#[cfg(feature = "audio")]
+mod wav;
+#[cfg(feature = "audio")]
 pub use audio::{WAV_PLAYBACK_SUPPORTED, install_audio};
+#[cfg(feature = "persistence")]
+mod persistence;
+#[cfg(feature = "persistence")]
+pub use persistence::{InvalidSavePolicy, PersistenceConfig, install_persistence_at};
 
 pub const WAV_SERVICE_ID: &str = "audio.wav";
+pub const PERSISTENCE_SERVICE_ID: &str = "persistence.json";
 
 pub struct HostServiceContext<'a> {
     pub asset_root: &'a Path,
@@ -23,6 +32,11 @@ pub struct HostServiceContext<'a> {
 }
 
 pub trait HostService: Send {
+    /// Opaque, source-owned data offered only when constructing a new session.
+    /// Services must not mutate the authored project or restore executor state.
+    fn initial_module_data(&self) -> BTreeMap<String, Value> {
+        BTreeMap::new()
+    }
     fn consume(&mut self, events: &[GameEvent]) -> Result<(), String>;
     fn reset(&mut self) -> Result<(), String>;
     /// Disable external effects while retaining already loaded resources and
@@ -110,6 +124,20 @@ pub struct HostServices {
     enabled: bool,
 }
 impl HostServices {
+    /// Reject conflicting service namespaces before publishing any bootstrap.
+    pub fn initial_module_data(&self) -> Result<BTreeMap<String, Value>, String> {
+        let mut result = BTreeMap::new();
+        for (id, service) in &self.services {
+            for (key, value) in service.initial_module_data() {
+                if key.trim().is_empty() || result.insert(key.clone(), value).is_some() {
+                    return Err(format!(
+                        "Host service '{id}' has an empty or duplicate bootstrap key '{key}'"
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
     pub fn is_empty(&self) -> bool {
         self.services.is_empty()
     }
@@ -126,20 +154,30 @@ impl HostServices {
         self.enabled = enabled;
     }
     pub fn consume(&mut self, events: &[GameEvent]) -> Result<(), String> {
+        let mut errors = vec![];
         for (id, service) in &mut self.services {
-            service
-                .consume(events)
-                .map_err(|error| format!("Host service '{id}': {error}"))?;
+            if let Err(error) = service.consume(events) {
+                errors.push(format!("Host service '{id}': {error}"));
+            }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
     pub fn reset(&mut self) -> Result<(), String> {
+        let mut errors = vec![];
         for (id, service) in &mut self.services {
-            service
-                .reset()
-                .map_err(|error| format!("Host service '{id}' reset: {error}"))?;
+            if let Err(error) = service.reset() {
+                errors.push(format!("Host service '{id}' reset: {error}"));
+            }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
     pub fn stop(&mut self) {
         for service in self.services.values_mut() {
@@ -167,6 +205,148 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SeedService;
+    struct EffectService {
+        failing: bool,
+        calls: Arc<AtomicUsize>,
+        resets: Arc<AtomicUsize>,
+        saved: Arc<std::sync::Mutex<Vec<GameEvent>>>,
+    }
+    impl HostService for EffectService {
+        fn consume(&mut self, events: &[GameEvent]) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.failing {
+                Err("fixture consume failure".into())
+            } else {
+                self.saved.lock().unwrap().extend_from_slice(events);
+                Ok(())
+            }
+        }
+        fn reset(&mut self) -> Result<(), String> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            if self.failing {
+                Err("fixture reset failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn set_enabled(&mut self, _: bool) {}
+        fn stop(&mut self) {}
+        fn diagnostics(&self) -> Value {
+            Value::Null
+        }
+    }
+    #[test]
+    fn failed_audio_cannot_starve_committed_persistence_events_or_other_service_resets() {
+        let mut registry = HostServiceRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let saved = Arc::new(std::sync::Mutex::new(vec![]));
+        let mut requests = vec![];
+        for (id, failing) in [
+            (WAV_SERVICE_ID, true),
+            (PERSISTENCE_SERVICE_ID, false),
+            ("z.failure", true),
+        ] {
+            let calls = calls.clone();
+            let resets = resets.clone();
+            let saved = saved.clone();
+            registry
+                .register(id, move |_, _| {
+                    Ok(Box::new(EffectService {
+                        failing,
+                        calls: calls.clone(),
+                        resets: resets.clone(),
+                        saved: saved.clone(),
+                    }))
+                })
+                .unwrap();
+            requests.push(HostServiceRequest {
+                id: id.into(),
+                config: Value::Null,
+                asset_references: Default::default(),
+            });
+        }
+        let context = HostServiceContext {
+            asset_root: Path::new("missing"),
+            asset_paths: &BTreeMap::new(),
+            retired: Arc::new(AtomicBool::new(false)),
+        };
+        let mut services = registry.build(&requests, &context, true).unwrap();
+        let error = services
+            .consume(&[GameEvent::new("fixture.save", json!({"data":7}))])
+            .unwrap_err();
+        assert!(error.contains("audio.wav") && error.contains("z.failure"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *saved.lock().unwrap(),
+            vec![GameEvent::new("fixture.save", json!({"data":7}))]
+        );
+        let error = services.reset().unwrap_err();
+        assert!(error.contains("audio.wav") && error.contains("z.failure"));
+        assert_eq!(resets.load(Ordering::SeqCst), 3);
+    }
+    impl HostService for SeedService {
+        fn initial_module_data(&self) -> BTreeMap<String, Value> {
+            BTreeMap::from([("fixture.seed".into(), Value::Null)])
+        }
+        fn consume(&mut self, _: &[GameEvent]) -> Result<(), String> {
+            Ok(())
+        }
+        fn reset(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_enabled(&mut self, _: bool) {}
+        fn stop(&mut self) {}
+        fn diagnostics(&self) -> Value {
+            Value::Null
+        }
+    }
+    #[test]
+    fn duplicate_bootstrap_namespaces_are_rejected_and_disabled_owner_has_no_seed() {
+        let mut registry = HostServiceRegistry::new();
+        registry
+            .register("a", |_, _| Ok(Box::new(SeedService)))
+            .unwrap();
+        registry
+            .register("b", |_, _| Ok(Box::new(SeedService)))
+            .unwrap();
+        let request = |id: &str| HostServiceRequest {
+            id: id.into(),
+            config: Value::Null,
+            asset_references: Default::default(),
+        };
+        let context = HostServiceContext {
+            asset_root: Path::new("missing"),
+            asset_paths: &BTreeMap::new(),
+            retired: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(
+            registry
+                .build(&[request("a")], &context, true)
+                .unwrap()
+                .initial_module_data()
+                .unwrap()["fixture.seed"],
+            Value::Null
+        );
+        assert!(
+            registry
+                .build(&[request("a"), request("b")], &context, true)
+                .unwrap()
+                .initial_module_data()
+                .unwrap_err()
+                .contains("duplicate bootstrap key")
+        );
+        assert!(
+            registry
+                .build(&[request("a"), request("b")], &context, false)
+                .unwrap()
+                .initial_module_data()
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn disabled_or_omitted_requests_never_invoke_installed_factories() {

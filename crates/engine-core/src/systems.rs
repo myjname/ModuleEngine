@@ -244,6 +244,7 @@ pub struct SystemRegistry {
     module_dependencies: BTreeMap<String, BTreeSet<String>>,
     project_contracts: BTreeMap<String, (ProjectValidator, ProjectPreparer)>,
     game_contributions: BTreeMap<String, crate::GameContribution>,
+    pose_projections: BTreeMap<String, crate::GamePoseProjection>,
 }
 
 impl SystemRegistry {
@@ -327,6 +328,25 @@ impl SystemRegistry {
                     .any(|id| scheduled.contains(id.as_str()))
             })
             .collect()
+    }
+    /// Optional source visual projection owned by an already registered
+    /// contribution. Registration does not activate its module or schedule work.
+    pub fn register_pose_projection(
+        &mut self,
+        contribution_id: &str,
+        project: crate::GamePoseProjection,
+    ) -> Result<(), String> {
+        if !self.game_contributions.contains_key(contribution_id)
+            || self.pose_projections.contains_key(contribution_id)
+        {
+            return Err("Pose projection needs a unique registered contribution owner".into());
+        }
+        self.pose_projections
+            .insert(contribution_id.into(), project);
+        Ok(())
+    }
+    pub fn pose_projection(&self, contribution_id: &str) -> Option<crate::GamePoseProjection> {
+        self.pose_projections.get(contribution_id).copied()
     }
     pub fn game_contributions(&self) -> impl Iterator<Item = &crate::GameContribution> {
         self.game_contributions.values()

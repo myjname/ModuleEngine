@@ -21,6 +21,7 @@ pub enum Command {
     NewEmpty,
     NewArenas,
     NewPuzzle,
+    NewG1,
     UpdateEngineContracts,
     Open,
     Save,
@@ -229,10 +230,12 @@ impl Editor {
     }
     pub(super) fn has_unsaved_work(&self) -> bool {
         self.json_dirty
+            || self.has_module_tool_drafts()
             || self.game_workbench.has_graph_draft()
             || self.document != self.workflow.saved
     }
     fn prepare_file_operation(&mut self) -> Result<(), String> {
+        self.require_resolved_module_tools("saving")?;
         if self.game_workbench.has_graph_draft() {
             return Err("Apply or discard the Gameplay Systems draft before saving. It is not included in the saved project.".into());
         }
@@ -244,6 +247,7 @@ impl Editor {
     /// Stage pending JSON for Save As without crossing the authoring-state
     /// boundary. A cancelled picker or failed publication must retain the draft.
     fn file_operation_candidate(&self) -> Result<GraphDocument, String> {
+        self.require_resolved_module_tools("saving")?;
         if self.game_workbench.has_graph_draft() {
             return Err("Apply or discard the Gameplay Systems draft before saving. It is not included in the saved project.".into());
         }
@@ -295,6 +299,12 @@ impl Editor {
         }
     }
     fn perform_action(&mut self, action: Action, ctx: &egui::Context) {
+        if matches!(action, Action::Check | Action::Export(_))
+            && let Err(error) = self.require_resolved_module_tools("checking or exporting")
+        {
+            self.report_error(error);
+            return;
+        }
         match action {
             Action::Asset(action) => self.perform_asset_action(action, ctx),
             Action::Open => self.start_dialog(DialogPurpose::Open, ctx),
@@ -868,7 +878,7 @@ impl Editor {
             Command::ExportSource | Command::ExportTeam | Command::UpdateEngineContracts => {
                 self.can_author_engine()
             }
-            Command::NewEmpty | Command::NewArenas | Command::NewPuzzle => {
+            Command::NewEmpty | Command::NewArenas | Command::NewPuzzle | Command::NewG1 => {
                 self.document.game.is_some() || self.can_author_engine()
             }
             Command::ExportPlayer => self.document.game.is_some(),
@@ -893,6 +903,9 @@ impl Editor {
             ),
             Command::NewPuzzle => {
                 self.request_action(Action::New(workspace_files::ProjectTemplate::Puzzle), ctx)
+            }
+            Command::NewG1 => {
+                self.request_action(Action::New(workspace_files::ProjectTemplate::G1), ctx)
             }
             Command::UpdateEngineContracts => {
                 let backend = self
@@ -955,7 +968,15 @@ impl Editor {
                 }
                 self.personal_dirty = true;
             }
-            Command::PlayPause => self.playing = !self.playing,
+            Command::PlayPause => {
+                if !self.playing
+                    && let Err(error) = self.require_resolved_module_tools("Play")
+                {
+                    self.report_error(error);
+                    return;
+                }
+                self.playing = !self.playing;
+            }
             Command::Stop => self.stop_game(),
         }
     }
@@ -992,9 +1013,12 @@ impl Editor {
                             "Inherit current Engine",
                         );
                         ui.add_enabled_ui(self.can_author_engine(), |ui| {
-                            for kind in
-                                [ProfileKind::Neutral, ProfileKind::Arpg, ProfileKind::Puzzle]
-                            {
+                            for kind in [
+                                ProfileKind::Neutral,
+                                ProfileKind::Arpg,
+                                ProfileKind::Puzzle,
+                                ProfileKind::G1,
+                            ] {
                                 ui.radio_value(
                                     &mut self.workflow.new_engine_choice,
                                     EngineChoice::Selected(kind),
@@ -1012,6 +1036,9 @@ impl Editor {
                     }
                     if self.menu_item(ui, Command::NewPuzzle, "Crate puzzle example", "") {
                         commands.push(Command::NewPuzzle);
+                    }
+                    if self.menu_item(ui, Command::NewG1, "Crate Garden (G1)", "") {
+                        commands.push(Command::NewG1);
                     }
                 });
                 if self.menu_item(ui, Command::Open, "Open Project…", "Ctrl+O") {
@@ -1228,11 +1255,12 @@ impl Editor {
             let response = egui::Modal::new(egui::Id::new("unsaved-project")).show(ctx,|ui| {
                 ui.set_min_width(440.); ui.heading("Unsaved changes");
                 ui.label("Save the current project before continuing?");
+                self.module_tool_draft_resolutions_ui(ui);
                 if self.game_workbench.has_graph_draft() { ui.label("There is a Gameplay Systems draft. Click Cancel, apply or discard the draft in the editor, then try saving again."); }
                 if !self.status.is_empty() { ui.label(&self.status); }
                 ui.horizontal(|ui| {
-                    if ui.button("Save and continue").clicked() { Some(0) }
-                    else if !matches!(self.workflow.guard, Some(Action::Asset(_))) && ui.button(if matches!(self.workflow.guard, Some(Action::Check | Action::Export(_))) { "Use saved version" } else { "Don't save" }).clicked() { Some(1) }
+                    if ui.add_enabled(!self.has_module_tool_drafts(), egui::Button::new("Save and continue")).clicked() { Some(0) }
+                    else if !matches!(self.workflow.guard, Some(Action::Asset(_))) && ui.add_enabled(!self.has_module_tool_drafts(), egui::Button::new(if matches!(self.workflow.guard, Some(Action::Check | Action::Export(_))) { "Use saved version" } else { "Don't save" })).clicked() { Some(1) }
                     else if ui.button("Cancel").clicked() { Some(2) } else { None }
                 }).inner
             });
@@ -1251,6 +1279,7 @@ impl Editor {
                     .show(ui, |ui| {
                         ui.label(&self.workflow.report);
                     });
+                self.module_tool_draft_resolutions_ui(ui);
                 ui.button("Close").clicked()
             });
             if response.inner || response.should_close() {
@@ -1268,6 +1297,10 @@ impl Editor {
                 }
             }
             1 => {
+                if let Err(error) = self.require_resolved_module_tools("continuing") {
+                    self.status = error;
+                    return;
+                }
                 if matches!(self.workflow.guard, Some(Action::Asset(_))) {
                     return;
                 }
@@ -2740,6 +2773,7 @@ mod workflow_tests {
             "saved":editor.workflow.saved,"policy":editor.policy_baseline,
             "playing":editor.playing,"play_session":editor.game_workbench.is_play_session(),
             "recent":editor.workflow.recent,"time":editor.time,
+            "module_document_instance":editor.module_document_instance,
         })
     }
     fn assert_file_command_state(editor: &Editor, expected: &serde_json::Value, stage: &str) {

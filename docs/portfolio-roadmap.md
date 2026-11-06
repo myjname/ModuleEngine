@@ -48,7 +48,7 @@ The [historical P0 report](p0-stabilization-20261017.md), [pre-async continuatio
 
 | ID | Candidate and distinct mechanics | Presentation and coverage | Main capability to verify |
 | --- | --- | --- | --- |
-| G1 | Casual puzzle based on Crate Puzzle: a short level set, discrete rules, move limits, level selection and progress | Simple mobile-style graphics and UI on PC; flat board or inexpensive diorama | A finished rules-driven project with its own schemas/UI, save data and optional composition, independent of ARPG |
+| G1 | Crate Garden: ten classic crate-pushing levels, successful-move records without a hard limit, unlimited attempt Undo, level selection and persistent progress | Simple mobile-style graphics and UI on PC; fixed angled 3D diorama | A finished rules-driven project with its own schemas/UI, save data and optional composition, independent of ARPG; see the [approved brief](g1-modular-plan.md) |
 | G2 | Small ARPG based on Two Arenas: real-time combat, enemy/boss behavior, transitions and progression | 2.5D: gameplay constrained to a plane with an angled 3D camera; stylized polygonal graphics | Reusable action/animation/audio modules, readable feedback and the existing full Player performance criterion |
 | G3 | Pixel-art 2D platformer: jumping, platforms, timing and checkpoints | Actual 2D authoring/gameplay, sprites and pixel-aligned presentation | 2D camera, sprite/atlas animation, layers, level authoring and appropriate 2D collisions without mandatory ARPG/3D component fields |
 | G4 | Polygonal 3D flight arcade: a short course, obstacles, checkpoints and a time/score outcome | Spatial 3D: movement in height and depth, orientation and a following/cockpit camera | Input/camera/transform and collision contracts for real 3D movement; reuse of common content, UI and delivery |
@@ -81,7 +81,7 @@ five games. A chosen game that genuinely needs one creates its own scoped task.
 | Area | Existing boundary | Planned work and first consumer |
 | --- | --- | --- |
 | Runtime and presentation | Native Vulkan uses asynchronous production/polling with bounded GPU leases/platform interop; simulation is 60 Hz and eligible presentation targets 120 Hz. [Current finalization](p0-finalization-20261018.md) records Windows/applicable Linux correctness and delivery, unchanged Windows ARPG/cold gates and scoped foreground observations. | Preserve the unchanged source/artifact-bound gates and recheck them in G2. P0 closure is controlled by its external final review before P1. Linux software-GPU functionality does not establish hardware/FPS parity, Linux ARPG/cold or scanout. |
-| Game services | Basic input, event-driven Windows WAV with one voice and no long-term game-save contract | Reusable input actions, game UI, multi-voice audio/mixing and versioned progress saves as required by G1/G2; keep game progress separate from authored scenes and Play copies. |
+| Game services | G1's independently reviewed foundation provides reusable actions, grid/history/campaign utilities, game UI/tools, owned multi-voice Windows WAV mixing and versioned progress storage; see the [foundation evidence](g1-foundation-20261027.md). | Verify their real game use and delivery in G1, then reuse them under G2's real-time load. Keep game progress separate from authored scenes and Play copies; native Linux audio remains absent. |
 | Animation and content | Static glTF/GLB and opaque base color; no skeletal animation, executed normal/roughness/metallic maps or mipmaps | Minimum character animation needed by G2; independent sprite animation for G3; material/lighting/filtering work for G5. Define content/reference quality and resource budgets before implementation. |
 | 2D | Existing board rules and 3D snapshots do not establish a general sprite/2D authoring pipeline | Optional sprite, atlas, camera/layer, alpha blending/masks, tile/level and collision contracts for G3. Low-level GPU infrastructure may be shared without exposing unused 3D settings. |
 | Spatial gameplay | Current action collisions use a horizontal plane and rectangular obstacles | Genuine three-axis movement, camera and obstacle contacts for G4/G5; add dynamic bodies or navigation only when the chosen mechanics require them. |
@@ -196,7 +196,19 @@ The changed candidate09 normal EXE has a separate actual build identity. Current
 
 Use the [current P0 evidence](p0-finalization-20261018.md) and its external final decision to determine closure before P1. Retain the complete matrix, unchanged Windows ARPG/cold gates, scoped Linux/foreground coverage, preservation and all failed attempts; future changes need renewed applicable evidence.
 
-EN-01 delivers an English engine-owned interface and diagnostics, with full English/Russian documentation, before portfolio-game implementation. Implementation and verification are complete within the [EN-01 report's scope](en01-english-ui-20261022.md); independent final acceptance remains a separate decision, and the P0 verdict does not certify these later edits. Its [language contract](editor-workflow.md#ui-language) preserves authored content and opaque external text. A short G1 brief may now be planned: levels/content, controls/UI, saves, visual reference and budgets; the G1 game design remains unapproved. Preserve authored `game-project-v4.json` and use separate verification projects. Asynchronous GPU-resident presentation is implemented within the [documented scope](gpu-async-20261018.md); further producer/interop changes require full frame-path evidence. CPU readback remains an explicit diagnostic/capture facility.
+EN-01 delivers an English engine-owned interface and diagnostics, with full English/Russian documentation, before portfolio-game implementation. Implementation and verification are complete within the [EN-01 report's scope](en01-english-ui-20261022.md); independent final acceptance remains a separate decision, and the P0 verdict does not certify these later edits. Its [language contract](editor-workflow.md#ui-language) preserves authored content and opaque external text.
+
+The [two-goal G1 plan](g1-modular-plan.md) has historically accepted Goal1 modules.
+The [1 November continuation](g1-verification-20261101.md) now records actual
+Editor authoring, standalone controls/continuation/recovery, native audio repair
+and the demanding 1080p Playing budget on the bound Windows artifacts. The linked
+independent final decision governs Goal2/portfolio acceptance. Earlier failed
+Menu/approval/arming attempts remain historical failures; no synthetic input
+test is relabeled as physical hardware evidence. User data and original packages
+were preserved. Agree a separate G2 brief after that decision; no G2
+implementation starts here.
+
+Asynchronous GPU-resident presentation is implemented within the [documented scope](gpu-async-20261018.md); further producer/interop changes require full frame-path evidence. CPU readback remains an explicit diagnostic/capture facility.
 
 Before each new game, confirm its brief and newly required modules. Still open:
 the exact game designs/lengths/assets, which optional entries are worthwhile,

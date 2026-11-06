@@ -1,0 +1,16 @@
+[package]
+name = "module-engine-g1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+ui = ["dep:egui"]
+
+[dependencies]
+module-engine-core = { path = "../engine-core" }
+module-engine-game-kit = { path = "../game-kit", default-features = false, features = ["grid", "history", "campaign", "actions"] }
+serde.workspace = true
+serde_json.workspace = true
+egui = { workspace = true, optional = true }

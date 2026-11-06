@@ -69,7 +69,7 @@ fn read_manifest(root: &Path) -> Result<PlayerManifest, String> {
     if features.len() != manifest.native_features.len()
         || features
             .iter()
-            .any(|id| !matches!(id.as_str(), "ui" | "arpg" | "puzzle" | "vulkan" | "audio"))
+            .any(|id| !crate::native_features::KNOWN_NATIVE_FEATURES.contains(&id.as_str()))
     {
         return Err("Player manifest needs unique known native feature IDs".into());
     }
@@ -212,6 +212,17 @@ pub fn build_package_host(
     headless: bool,
     services_enabled: bool,
 ) -> Result<GameHost, String> {
+    build_package_host_with_state_root(root, headless, services_enabled, None)
+}
+
+/// Explicit application/test profile selection, independent of sealed assets.
+/// No directory is created unless the game actually requests persistence.
+pub fn build_package_host_with_state_root(
+    root: &Path,
+    headless: bool,
+    services_enabled: bool,
+    state_root: Option<&Path>,
+) -> Result<GameHost, String> {
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     let document = validate_package(&root)?;
     let composition = crate::composition_at(&root)?;
@@ -246,7 +257,10 @@ pub fn build_package_host(
             backend_root: Some(root),
             compile_root: None,
             render,
-            services: crate::service_registry()?,
+            services: match state_root {
+                Some(state_root) => crate::service_registry_at(state_root.into())?,
+                None => crate::service_registry()?,
+            },
             services_enabled,
         },
         None,

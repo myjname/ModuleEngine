@@ -302,6 +302,9 @@ fn build_session(
     modules: &ModuleRegistry,
     world: &Node,
 ) -> Result<GameSession, String> {
+    // Factories consume a fresh, filtered runtime clone. Authored node params
+    // (including frozen Team execution) never become a derived-data cache.
+    let game = game.prepare_runtime_with_context(&registry, context)?;
     let metadata = modules
         .world_metadata(&world.module)
         .ok_or("Missing world metadata")?;
@@ -592,7 +595,7 @@ struct PresentationSample {
     target: Option<[f32; 3]>,
 }
 impl PresentationSample {
-    fn capture(host: &GameHost) -> Self {
+    fn capture(host: &GameHost) -> Result<Self, String> {
         let state = host.session.state();
         let identities =
             if host.renderer.is_none() || host.session.world_kind() == WorldKind::Custom {
@@ -612,18 +615,18 @@ impl PresentationSample {
                     })
                     .collect()
             };
-        Self {
+        Ok(Self {
             scene: state.scene.clone(),
             tick: state.tick,
             time: state.time,
             snapshot: if host.renderer.is_some() {
-                host.session.snapshot()
+                host.session.presentation_snapshot()?
             } else {
                 SceneSnapshot::default()
             },
             identities,
             target: host.frame_target(),
-        }
+        })
     }
 }
 struct PresentationEvaluation {
@@ -949,7 +952,7 @@ impl GameHost {
             asset_paths: Some(&asset_paths),
             active_components: Some(&activity.components),
         };
-        let session = build_session(
+        let mut session = build_session(
             game.clone(),
             registry.clone(),
             &context,
@@ -957,7 +960,7 @@ impl GameHost {
             &world,
         )?;
         let contributions = registry
-            .active_game_contributions(&game.execution)
+            .active_game_contributions(&session.project().execution)
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
@@ -967,7 +970,7 @@ impl GameHost {
         let camera = contributions
             .first()
             .map_or_else(Camera::default, |contribution| {
-                (contribution.initial_camera)(&game)
+                (contribution.initial_camera)(session.project())
             });
         check_preparation_cancelled(cancelled)?;
         let mut renderer = match options.render {
@@ -998,9 +1001,15 @@ impl GameHost {
         let assets = module_engine_project::AssetManifest::from_value(&document.asset_manifest)?;
         content.set_asset_paths(assets.asset_paths());
         if renderer.is_some() {
-            for scene in game.scenes.keys() {
+            let context = ComponentValidationContext {
+                scenes: &session.project().scenes,
+                ..context
+            };
+            for scene in session.project().scenes.keys() {
                 check_preparation_cancelled(cancelled)?;
-                let resolved = game.resolve_scene_with_context(scene, &registry, &context)?;
+                let resolved = session
+                    .project()
+                    .resolve_scene_with_context(scene, &registry, &context)?;
                 for e in resolved {
                     if let Some(path) = e
                         .components
@@ -1015,7 +1024,7 @@ impl GameHost {
         }
         let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         check_preparation_cancelled(cancelled)?;
-        let requests = service_requests(&contributions, &game)?;
+        let requests = service_requests(&contributions, session.project())?;
         let services = options.services.build(
             &requests,
             &HostServiceContext {
@@ -1025,6 +1034,7 @@ impl GameHost {
             },
             options.services_enabled && renderer.is_some(),
         )?;
+        session.seed_module_data(services.initial_module_data()?)?;
         Ok(Self {
             session,
             content,
@@ -1150,52 +1160,6 @@ impl GameHost {
         } else {
             None
         };
-        let content = staged_content.as_mut().unwrap_or(&mut self.content);
-        if self.renderer.is_some() {
-            for scene in game.scenes.keys() {
-                for entity in
-                    game.resolve_scene_with_context(scene, &composition.systems, &context)?
-                {
-                    if let Some(path) = entity
-                        .components
-                        .get("mesh")
-                        .and_then(|value| value.get("path"))
-                        .and_then(Value::as_str)
-                    {
-                        content.load_model(path)?;
-                    }
-                    if let Some(material) = entity.components.get("material") {
-                        if let Some(color) = material.get("base_color") {
-                            serde_json::from_value::<[f32; 4]>(color.clone())
-                                .map_err(|error| format!("Material color: {error}"))?;
-                        }
-                        if let Some(path) =
-                            material.get("base_color_texture").and_then(Value::as_str)
-                        {
-                            content.load_texture(path)?;
-                        }
-                    }
-                }
-            }
-        }
-        let requests = service_requests(&self.contributions, &game)?;
-        let old_requests = service_requests(&self.contributions, previous)?;
-        let services =
-            if requests != old_requests || assets.asset_paths() != old_assets.asset_paths() {
-                let mut services = self.options.services.build(
-                    &requests,
-                    &HostServiceContext {
-                        asset_root: &self.root,
-                        asset_paths: &asset_paths,
-                        retired: self.retired.clone(),
-                    },
-                    self.options.services_enabled && self.renderer.is_some(),
-                )?;
-                services.set_enabled(self.services.enabled());
-                Some(services)
-            } else {
-                None
-            };
         for node in game
             .execution
             .stages
@@ -1220,15 +1184,72 @@ impl GameHost {
                 composition.modules.world_node(document, world_node)?
             }
         };
-        let session = build_session(
+        let mut session = build_session(
             game.clone(),
             registry.clone(),
             &context,
             &composition.modules,
             world,
         )?;
+        let content = staged_content.as_mut().unwrap_or(&mut self.content);
+        if self.renderer.is_some() {
+            let context = ComponentValidationContext {
+                scenes: &session.project().scenes,
+                ..context
+            };
+            for scene in session.project().scenes.keys() {
+                for entity in session
+                    .project()
+                    .resolve_scene_with_context(scene, &registry, &context)?
+                {
+                    if let Some(path) = entity
+                        .components
+                        .get("mesh")
+                        .and_then(|value| value.get("path"))
+                        .and_then(Value::as_str)
+                    {
+                        content.load_model(path)?;
+                    }
+                    if let Some(material) = entity.components.get("material") {
+                        if let Some(color) = material.get("base_color") {
+                            serde_json::from_value::<[f32; 4]>(color.clone())
+                                .map_err(|error| format!("Material color: {error}"))?;
+                        }
+                        if let Some(path) =
+                            material.get("base_color_texture").and_then(Value::as_str)
+                        {
+                            content.load_texture(path)?;
+                        }
+                    }
+                }
+            }
+        }
+        let requests = service_requests(&self.contributions, session.project())?;
+        let old_requests = service_requests(&self.contributions, self.session.project())?;
+        let services =
+            if requests != old_requests || assets.asset_paths() != old_assets.asset_paths() {
+                let mut services = self.options.services.build(
+                    &requests,
+                    &HostServiceContext {
+                        asset_root: &self.root,
+                        asset_paths: &asset_paths,
+                        retired: self.retired.clone(),
+                    },
+                    self.options.services_enabled && self.renderer.is_some(),
+                )?;
+                services.set_enabled(self.services.enabled());
+                Some(services)
+            } else {
+                None
+            };
+        session.seed_module_data(
+            services
+                .as_ref()
+                .unwrap_or(&self.services)
+                .initial_module_data()?,
+        )?;
         let contributions = registry
-            .active_game_contributions(&game.execution)
+            .active_game_contributions(&session.project().execution)
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
@@ -1276,6 +1297,8 @@ impl GameHost {
         self.simulation_started = true;
         let started = Instant::now();
         let before = PresentationSample::capture(self);
+        let before_tick = self.session.state().tick;
+        let before_scene = self.session.state().scene.clone();
         // Rendered hosts retain ordered resource operations until a request is
         // accepted. RenderOverrides enforces the existing 4096-operation bound;
         // a full backlog rejects the next tick transaction instead of dropping it.
@@ -1294,10 +1317,17 @@ impl GameHost {
                 .begin_frame();
         }
         if result.is_err() {
-            if self.session.state().tick != before.tick
-                || self.session.state().scene != before.scene
+            if self.session.state().tick != before_tick
+                || self.session.state().scene != before_scene
             {
                 self.reset_presentation_history();
+                // A catchup call can commit earlier ticks before a later tick
+                // rejects. Those accepted events still own their effects. A
+                // no-commit error must not replay events retained by an earlier
+                // call (for example when dt validation failed before clearing).
+                if let Err(error) = self.services.consume(self.session.events()) {
+                    self.record_service_error("step", error);
+                }
             }
             return result;
         }
@@ -1308,7 +1338,11 @@ impl GameHost {
             let reset = self.session.events().iter().any(|event| {
                 event.name == "SceneChanged" || event.name == PRESENTATION_RESET_EVENT
             });
-            if ticks == 1 && current.scene == before.scene && !reset {
+            if let (Ok(before), Ok(current)) = (before, current)
+                && ticks == 1
+                && current.scene == before.scene
+                && !reset
+            {
                 self.presentation_previous = Some(before);
                 self.presentation_current = Some(current);
             } else {
@@ -1371,7 +1405,14 @@ impl GameHost {
     /// The exact renderer-neutral geometry/materials displayed by Scene and Game.
     /// Imported primitives retain their authored object IDs for picking.
     pub fn author_snapshot(&mut self) -> Result<SceneSnapshot, String> {
-        self.enrich_presentation(self.session.snapshot())
+        let snapshot = match self.session.presentation_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reset_presentation_history();
+                return Err(error);
+            }
+        };
+        self.enrich_presentation(snapshot)
     }
     fn enrich_presentation(
         &mut self,
@@ -1776,7 +1817,13 @@ impl GameHost {
         if self.renderer.is_none() {
             return Err("Headless host has no renderer".into());
         }
-        let observed = PresentationSample::capture(self);
+        let observed = match PresentationSample::capture(self) {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.reset_presentation_history();
+                return Err(error);
+            }
+        };
         if self.presentation_current.as_ref() != Some(&observed) {
             // Also catches direct same-tick session.apply_commands, public session
             // restart/transition, and external authoring not routed through Host.
@@ -2043,6 +2090,13 @@ impl GameHost {
         }
         validate_host_contracts(&self.composition, document, &self.options.render)?;
         self.validate_session_compatibility(document)?;
+        if !self.simulation_started
+            && self.session.state().tick == 0
+            && self.session.state().time == 0.
+            && document.game != self.document.game
+        {
+            return self.refresh_author_preview(document);
+        }
         if document.execution_eq(&self.document) {
             return self.accept_document(document);
         }
@@ -2144,6 +2198,13 @@ impl GameHost {
     pub fn sync_document_deferred(&mut self, document: &GraphDocument) -> Result<(), String> {
         validate_host_contracts(&self.composition, document, &self.options.render)?;
         self.validate_session_compatibility(document)?;
+        if !self.simulation_started
+            && self.session.state().tick == 0
+            && self.session.state().time == 0.
+            && document.game != self.document.game
+        {
+            return self.refresh_author_preview(document);
+        }
         if self
             .rejected_preparation
             .as_ref()

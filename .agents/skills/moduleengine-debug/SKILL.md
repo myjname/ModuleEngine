@@ -21,6 +21,24 @@ After each observation, update or discard the hypothesis. When repeated edits pr
 
 ## Fix and verify
 
+For Windows AppContainer fixtures, TEMP can permit file creation but reject rename
+or junction operations. Before changing atomic-publication code, compare a tiny
+write/rename probe in that TEMP with the same probe in a new owned `work/` directory.
+If the filesystem probe reproduces the failure, retain the failed evidence and
+move only the disposable fixture to `work/`; do not redirect production user data
+or weaken its publication guarantees. A passing workspace fixture does not prove
+that an arbitrary user-selected destination is writable.
+
+When UI callbacks are fast but distinct game frames are slow, compare callback,
+producer-completion and UI-observed frame intervals, then inspect presentation
+origins and the raw/pose/content/late-decoration order. A pose added only after
+eligibility cannot produce interpolated samples. Check the boundary with a
+neutral renderer-backed Host regression and actual native frame provenance;
+never make time, alpha or serial alone sufficient for a new frame. Keep a Menu
+probe or scripted workload distinct from required foreground/gameplay evidence.
+
+For slowed or distorted native audio, compare production source duration and completed buffers with monotonic wall time after warmup. Nonzero completions alone can hide sustained starvation. Compare offline decoded/mixed PCM with native feeding before changing the soundtrack or sample rate. Verify queue changes with the same cadence probe, actual game load and listening; a passing producer clock does not measure device pitch or physical sound quality. Keep any buffer horizon justified by that endpoint's evidence rather than treating it as a universal constant.
+
 Change the smallest demonstrated cause. Where useful, add a regression whose expectation is the contract or original data, not a second implementation of the same algorithm. Verify that it detects the failure, that the corrected path passes, and that relevant neighboring behavior and positive controls still work. Do not repeatedly rebuild the entire workspace without a new reason.
 
 Check the selected profile's plan first. Coordinate native/GPU/timing work and release only processes/files owned by the probe. Preserve failed candidates and last-good behavior according to the relevant contract. Send substantial fixes to the independent reviewer required by AGENTS, and repeat affected checks and review after corrections.

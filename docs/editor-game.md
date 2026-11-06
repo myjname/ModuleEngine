@@ -18,9 +18,22 @@ The scene list in **Hierarchy** selects the authoring preview. **Scene name** an
 
 Select an object in Hierarchy or by clicking geometry in Scene. **+ Object** creates an object with a new nonzero ID. Scene gizmos change its transform; numeric position, rotation in radians, scale, parent, and color are available in Inspector. **Delete** removes an object and its descendants; remaining objects' references to deleted IDs are cleared. A parent cycle or other invalid state is rejected as a whole. Gameplay actors remain roots; the hierarchy supports decorative objects.
 
-**Play** starts a copy. WASD moves the player, left-click attacks toward the cursor, and R restarts the current game example. **Pause** retains and suspends the runtime; **Play** resumes. Authored changes and applying a new graph require **Stop** — pausing does not replace stopping. Stop restores authored positions and objects.
+**Play** starts a copy. The selected source game supplies its controls and help;
+the generic Game pane only explains viewport focus. **Pause** retains and suspends
+the runtime and source HUD; **Play** resumes. Authored changes and applying a new
+graph require **Stop** — pausing does not replace stopping. Stop restores authored
+positions and objects, showing the 3D author preview with `Press Play to run the
+game`. It does not invoke an uninitialized live HUD or run a game tick to prepare
+one.
 
-**Restart** and **R** use the shared `GameHost::restart`: the entry scene and Custom states are restored, accumulated render commands/overrides and asset-operation queues are cleared, and current audio stops. The Game camera targets the player again even when restarting while paused; its yaw/pitch/distance are retained. Rust recompilation and GPU recreation are unnecessary. This restart stays inside the game copy; returning to authored editing requires **Stop**.
+**Restart** uses the shared `GameHost::restart`: the entry scene and Custom states
+are restored, accumulated render commands/overrides and asset-operation queues
+are cleared, and current audio stops. A source key such as **R** may select a
+game-owned action instead; follow that game's controls. The Game camera targets
+the installed follow point again even when restarting while paused; its
+yaw/pitch/distance are retained. Rust recompilation and GPU recreation are
+unnecessary. This restart stays inside the game copy; returning to authored
+editing requires **Stop**.
 
 <a id="поля-компонентов-и-шаблоны"></a>
 
@@ -102,6 +115,11 @@ Canvas coordinates are personal settings, written separately into `.user/full/ga
 <a id="rust-custom-во-время-play"></a>
 
 ## Rust Custom during Play
+
+The Game pane shows Rust selection/Apply/preparation controls only when its game
+execution graph actually schedules Custom source IDs. Unused sources or archived
+code do not activate this panel. Hiding it preserves local source, migration and
+execution drafts. The separate Rust editor remains available for authored code.
 
 Select a connected `source_id` and click **Apply Rust**, or use **Apply Rust** in the Rust editor. Compilation runs in the background; active instances continue working. Compatible state is retained. For an incompatible schema, use **Apply with state reset**, or enter migrated state in the JSON panel and click **Apply with this state**. Entered state is applied to all instances of the selected source ID after validating the new version; rejection leaves the previous runtime active.
 

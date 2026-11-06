@@ -48,6 +48,15 @@ impl Editor {
         candidate: GraphDocument,
         label: &str,
     ) -> Result<(), String> {
+        self.commit_scene_document_with_mode(candidate, label, false)
+    }
+
+    pub(super) fn commit_scene_document_with_mode(
+        &mut self,
+        candidate: GraphDocument,
+        label: &str,
+        engine: bool,
+    ) -> Result<(), String> {
         if self.playing || self.game_workbench.is_play_session() {
             return Err("Stop Play before editing the authored scene".into());
         }
@@ -59,7 +68,7 @@ impl Editor {
         if candidate == self.document {
             return Ok(());
         }
-        self.validate_candidate(&candidate, false)?;
+        self.validate_candidate(&candidate, engine)?;
         candidate
             .game
             .as_ref()
@@ -97,6 +106,9 @@ impl Editor {
         let usages_changed = scene_resource_metadata_changed(&self.document, &candidate);
         self.game_workbench.accept_author_candidate(&candidate)?;
         self.game_workbench.error = None;
+        if engine {
+            self.policy_baseline = candidate.clone();
+        }
         self.document = candidate;
         self.changed(false);
         if usages_changed {

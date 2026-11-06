@@ -321,6 +321,7 @@ pub struct GameSnapshot {
     pub presentation_revision: u64,
     pub presentation_ids: Vec<String>,
     pub game_diagnostics: Value,
+    pub service_diagnostics: Value,
     pub device: String,
     pub world_kind: WorldKind,
     pub renderer_performance: RendererPerformance,
@@ -1493,6 +1494,7 @@ impl Actor {
             input_ack: self.input_ack,
             cancelled_input_ack: self.cancelled_input_ack,
             activity: self.host.activities(),
+            service_diagnostics: self.host.services.diagnostics(),
         });
         if let Ok(mut presentation) = self.shared.presentation.lock() {
             *presentation = Some(snapshot);

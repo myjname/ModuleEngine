@@ -120,6 +120,8 @@ pub struct Editor {
     engine_panes: BTreeMap<u64, PaneMemory>,
     project_panes: BTreeMap<u64, PaneMemory>,
     panel_registry: Vec<panes::ModulePanelRegistration>,
+    module_document_instance: u64,
+    module_tool_states: BTreeMap<u32, panes::ModuleToolState>,
     active_object: Option<u64>,
     authored_object_ids: std::collections::BTreeSet<u64>,
     diagnostic_personal_root: Option<PathBuf>,
@@ -474,6 +476,8 @@ impl Editor {
             engine_panes: BTreeMap::new(),
             project_panes: BTreeMap::new(),
             panel_registry: vec![],
+            module_document_instance: panes::next_tool_identity(),
+            module_tool_states: BTreeMap::new(),
             active_object: Some(1),
             authored_object_ids: std::collections::BTreeSet::new(),
             diagnostic_personal_root,
@@ -521,6 +525,15 @@ impl Editor {
             false,
             panes::participating_modules_panel,
         );
+        if let Err(error) = editor.register_stateful_module_tool(
+            110,
+            "g1.rules",
+            "Crate Garden Level Palette",
+            false,
+            module_engine_g1::grid_ui::draw_tool,
+        ) {
+            editor.status = error;
+        }
         editor.load_personal_layouts();
         if let Err(error) = editor.scripts.set_asset_root(&editor.project_asset_root()) {
             editor.status = error;
@@ -1154,6 +1167,10 @@ impl Editor {
     }
 
     fn save(&mut self) -> bool {
+        if let Err(error) = self.require_resolved_module_tools("saving") {
+            self.status = error;
+            return false;
+        }
         if let Err(error) = self.validate_candidate(&self.document, self.can_author_engine()) {
             self.status = error;
             return false;
@@ -1280,6 +1297,7 @@ impl Editor {
                 self.history = SnapshotHistory::new(self.document.clone(), 200);
                 self.history_dirty = false;
                 self.compile_connected_scripts();
+                self.adopt_module_tool_document();
                 self.status = format!("Opened: {}", self.path);
                 true
             }
@@ -1792,6 +1810,13 @@ impl Editor {
     }
 
     fn tick_simulation(&mut self, dt: f64) {
+        if self.playing
+            && let Err(error) = self.require_resolved_module_tools("Play")
+        {
+            self.playing = false;
+            self.status = error;
+            return;
+        }
         if self.document.game.is_some() {
             // Game may already be open before Play. Refresh its stopped copy
             // from author data before graphics sync can accept that document.
@@ -1958,6 +1983,11 @@ impl Editor {
             }
         }
         if !was_playing && self.playing {
+            if let Err(error) = self.require_resolved_module_tools("Play") {
+                self.playing = false;
+                self.status = error;
+                return;
+            }
             self.cancel_active_scene_gestures();
             // Refresh in place if cancelling an unfinished author gesture
             // changed the source after Game's local Play button was pressed.
@@ -2176,7 +2206,13 @@ impl Editor {
                 .small_button(if self.playing { "Pause" } else { "Start" })
                 .clicked()
             {
-                self.playing = !self.playing;
+                if self.playing {
+                    self.playing = false;
+                } else if let Err(error) = self.require_resolved_module_tools("Play") {
+                    self.status = error;
+                } else {
+                    self.playing = true;
+                }
             }
             if ui.small_button("Reset").clicked() {
                 self.runtime = None;

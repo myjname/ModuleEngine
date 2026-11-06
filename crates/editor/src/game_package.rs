@@ -19,51 +19,8 @@ pub(crate) fn selected_features(
 ) -> Result<BTreeSet<String>, String> {
     let composition = crate::host::composition_at(backend)?;
     crate::engine_profiles::validate(document, backend)?;
-    let activity = composition.activity(document)?;
-    let mut features = BTreeSet::from(["ui".into()]);
-    let required = composition.required_contracts(document)?;
-    let builtin = module_engine_core::SystemRegistry::builtin();
-    for (feature, catalog) in [
-        ("arpg", module_engine_arpg::registry()),
-        ("puzzle", module_engine_project_puzzle::registry()),
-    ] {
-        if required
-            .module_versions
-            .keys()
-            .any(|id| builtin.module_version(id).is_none() && catalog.module_version(id).is_some())
-        {
-            features.insert(feature.into());
-        }
-    }
-    if activity.modules.contains("render.vulkan") {
-        features.insert("vulkan".into());
-    }
-    if let Some(game) = &document.game {
-        for contribution in composition
-            .systems
-            .active_game_contributions(&game.execution)
-        {
-            match contribution.id.as_str() {
-                "arpg.presentation" => {
-                    features.insert("arpg".into());
-                }
-                "puzzle.presentation" => {
-                    features.insert("puzzle".into());
-                }
-                _ => {}
-            }
-            for request in (contribution.service_requests)(game)? {
-                if request.id == "audio.wav" {
-                    features.insert("audio".into());
-                } else {
-                    return Err(format!(
-                        "Player has no compiled feature mapping for service '{}'",
-                        request.id
-                    ));
-                }
-            }
-        }
-    }
+    let features = module_engine_player::native_features::installed_native_features()?
+        .select_document(document, &composition)?;
     let subset = module_engine_player::composition_for_features(backend, &features)?;
     module_engine_project::EngineProfile::from_document(document)?.validate_with_sdk(
         document,

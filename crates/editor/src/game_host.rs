@@ -3,7 +3,6 @@ pub use crate::game_templates::{demo_document, puzzle_document};
 use module_engine_core::*;
 pub use module_engine_host::{GameHost, ScriptSlot, script_ids};
 use module_engine_host::{HostOptions, RenderMode};
-use module_engine_host_services::{HostServiceRegistry, install_audio};
 use module_engine_script::CompiledProgramStore;
 use std::{
     collections::BTreeMap,
@@ -126,8 +125,9 @@ pub fn new_at_with_controls(
         }
     }
     let composition = crate::host::composition_at(backend_root)?;
-    let mut services = HostServiceRegistry::new();
-    install_audio(&mut services)?;
+    // Play profiles belong to this authored project's personal data, never the
+    // shipping Player's per-user profile or its installed Engine/SDK directory.
+    let services = module_engine_player::service_registry_at(root.join(".user/editor-play-state"))?;
     GameHost::build_cancellable_with_store(
         document,
         composition,

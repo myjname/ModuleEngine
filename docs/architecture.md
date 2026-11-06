@@ -18,7 +18,17 @@ The project stores its architecture, authored scenes, and source code in editabl
 | module-engine-custom | Partial visual representations of Rust, source-span edits, and preservation of opaque text. |
 | module-engine-script | Rust worker compilation, persistent process, bounded JSON-lines IPC, and explicitly declared state with validate/commit/reject. |
 | module-engine-project | Document history, checkpoints, diff/merge, migration, asset manifests, and dependency export. |
-| module-engine-editor | Native egui/eframe UI, GameHost, scene/execution editor, Full/Team policies, and a separate Player mode. |
+| module-engine-game-kit | Independently selected pure grid, history, campaign and action features. No Core, window, renderer or game dependency; consumers own their rules and payload validation. |
+| module-engine-host | Shared GameHost/GameWorker, content, Custom, renderer and explicitly requested services; independent of Editor and game packages. |
+| module-engine-host-services | Optional owned audio and versioned persistence services. The application chooses the writable state root; games own opaque save payloads. |
+| module-engine-player | Separate feature-selected native game application, UI contribution dispatch and composition-root native package metadata. No production dependency on Editor. |
+| module-engine-editor | Native egui/eframe UI, scene/execution editor and Full/Team policy; uses shared Host and Player presentation contracts. Registered immutable tools propose validated authored edits. |
+
+The [G1 module plan](g1-modular-plan.md) distinguishes helper-library features,
+registered executable systems, optional native services and source-installed UI/tools.
+They are different extension contracts, not interchangeable graph nodes. Native
+export resolves required owner/presentation/service metadata through a shared
+catalog; generic export does not identify games by their presentation names.
 
 <a id="два-маршрута-исполнения"></a>
 

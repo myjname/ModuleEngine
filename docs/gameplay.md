@@ -59,6 +59,15 @@ The active contribution's `begin_tick` hook prepares this frame before all
 scheduled systems, including source controllers, without changing their authored
 order.
 
+For an optional source-owned visual pose, register `GamePoseProjection` with
+`SystemRegistry::register_pose_projection` after its `GameContribution`. Consume
+the fallible `session.presentation_snapshot()` before content/import expansion;
+`snapshot()` remains the raw world/provider projection. The hook returns only
+object-ID/model pairs and runs only for an active contribution. The
+[Host pose contract](shared-game-host.md#fixed-simulation-and-interpolated-presentation)
+defines identity, finite affine matrices, conflicting-owner rejection and visual
+failure behavior. Late `decorate_snapshot` material feedback remains unchanged.
+
 ## Melee feedback
 
 Editor Play and the standalone Player use the same combat presentation. While the
